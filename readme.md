@@ -35,48 +35,61 @@ A self-hosted, web-based application for managing and downloading your personal 
 ### Prerequisites
 
 - Docker & Docker Compose
-- Git (for cloning the repository)
 
 ### Installation
 
-1.  **Clone the Repository:**
-    Open a terminal on your host machine and clone the project repository.
+1.  **Create a Project Directory:**
+    On your server, create a dedicated folder where you will store the `docker-compose.yml` file and the application's persistent data.
 
     ```bash
-    git clone https://github.com/ishbuggy/audiobookup.git
+    mkdir audiobookup
     cd audiobookup
     ```
 
-2.  **Configure Your Environment:**
-    The project includes a `docker-compose.yml` file. Before launching, you need to edit this file to set your user permissions and timezone.
-
-    Open the `docker-compose.yml` file and find the `environment` section:
-
-    ```yaml
-    environment:
-        - PUID=1000
-        - PGID=1000
-        - TZ=Etc/UTC
-    ```
-
-    - **`PUID` and `PGID`:** Change `1000` to your user's ID to prevent file permission issues inside the container. You can find your ID by running the `id` command in your terminal.
-    - **`TZ`:** Change `Etc/UTC` to your local timezone (e.g., `America/New_York`, `Europe/London`). A full list can be found [here](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones). This is crucial for ensuring scheduled tasks run at the correct local time.
-
-3.  **(Optional) Configure Data Paths:**
-    By default, the application will create two new folders inside your project directory:
-    - `appdata/`: For all application configuration and database files.
-    - `audiobooks/`: For your final converted media files.
-
-    If you want to store this data elsewhere (e.g., on a dedicated media server or for Unraid), you can edit the `volumes` section in `docker-compose.yml` and replace the relative paths (`./appdata/...`) with **absolute paths** (e.g., `/mnt/user/appdata/audiobookup/...`).
-
-4.  **Launch the Application:**
-    From inside the `audiobookup` project directory, run the following command. This will build the Docker image for the first time and start the container in the background.
+2.  **Create the `docker-compose.yml` file:**
+    Inside the `audiobookup` directory, create a new file named `docker-compose.yml`.
 
     ```bash
-    docker compose up --build -d
+    nano docker-compose.yml
     ```
 
-5.  **Access the Web Interface:**
+3.  **Paste the following content into the file:**
+    This configuration will pull the pre-built, ready-to-run image from GitHub.
+
+    ```yaml
+    services:
+        audiobookup:
+            image: ghcr.io/ishbuggy/audiobookup:v0.14.0 # Update the tag for new releases
+            container_name: audiobookup
+            ports:
+                - "13300:13300"
+            environment:
+                - PUID=1000
+                - PGID=1000
+                - TZ=Etc/UTC
+            volumes:
+                - ./appdata/config:/config
+                - ./appdata/database:/database
+                - ./audiobooks:/data
+            restart: unless-stopped
+    ```
+
+4.  **Configure Your Environment:**
+    Before launching, you must edit the `environment` section in the file you just created:
+    - **`PUID` and `PGID`:** Change `1000` to your user's ID to prevent file permission issues. You can find your ID by running the `id` command in your terminal (on Unraid, this is typically `99` and `100`).
+    - **`TZ`:** Change `Etc/UTC` to your local timezone (e.g., `America/New_York`, `Europe/London`). This is crucial for scheduled tasks.
+
+5.  **(Optional) Configure Data Paths:**
+    By default, data will be stored in `appdata/` and `audiobooks/` folders inside your project directory. For systems like Unraid, it is highly recommended to change these to **absolute paths** to store your data in your `appdata` and `media` shares (e.g., `/mnt/user/appdata/audiobookup/config:/config`).
+
+6.  **Launch the Application:**
+    From inside your `audiobookup` project directory, run the following command. This will download the image and start the container.
+
+    ```bash
+    docker compose up -d
+    ```
+
+7.  **Access the Web Interface:**
     Navigate to `http://<your-server-ip>:13300` in your web browser.
 
 ---
@@ -133,13 +146,18 @@ The dashboard is organized into a responsive two-column layout for a clear infor
 
 ## Maintenance and Troubleshooting
 
-### Updating the Application
+## Updating the Application
 
-Updating is now incredibly simple. If you have updated the source code (e.g., via `git pull`), you only need to rebuild the Docker image and restart the container.
+Updating to a new version is simple:
 
-```bash
-docker-compose up --build -d
-```
+1.  Open your `docker-compose.yml` file.
+2.  Update the image tag to the new version (e.g., change `v0.14.0` to `v0.15.0`).
+3.  Run the following commands in your project directory to download the new image and restart the container:
+
+    ```bash
+    docker compose pull
+    docker compose up -d
+    ```
 
 ### Managing Settings
 

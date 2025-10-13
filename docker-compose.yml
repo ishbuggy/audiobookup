@@ -1,14 +1,13 @@
 services:
-  audiobookup: # Renamed service to match project branding
-    # This section tells Docker Compose to build the image from the source code in this directory.
-    # This is the standard method for users cloning the project from GitHub.
+  audiobookup:
+    # This line is for end-users. It tells Docker to pull the pre-built image from
+    # the GitHub Container Registry. Update the tag to the latest release version.
+    image: ghcr.io/ishbuggy/audiobookup:v0.14.0
+
+    # This section is for development. It is ignored unless you run 'docker compose up --build'.
     build:
       context: .
       dockerfile: ./src/dockerfile
-    # ---
-    # In the future, if you publish a pre-built image to a registry like Docker Hub,
-    # you would comment out the 'build' section above and use 'image' instead.
-    # image: yourdockerhubusername/audiobookup:latest
 
     container_name: audiobookup
     ports:
@@ -21,22 +20,20 @@ services:
       # Set the timezone for the container itself using a standard IANA name.
       # This should match the timezone you configure in the application's UI.
       # A list of valid timezones can be found here: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
-      - TZ=Europe/Berlin
+      - TZ=Etc/UTC
     volumes:
       # --- Persistent User Data ---
       # This section maps folders on your host machine to folders inside the container.
-      # The default paths below will create data folders *relative to this file*.
       # For systems like Unraid, you may want to change these to absolute paths
       # (e.g., /mnt/user/appdata/audiobookup/config:/config).
 
-      # Volume for application configuration (settings.json, logs, cover cache)
+      # Volume for application configuration (settings.json, logs, temp files)
       - ./appdata/config:/config
 
       # Volume for critical database and Audible authentication files
       - ./appdata/database:/database
 
       # Volume for your final, converted audiobook files (.m4b)
-      # By default, this will create an 'audiobooks' folder in your project directory.
       - ./audiobooks:/data
 
     restart: unless-stopped
