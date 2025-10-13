@@ -1,0 +1,1406 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <title>AudioBookup - Settings</title>
+        <link
+            rel="icon"
+            type="image/png"
+            sizes="16x16"
+            href="{{ url_for('static', filename='img/AudioBookup_Favicon_16.png') }}"
+        />
+        <link
+            rel="icon"
+            type="image/png"
+            sizes="32x32"
+            href="{{ url_for('static', filename='img/AudioBookup_Favicon_32.png') }}"
+        />
+        <link
+            rel="icon"
+            type="image/png"
+            sizes="96x96"
+            href="{{ url_for('static', filename='img/AudioBookup_Favicon_96.png') }}"
+        />
+        <link
+            rel="apple-touch-icon"
+            sizes="144x144"
+            href="{{ url_for('static', filename='img/AudioBookup_Favicon_144.png') }}"
+        />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css" />
+        <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+    </head>
+    <body>
+        <div class="container">
+            <!-- Main Page Header -->
+            <div id="settings-page-header">
+                <h1 style="text-align: left; margin: 0"><i class="fas fa-cog"></i> Settings</h1>
+                <div class="header-controls">
+                    <button
+                        id="theme-toggle-btn"
+                        class="top-right-icon-btn"
+                        style="position: static; font-size: 1.2em"
+                        title="Toggle Theme"
+                    >
+                        <i class="fas fa-moon"></i>
+                    </button>
+                    <!-- START: Advanced Mode Toggle Location -->
+                    <div class="advanced-mode-control" title="Shows advanced options like cron scheduling">
+                        <label for="advanced-mode-toggle">Advanced Mode</label>
+                        <label class="switch">
+                            <input
+                                type="checkbox"
+                                id="advanced-mode-toggle"
+                                class="setting-input"
+                                data-path="advanced_mode_enabled"
+                                {%
+                                if
+                                settings.advanced_mode_enabled
+                                %}checked{%
+                                endif
+                                %}
+                            />
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <!-- END: Advanced Mode Toggle Location -->
+                    <a
+                        href="{{ url_for('index') }}"
+                        class="action-button"
+                        style="text-decoration: none; font-size: 1em; padding: 0.6em 1.2em"
+                    >
+                        <i class="fas fa-arrow-left"></i> Back to Dashboard
+                    </a>
+                </div>
+            </div>
+            <!-- Settings Accordion -->
+            <div class="accordion">
+                <div class="accordion-item">
+                    <button class="accordion-header">
+                        <div>
+                            <span class="accordion-title"><i class="fas fa-tasks"></i> Job Settings</span>
+                            <span class="accordion-description">Manage job concurrency and parallelism</span>
+                        </div>
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
+                    <div class="accordion-panel">
+                        <!-- Normal Mode View: Simple, auto-detected core count -->
+                        <div class="form-group simple-setting">
+                            <label for="total-cores-display">
+                                Total Processing Cores
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Set automatically based on your system (CPU cores - 1). Enable Advanced Mode for
+                                    manual control.
+                                </small>
+                            </label>
+                            <div style="display: flex; align-items: center; gap: 0.5em">
+                                <input
+                                    type="number"
+                                    id="total-cores-display"
+                                    value="{{ settings.job.download.total_processing_cores }}"
+                                    disabled
+                                />
+                                <button
+                                    id="auto-concurrency-btn"
+                                    class="action-button"
+                                    title="Auto-detect based on system hardware"
+                                >
+                                    <i class="fas fa-magic"></i> Auto-detect
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Advanced Mode View: Detailed manual controls -->
+                        <div class="form-group advanced-setting">
+                            <label for="total-processing-cores-input">
+                                Total Processing Cores
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    The global limit for all simultaneous CPU-intensive tasks (e.g., encoding).
+                                </small>
+                            </label>
+                            <input
+                                type="number"
+                                id="total-processing-cores-input"
+                                class="setting-input"
+                                data-path="job.download.total_processing_cores"
+                                value="{{ settings.job.download.total_processing_cores | default(2) }}"
+                                min="1"
+                                max="16"
+                            />
+                        </div>
+                        <div class="form-group advanced-setting">
+                            <label for="max-parallel-downloads-input">
+                                Max Parallel Downloads
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Limits how many books are downloaded from Audible at the same time.
+                                </small>
+                            </label>
+                            <input
+                                type="number"
+                                id="max-parallel-downloads-input"
+                                class="setting-input"
+                                data-path="job.download.max_parallel_downloads"
+                                value="{{ settings.job.download.max_parallel_downloads | default(2) }}"
+                                min="1"
+                                max="5"
+                            />
+                        </div>
+                    </div>
+                </div>
+
+                <div class="accordion-item">
+                    <button class="accordion-header">
+                        <!-- START: Simplified Structure -->
+                        <div>
+                            <span class="accordion-title"><i class="fas fa-folder"></i> File & Folder Naming</span>
+                            <span class="accordion-description">Define the output file path and name</span>
+                        </div>
+                        <i class="fas fa-chevron-down"></i>
+                        <!-- END: Simplified Structure -->
+                    </button>
+                    <div class="accordion-panel">
+                        <div class="form-group" style="flex-direction: column; align-items: flex-start">
+                            <label for="naming-template" style="margin-bottom: 0.5em">Folder/File Name Template:</label>
+                            <input
+                                type="text"
+                                id="naming-template"
+                                class="setting-input"
+                                data-path="naming.template"
+                                style="width: 100%; box-sizing: border-box"
+                                value="{{ settings.naming.template | default('{author}/{title}') }}"
+                            />
+                            <small style="margin-top: 0.75em; color: #6c757d">
+                                Placeholders: <code>{author}</code>, <code>{title}</code>, <code>{series}</code>,
+                                <code>{series_part}</code>
+                            </small>
+                        </div>
+                    </div>
+                </div>
+                <div class="accordion-item">
+                    <button class="accordion-header">
+                        <!-- START: Simplified Structure -->
+                        <div>
+                            <span class="accordion-title"><i class="fas fa-sliders-h"></i> Conversion Settings</span>
+                            <span class="accordion-description">Control audio quality and format</span>
+                        </div>
+                        <i class="fas fa-chevron-down"></i>
+                        <!-- END: Simplified Structure -->
+                    </button>
+                    <div class="accordion-panel">
+                        <div class="form-group">
+                            <label for="conversion-quality">Audio Quality:</label>
+                            <!-- prettier-ignore -->
+                            <select id="conversion-quality" class="setting-input" data-path="conversion.quality">
+                                <option value="High" {% if settings.conversion.quality == 'High' %}selected{% endif %}>High (AAC, ~128 kbps)</option>
+                                <option value="Standard" {% if settings.conversion.quality == 'Standard' %}selected{% endif %}>Standard (AAC, ~96 kbps)</option>
+                                <option value="Low" {% if settings.conversion.quality == 'Low' %}selected{% endif %}>Low (AAC, ~64 kbps)</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                <div class="accordion-item">
+                    <button class="accordion-header">
+                        <!-- START: Simplified Structure -->
+                        <div>
+                            <span class="accordion-title"><i class="fas fa-shield-alt"></i> Audible Connection</span>
+                            <span class="accordion-description">Manually check your login status with Audible</span>
+                        </div>
+                        <i class="fas fa-chevron-down"></i>
+                        <!-- END: Simplified Structure -->
+                    </button>
+                    <div class="accordion-panel">
+                        <div class="form-group" style="flex-direction: column; align-items: flex-start; gap: 1em">
+                            <button id="run-audible-auth-check-btn" class="action-button" style="font-size: 1em">
+                                Run Connection Check
+                            </button>
+                            <div id="audible-auth-check-result" style="font-size: 0.9em; min-height: 1.2em"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="accordion-item">
+                    <button class="accordion-header" id="tasks-accordion-header">
+                        <!-- START: Simplified Structure -->
+                        <div>
+                            <span class="accordion-title"><i class="fas fa-clock"></i> Scheduled Tasks</span>
+                            <span class="accordion-description">Configure automated background tasks</span>
+                        </div>
+                        <i class="fas fa-chevron-down"></i>
+                        <!-- END: Simplified Structure -->
+                    </button>
+                    <div class="accordion-panel">
+                        <div class="form-group">
+                            <label for="timezone-select">
+                                Scheduler Timezone:
+                                <small style="display: block; font-weight: normal; color: #6c757d"
+                                    >Sets the timezone for all daily and cron schedules.</small
+                                >
+                            </label>
+                            <!-- prettier-ignore -->
+                            <select id="timezone-select" class="setting-input" data-path="tasks.timezone">
+                                <option value="UTC" {% if settings.tasks.timezone == 'UTC' %}selected{% endif %}>UTC</option>
+                                <option value="Europe/London" {% if settings.tasks.timezone == 'Europe/London' %}selected{% endif %}>Europe/London</option>
+                                <option value="Europe/Berlin" {% if settings.tasks.timezone == 'Europe/Berlin' %}selected{% endif %}>Europe/Berlin</option>
+                                <option value="America/New_York" {% if settings.tasks.timezone == 'America/New_York' %}selected{% endif %}>America/New York (ET)</option>
+                                <option value="America/Chicago" {% if settings.tasks.timezone == 'America/Chicago' %}selected{% endif %}>America/Chicago (CT)</option>
+                                <option value="America/Denver" {% if settings.tasks.timezone == 'America/Denver' %}selected{% endif %}>America/Denver (MT)</option>
+                                <option value="America/Los_Angeles" {% if settings.tasks.timezone == 'America/Los_Angeles' %}selected{% endif %}>America/Los Angeles (PT)</option>
+                                <option value="Australia/Sydney" {% if settings.tasks.timezone == 'Australia/Sydney' %}selected{% endif %}>Australia/Sydney</option>
+                                <option value="Asia/Tokyo" {% if settings.tasks.timezone == 'Asia/Tokyo' %}selected{% endif %}>Asia/Tokyo</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="audible-auth-check-interval">Audible Connection Check Interval (hours):</label>
+                            <input
+                                type="number"
+                                id="audible-auth-check-interval"
+                                class="setting-input"
+                                data-path="tasks.audible_auth_check_interval_hours"
+                                value="{{ settings.tasks.audible_auth_check_interval_hours | default(6) }}"
+                                min="1"
+                                max="24"
+                            />
+                        </div>
+
+                        <!-- START: FAST SYNC SCHEDULE UI -->
+                        <div class="setting-item toggle-control" style="border-top: 1px solid #e9ecef">
+                            <label for="auto-fast-sync-toggle">
+                                <strong>Enable Automatic Fast Sync (API Only)</strong>
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Checks for new books and metadata. Runs quickly and does not use the filesystem.
+                                </small>
+                            </label>
+                            <div style="display: flex; align-items: center; gap: 1em">
+                                <button
+                                    class="run-now-btn advanced-setting"
+                                    data-job-type="FAST_SYNC"
+                                    title="Run Fast Sync Now"
+                                    disabled
+                                >
+                                    <i class="fas fa-play"></i>
+                                </button>
+                                <label class="switch">
+                                    <input
+                                        type="checkbox"
+                                        id="auto-fast-sync-toggle"
+                                        class="setting-input"
+                                        data-path="tasks.is_auto_fast_sync_enabled"
+                                        {%
+                                        if
+                                        settings.tasks.is_auto_fast_sync_enabled
+                                        %}checked{%
+                                        endif
+                                        %}
+                                    />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="setting-item-group" id="auto-fast-sync-options">
+                            <div class="form-group" style="gap: 2em">
+                                <label>Schedule Type:</label>
+                                <div style="flex-grow: 1"></div>
+                                <label class="radio-group-item">
+                                    <input type="radio" name="fast_sync_schedule_type" value="interval" />
+                                    <span class="radio-circle"><span class="radio-dot"></span></span>
+                                    Interval
+                                </label>
+                                <label class="radio-group-item">
+                                    <input type="radio" name="fast_sync_schedule_type" value="daily" />
+                                    <span class="radio-circle"><span class="radio-dot"></span></span>
+                                    Daily
+                                </label>
+                                <label class="radio-group-item advanced-setting">
+                                    <input type="radio" name="fast_sync_schedule_type" value="cron" />
+                                    <span class="radio-circle"><span class="radio-dot"></span></span>
+                                    Cron
+                                </label>
+                                <label
+                                    class="radio-group-item"
+                                    id="fast_sync-custom-label"
+                                    style="display: none; color: #6c757d; font-style: italic"
+                                    >Custom</label
+                                >
+                            </div>
+                            <div class="form-group" id="fast_sync-interval-container">
+                                <label for="fast_sync-interval-hours">Run every (hours):</label>
+                                <input type="number" id="fast_sync-interval-hours" value="4" min="1" max="168" />
+                            </div>
+                            <div class="form-group" id="fast_sync-daily-container">
+                                <label for="fast_sync-daily-time">Run at (time):</label>
+                                <input type="time" id="fast_sync-daily-time" value="02:00" />
+                            </div>
+                            <div class="setting-item advanced-setting" id="fast_sync-cron-container">
+                                <div class="cron-input-group">
+                                    <input
+                                        type="text"
+                                        id="fast_sync-cron-minute"
+                                        placeholder="M"
+                                        title="Minute (0-59)"
+                                    />
+                                    <input type="text" id="fast_sync-cron-hour" placeholder="H" title="Hour (0-23)" />
+                                    <input
+                                        type="text"
+                                        id="fast_sync-cron-dom"
+                                        placeholder="DM"
+                                        title="Day of Month (1-31)"
+                                    />
+                                    <input
+                                        type="text"
+                                        id="fast_sync-cron-month"
+                                        placeholder="Mth"
+                                        title="Month (1-12)"
+                                    />
+                                    <input
+                                        type="text"
+                                        id="fast_sync-cron-dow"
+                                        placeholder="DW"
+                                        title="Day of Week (0-6)"
+                                    />
+                                </div>
+                                <small>Paste a full cron string into the first box to auto-populate.</small>
+                            </div>
+                        </div>
+                        <!-- END: FAST SYNC SCHEDULE UI -->
+
+                        <!-- START: DEEP SYNC SCHEDULE UI -->
+                        <div class="setting-item toggle-control" style="border-top: 1px solid #e9ecef">
+                            <label for="auto-deep-sync-toggle">
+                                <strong>Enable Automatic Deep Sync (Full Scan)</strong>
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Performs a Fast Sync, then scans all local files. Use less frequently.
+                                </small>
+                            </label>
+                            <div style="display: flex; align-items: center; gap: 1em">
+                                <button
+                                    class="run-now-btn advanced-setting"
+                                    data-job-type="DEEP_SYNC"
+                                    title="Run Deep Sync Now"
+                                    disabled
+                                >
+                                    <i class="fas fa-play"></i>
+                                </button>
+                                <label class="switch">
+                                    <input
+                                        type="checkbox"
+                                        id="auto-deep-sync-toggle"
+                                        class="setting-input"
+                                        data-path="tasks.is_auto_deep_sync_enabled"
+                                        {%
+                                        if
+                                        settings.tasks.is_auto_deep_sync_enabled
+                                        %}checked{%
+                                        endif
+                                        %}
+                                    />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="setting-item-group" id="auto-deep-sync-options">
+                            <div class="form-group" style="gap: 2em">
+                                <label>Schedule Type:</label>
+                                <div style="flex-grow: 1"></div>
+                                <label class="radio-group-item">
+                                    <input type="radio" name="deep_sync_schedule_type" value="interval" />
+                                    <span class="radio-circle"><span class="radio-dot"></span></span>
+                                    Interval
+                                </label>
+                                <label class="radio-group-item">
+                                    <input type="radio" name="deep_sync_schedule_type" value="daily" />
+                                    <span class="radio-circle"><span class="radio-dot"></span></span>
+                                    Daily
+                                </label>
+                                <label class="radio-group-item advanced-setting">
+                                    <input type="radio" name="deep_sync_schedule_type" value="cron" />
+                                    <span class="radio-circle"><span class="radio-dot"></span></span>
+                                    Cron
+                                </label>
+                                <label
+                                    class="radio-group-item"
+                                    id="deep_sync-custom-label"
+                                    style="display: none; color: #6c757d; font-style: italic"
+                                    >Custom</label
+                                >
+                            </div>
+                            <div class="form-group" id="deep_sync-interval-container">
+                                <label for="deep_sync-interval-hours">Run every (hours):</label>
+                                <input type="number" id="deep_sync-interval-hours" value="24" min="2" max="168" />
+                            </div>
+                            <div class="form-group" id="deep_sync-daily-container">
+                                <label for="deep_sync-daily-time">Run at (time):</label>
+                                <input type="time" id="deep_sync-daily-time" value="03:00" />
+                            </div>
+                            <div class="setting-item advanced-setting" id="deep_sync-cron-container">
+                                <div class="cron-input-group">
+                                    <input
+                                        type="text"
+                                        id="deep_sync-cron-minute"
+                                        placeholder="M"
+                                        title="Minute (0-59)"
+                                    />
+                                    <input type="text" id="deep_sync-cron-hour" placeholder="H" title="Hour (0-23)" />
+                                    <input
+                                        type="text"
+                                        id="deep_sync-cron-dom"
+                                        placeholder="DM"
+                                        title="Day of Month (1-31)"
+                                    />
+                                    <input
+                                        type="text"
+                                        id="deep_sync-cron-month"
+                                        placeholder="Mth"
+                                        title="Month (1-12)"
+                                    />
+                                    <input
+                                        type="text"
+                                        id="deep_sync-cron-dow"
+                                        placeholder="DW"
+                                        title="Day of Week (0-6)"
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                        <!-- END: DEEP SYNC SCHEDULE UI -->
+
+                        <!-- START: NEW PROCESS SCHEDULE UI -->
+                        <div class="setting-item toggle-control" style="border-top: 1px solid #e9ecef">
+                            <label for="auto-process-toggle"
+                                ><strong>Enable Automatic Processing/Downloading</strong></label
+                            >
+                            <div style="display: flex; align-items: center; gap: 1em">
+                                <button
+                                    class="run-now-btn advanced-setting"
+                                    data-job-type="PROCESS"
+                                    title="Run Process Job Now"
+                                    disabled
+                                >
+                                    <i class="fas fa-play"></i>
+                                </button>
+                                <label class="switch">
+                                    <input
+                                        type="checkbox"
+                                        id="auto-process-toggle"
+                                        class="setting-input"
+                                        data-path="tasks.is_auto_process_enabled"
+                                        {%
+                                        if
+                                        settings.tasks.is_auto_process_enabled
+                                        %}checked{%
+                                        endif
+                                        %}
+                                    />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="setting-item-group" id="auto-process-options">
+                            <div class="form-group" style="gap: 2em">
+                                <label>Schedule Type:</label>
+                                <div style="flex-grow: 1"></div>
+                                <label class="radio-group-item">
+                                    <input type="radio" name="process_schedule_type" value="interval" />
+                                    <span class="radio-circle"><span class="radio-dot"></span></span>
+                                    Interval
+                                </label>
+                                <label class="radio-group-item">
+                                    <input type="radio" name="process_schedule_type" value="daily" />
+                                    <span class="radio-circle"><span class="radio-dot"></span></span>
+                                    Daily
+                                </label>
+                                <label class="radio-group-item advanced-setting">
+                                    <input type="radio" name="process_schedule_type" value="cron" />
+                                    <span class="radio-circle"><span class="radio-dot"></span></span>
+                                    Cron
+                                </label>
+                                <label
+                                    class="radio-group-item"
+                                    id="process-custom-label"
+                                    style="display: none; color: #6c757d; font-style: italic"
+                                    >Custom</label
+                                >
+                            </div>
+                            <div class="form-group" id="process-interval-container">
+                                <label for="process-interval-hours">Run every (hours):</label>
+                                <input type="number" id="process-interval-hours" value="24" min="2" max="168" />
+                            </div>
+                            <div class="form-group" id="process-daily-container">
+                                <label for="process-daily-time">Run at (time):</label>
+                                <input type="time" id="process-daily-time" value="04:00" />
+                            </div>
+                            <div class="setting-item advanced-setting" id="process-cron-container">
+                                <div class="cron-input-group">
+                                    <input type="text" id="process-cron-minute" placeholder="M" title="Minute (0-59)" />
+                                    <input type="text" id="process-cron-hour" placeholder="H" title="Hour (0-23)" />
+                                    <input
+                                        type="text"
+                                        id="process-cron-dom"
+                                        placeholder="DM"
+                                        title="Day of Month (1-31)"
+                                    />
+                                    <input type="text" id="process-cron-month" placeholder="Mth" title="Month (1-12)" />
+                                    <input
+                                        type="text"
+                                        id="process-cron-dow"
+                                        placeholder="DW"
+                                        title="Day of Week (0-6)"
+                                    />
+                                </div>
+                            </div>
+                            <div
+                                class="form-group"
+                                style="
+                                    flex-direction: column;
+                                    align-items: flex-start;
+                                    gap: 0.5em;
+                                    border-top: 1px solid #e9ecef;
+                                "
+                            >
+                                <label style="padding-top: 1em">Automatically process books with these statuses:</label>
+                                <div style="display: flex; flex-direction: column; gap: 0.5em; padding-left: 1em">
+                                    <label
+                                        ><input
+                                            type="checkbox"
+                                            class="setting-input"
+                                            data-path="tasks.auto_process_new"
+                                            {%
+                                            if
+                                            settings.tasks.auto_process_new
+                                            %}checked{%
+                                            endif
+                                            %}
+                                        />
+                                        NEW</label
+                                    >
+                                    <label
+                                        ><input
+                                            type="checkbox"
+                                            class="setting-input"
+                                            data-path="tasks.auto_process_missing"
+                                            {%
+                                            if
+                                            settings.tasks.auto_process_missing
+                                            %}checked{%
+                                            endif
+                                            %}
+                                        />
+                                        MISSING</label
+                                    >
+                                    <label
+                                        ><input
+                                            type="checkbox"
+                                            id="auto-process-error-checkbox"
+                                            class="setting-input"
+                                            data-path="tasks.auto_process_error"
+                                            {%
+                                            if
+                                            settings.tasks.auto_process_error
+                                            %}checked{%
+                                            endif
+                                            %}
+                                        />
+                                        ERROR</label
+                                    >
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="process-on-sync-checkbox"
+                                    >Trigger immediate processing when new books are found by a sync</label
+                                >
+                                <label class="switch">
+                                    <input
+                                        type="checkbox"
+                                        id="process-on-sync-checkbox"
+                                        class="setting-input"
+                                        data-path="tasks.process_new_on_sync"
+                                        {%
+                                        if
+                                        settings.tasks.process_new_on_sync
+                                        %}checked{%
+                                        endif
+                                        %}
+                                    />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <!-- END: NEW PROCESS SCHEDULE UI -->
+                    </div>
+                </div>
+                <!-- START: AUTHENTICATION ACCORDION -->
+                <div class="accordion-item">
+                    <button class="accordion-header">
+                        <div>
+                            <span class="accordion-title"
+                                ><i class="fas fa-user-shield"></i> Authentication Settings</span
+                            >
+                            <span class="accordion-description">Change your administrator username and password</span>
+                        </div>
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
+                    <div class="accordion-panel">
+                        <div class="form-group">
+                            <label for="new_username">
+                                Username
+                                <small style="display: block; font-weight: normal; color: #6c757d"
+                                    >Current username is: <strong>{{ settings.username or 'admin' }}</strong></small
+                                >
+                            </label>
+                            <input
+                                type="text"
+                                id="new_username"
+                                name="new_username"
+                                value="{{ settings.username or 'admin' }}"
+                                class="setting-input"
+                                data-path="username"
+                            />
+                        </div>
+                        <div class="form-group">
+                            <label for="new_password">
+                                New Password
+                                <small style="display: block; font-weight: normal; color: #6c757d"
+                                    >Leave blank to keep the current password.</small
+                                >
+                            </label>
+                            <input
+                                type="password"
+                                id="new_password"
+                                name="new_password"
+                                minlength="8"
+                                class="setting-input"
+                                data-path="password"
+                            />
+                        </div>
+                        <div class="form-group">
+                            <label for="confirm_password">Confirm New Password</label>
+                            <input type="password" id="confirm_password" name="confirm_password" minlength="8" />
+                        </div>
+                    </div>
+                </div>
+                <!-- END: AUTHENTICATION ACCORDION -->
+            </div>
+
+            <!-- Page Footer with Buttons -->
+            <div
+                style="
+                    padding-top: 20px;
+                    border-top: 1px solid #dee2e6;
+                    display: flex;
+                    justify-content: space-between;
+                    margin-top: 2em;
+                "
+            >
+                <div>
+                    <button
+                        id="export-settings-btn"
+                        class="action-button"
+                        style="font-size: 1em; background: #e9ecef; border: 1px solid #dee2e6; color: #495057"
+                    >
+                        <i class="fas fa-file-export"></i> Export as JSON
+                    </button>
+                    <button
+                        id="import-settings-btn"
+                        class="action-button"
+                        style="font-size: 1em; background: #e9ecef; border: 1px solid #dee2e6; color: #495057"
+                    >
+                        <i class="fas fa-file-import"></i> Import from JSON
+                    </button>
+                </div>
+                <button id="save-settings-btn" class="action-button blue">Save Changes</button>
+            </div>
+        </div>
+        <div id="confirmation-modal" class="modal-overlay">
+            <div class="modal-content" style="max-width: 450px; text-align: center">
+                <div class="modal-header">
+                    <h2 id="confirmation-title" style="width: 100%; text-align: center">
+                        <i class="fas fa-exclamation-triangle" style="color: #dc3545"></i> Are you sure?
+                    </h2>
+                </div>
+                <div class="modal-body">
+                    <p id="confirmation-message" style="font-size: 1.1em"></p>
+                </div>
+                <div class="modal-footer" style="justify-content: center; gap: 1em">
+                    <button id="confirmation-cancel-btn" class="action-button">Cancel</button>
+                    <button id="confirmation-confirm-btn" class="action-button blue">Confirm</button>
+                </div>
+            </div>
+        </div>
+
+        <input type="file" id="import-file-input" style="display: none" accept=".json" />
+
+        <div id="custom-alert-modal" class="modal-overlay">
+            <div class="modal-content" style="max-width: 450px; text-align: center">
+                <div class="modal-header">
+                    <h2 id="custom-alert-title" style="width: 100%; text-align: center"></h2>
+                </div>
+                <div class="modal-body">
+                    <p id="custom-alert-message" style="font-size: 1.1em"></p>
+                </div>
+                <div class="modal-footer" style="justify-content: center">
+                    <button id="custom-alert-ok-btn" class="action-button blue">OK</button>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            // --- 1. WAIT FOR THE DOM TO BE FULLY LOADED ---
+            document.addEventListener("DOMContentLoaded", () => {
+                // --- 2. DEFINE ALL HELPER FUNCTIONS FIRST ---
+
+                /**
+                 * Recalculates and sets the maxHeight of a parent accordion panel.
+                 * This is necessary when content inside the panel changes height,
+                 * for example, when showing/hiding the cron input fields.
+                 * @param {HTMLElement} element - An element inside the accordion panel.
+                 */
+                function updateParentAccordionHeight(element) {
+                    const parentPanel = element.closest(".accordion-panel");
+                    // Check if the panel is currently open (has a maxHeight set).
+                    if (parentPanel && parentPanel.style.maxHeight) {
+                        // Use a short timeout to allow the browser's rendering engine
+                        // to update the layout before we measure the new scrollHeight.
+                        setTimeout(() => {
+                            parentPanel.style.maxHeight = parentPanel.scrollHeight + "px";
+                        }, 310); // 310ms is slightly longer than the 0.3s transition.
+                    }
+                }
+
+                /**
+                 * Handles the visual expansion and collapse of a settings group
+                 * when its master toggle is checked or unchecked.
+                 * @param {HTMLInputElement} checkbox - The main enable/disable toggle checkbox.
+                 * @param {HTMLElement} optionsGroup - The container for the related settings.
+                 */
+                function toggleOptionsGroup(checkbox, optionsGroup) {
+                    if (checkbox.checked) {
+                        // To expand, set maxHeight to the element's full scrollable height.
+                        optionsGroup.style.maxHeight = optionsGroup.scrollHeight + "px";
+                        optionsGroup.style.opacity = "1";
+                    } else {
+                        // To collapse, set maxHeight to 0.
+                        optionsGroup.style.maxHeight = "0";
+                        optionsGroup.style.opacity = "0.5";
+                    }
+                    // Ensure the parent accordion resizes to fit the change.
+                    updateParentAccordionHeight(checkbox);
+                }
+
+                /**
+                 * Displays the custom-styled modal alert.
+                 * @param {string} message - The main message content (can include HTML).
+                 * @param {string} [title='<i class...'] - The title content (can include HTML for icons).
+                 */
+                function showCustomAlert(
+                    message,
+                    title = '<i class="fas fa-exclamation-triangle" style="color: #ffc107;"></i> Warning',
+                ) {
+                    document.getElementById("custom-alert-title").innerHTML = title;
+                    document.getElementById("custom-alert-message").innerHTML = message;
+                    document.getElementById("custom-alert-modal").style.display = "flex";
+                    document.body.classList.add("modal-open");
+                }
+
+                /**
+                 * Hides the custom-styled modal alert.
+                 */
+                function closeCustomAlert() {
+                    document.getElementById("custom-alert-modal").style.display = "none";
+                    document.body.classList.remove("modal-open");
+                }
+
+                let confirmCallback = null; // To store the action for the confirm button
+
+                function showConfirmationModal(title, message, onConfirm) {
+                    document.getElementById("confirmation-title").innerHTML = title;
+                    document.getElementById("confirmation-message").textContent = message;
+                    confirmCallback = onConfirm;
+                    document.getElementById("confirmation-modal").style.display = "flex";
+                    document.body.classList.add("modal-open");
+                }
+
+                function closeConfirmationModal() {
+                    document.getElementById("confirmation-modal").style.display = "none";
+                    document.body.classList.remove("modal-open");
+                    confirmCallback = null; // Clear the callback
+                }
+                /**
+                 * Handles the API call and UI updates for the manual authentication check.
+                 * @param {HTMLButtonElement} btn - The "Run Authentication Check" button.
+                 */
+                async function handleManualAudibleAuthCheck(btn) {
+                    const resultDiv = document.getElementById("audible-auth-check-result");
+                    btn.classList.add("is-processing");
+                    btn.disabled = true;
+                    resultDiv.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Checking...';
+                    try {
+                        const response = await fetch("/api/run_audible_auth_check", { method: "POST" });
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.error || "Server error.");
+                        if (data.is_valid) {
+                            resultDiv.innerHTML =
+                                '<i class="fas fa-check-circle" style="color: #28a745;"></i> Authentication is valid.';
+                        } else {
+                            resultDiv.innerHTML = `<i class="fas fa-times-circle" style="color: #dc3545;"></i> Failed: ${data.error}`;
+                        }
+                    } catch (error) {
+                        resultDiv.innerHTML = `<i class="fas fa-exclamation-triangle"></i> Error: ${error.message}`;
+                    } finally {
+                        btn.classList.remove("is-processing");
+                        btn.disabled = false;
+                    }
+                }
+
+                /**
+                 * Factory function to create and manage an advanced scheduler widget.
+                 * Encapsulates all logic for a single schedule (sync or process).
+                 * @param {string} jobName - The base name for the job (e.g., "fast_sync").
+                 * @param {string} defaultCron - The default cron string to fall back on.
+                 * @returns {object} An object with methods to populate and generate cron strings.
+                 */
+                const setupSchedulerWidget = (jobName, defaultCron) => {
+                    // Get all DOM elements for this specific widget instance.
+                    const radioButtons = document.querySelectorAll(`input[name="${jobName}_schedule_type"]`);
+                    const intervalContainer = document.getElementById(`${jobName}-interval-container`);
+                    const intervalInput = document.getElementById(`${jobName}-interval-hours`);
+                    const dailyContainer = document.getElementById(`${jobName}-daily-container`);
+                    const dailyInput = document.getElementById(`${jobName}-daily-time`);
+                    const cronContainer = document.getElementById(`${jobName}-cron-container`);
+                    const cronInputs = {
+                        minute: document.getElementById(`${jobName}-cron-minute`),
+                        hour: document.getElementById(`${jobName}-cron-hour`),
+                        dom: document.getElementById(`${jobName}-cron-dom`),
+                        month: document.getElementById(`${jobName}-cron-month`),
+                        dow: document.getElementById(`${jobName}-cron-dow`),
+                    };
+                    const customLabel = document.getElementById(`${jobName}-custom-label`);
+
+                    // Updates which input fields (Interval, Daily, Cron) are visible.
+                    const updateVisibility = () => {
+                        const selectedType = document.querySelector(
+                            `input[name="${jobName}_schedule_type"]:checked`,
+                        )?.value;
+                        intervalContainer.style.display = selectedType === "interval" ? "flex" : "none";
+                        dailyContainer.style.display = selectedType === "daily" ? "flex" : "none";
+                        cronContainer.style.display = selectedType === "cron" ? "flex" : "none";
+                        updateParentAccordionHeight(radioButtons[0]);
+                    };
+
+                    // Parses a cron string and updates the UI to match it.
+                    const populateFromCron = (cronString) => {
+                        try {
+                            const parts = cronString.trim().split(/\s+/);
+                            if (parts.length !== 5) throw new Error("Invalid cron string length");
+                            const [minute, hour, dom, month, dow] = parts;
+                            let isSimple = false;
+
+                            // Check if the cron string matches the simple "Interval" pattern.
+                            if (
+                                minute === "0" &&
+                                hour.startsWith("*/") &&
+                                dom === "*" &&
+                                month === "*" &&
+                                dow === "*"
+                            ) {
+                                document.querySelector(
+                                    `input[name="${jobName}_schedule_type"][value="interval"]`,
+                                ).checked = true;
+                                intervalInput.value = hour.substring(2);
+                                isSimple = true;
+                                // Check if the cron string matches the simple "Daily" pattern.
+                            } else if (!isNaN(minute) && !isNaN(hour) && dom === "*" && month === "*" && dow === "*") {
+                                document.querySelector(
+                                    `input[name="${jobName}_schedule_type"][value="daily"]`,
+                                ).checked = true;
+                                dailyInput.value = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+                                isSimple = true;
+                            }
+
+                            if (isSimple) {
+                                // If it's a simple pattern, show all radio buttons and hide the "Custom" label.
+                                radioButtons.forEach((rb) => (rb.parentElement.style.display = "inline-flex"));
+                                customLabel.style.display = "none";
+                            } else {
+                                // It's a complex cron string.
+                                Object.values(cronInputs).forEach((input, i) => (input.value = parts[i]));
+                                if (document.body.classList.contains("advanced-mode")) {
+                                    // In advanced mode, select the "Cron" radio button.
+                                    document.querySelector(
+                                        `input[name="${jobName}_schedule_type"][value="cron"]`,
+                                    ).checked = true;
+                                } else {
+                                    // In simple mode, hide all radio buttons and show the "Custom" label.
+                                    radioButtons.forEach((rb) => (rb.parentElement.style.display = "none"));
+                                    customLabel.style.display = "inline-flex";
+                                }
+                            }
+                        } catch (e) {
+                            console.warn(`Could not parse cron string "${cronString}". Falling back to default.`);
+                            populateFromCron(defaultCron);
+                        }
+                        updateVisibility();
+                    };
+
+                    // Reads the current UI state and generates the corresponding cron string.
+                    const generateCron = () => {
+                        // If we are in simple mode and have a "Custom" schedule, use the hidden cron values.
+                        if (
+                            !document.body.classList.contains("advanced-mode") &&
+                            customLabel.style.display !== "none"
+                        ) {
+                            return Object.values(cronInputs)
+                                .map((i) => i.value)
+                                .join(" ");
+                        }
+                        // Otherwise, generate based on the selected radio button.
+                        const selectedType = document.querySelector(
+                            `input[name="${jobName}_schedule_type"]:checked`,
+                        ).value;
+                        if (selectedType === "interval") {
+                            const hours = Math.max(1, parseInt(intervalInput.value, 10));
+                            return `0 */${hours} * * *`;
+                        } else if (selectedType === "daily") {
+                            const [hour, minute] = dailyInput.value.split(":");
+                            return `${parseInt(minute, 10)} ${parseInt(hour, 10)} * * *`;
+                        } else {
+                            return (
+                                Object.values(cronInputs)
+                                    .map((i) => i.value)
+                                    .join(" ")
+                                    .trim() || "* * * * *"
+                            );
+                        }
+                    };
+
+                    // Add a paste listener to the first cron box for convenience.
+                    cronInputs.minute.addEventListener("paste", (event) => {
+                        const paste = (event.clipboardData || window.clipboardData).getData("text");
+                        const parts = paste.trim().split(/\s+/);
+                        if (parts.length === 5) {
+                            event.preventDefault(); // Stop the default paste action.
+                            Object.values(cronInputs).forEach((input, i) => (input.value = parts[i]));
+                        }
+                    });
+
+                    radioButtons.forEach((radio) => radio.addEventListener("change", updateVisibility));
+                    return { populateFromCron, generateCron };
+                };
+
+                // --- 3. GET ALL ELEMENT REFERENCES ---
+                const accordions = document.querySelectorAll(".accordion-header");
+                // Get references for the new sync toggles and panels.
+                const autoFastSyncToggle = document.getElementById("auto-fast-sync-toggle");
+                const autoFastSyncOptions = document.getElementById("auto-fast-sync-options");
+                const autoDeepSyncToggle = document.getElementById("auto-deep-sync-toggle");
+                const autoDeepSyncOptions = document.getElementById("auto-deep-sync-options");
+                const autoProcessToggle = document.getElementById("auto-process-toggle");
+                const autoProcessOptions = document.getElementById("auto-process-options");
+                const processErrorCheckbox = document.getElementById("auto-process-error-checkbox");
+                const customAlertOkBtn = document.getElementById("custom-alert-ok-btn");
+                const customAlertModal = document.getElementById("custom-alert-modal");
+                const saveSettingsBtn = document.getElementById("save-settings-btn");
+                const exportSettingsBtn = document.getElementById("export-settings-btn");
+                const importSettingsBtn = document.getElementById("import-settings-btn");
+                const importFileInput = document.getElementById("import-file-input");
+                const audibleAuthCheckBtn = document.getElementById("run-audible-auth-check-btn");
+                const autoConcurrencyBtn = document.getElementById("auto-concurrency-btn");
+                const concurrencyInput = document.getElementById("concurrency-input");
+                const advancedModeToggle = document.getElementById("advanced-mode-toggle");
+                const totalCoresDisplay = document.getElementById("total-cores-display");
+                const totalCoresInput = document.getElementById("total-processing-cores-input");
+
+                // --- 4. ATTACH ALL EVENT LISTENERS ---
+
+                // Create instances of the widget for all three scheduled jobs.
+                const fastSyncScheduler = setupSchedulerWidget("fast_sync", "0 */4 * * *");
+                const deepSyncScheduler = setupSchedulerWidget("deep_sync", "0 3 * * *");
+                const processScheduler = setupSchedulerWidget("process", "0 4 * * *");
+
+                // Advanced Mode Toggle
+                const setAdvancedMode = (isAdvanced) => {
+                    document.body.classList.toggle("advanced-mode", isAdvanced);
+                    // Re-fetch settings and repopulate all scheduler widgets to reflect the mode change.
+                    fetch("/api/settings")
+                        .then((res) => res.json())
+                        .then((settings) => {
+                            // --- START: MODIFICATION ---
+                            fastSyncScheduler.populateFromCron(settings.tasks.fast_sync_schedule.cron);
+                            deepSyncScheduler.populateFromCron(settings.tasks.deep_sync_schedule.cron);
+                            processScheduler.populateFromCron(settings.tasks.process_schedule.cron);
+                            // --- END: MODIFICATION ---
+                        });
+                };
+                advancedModeToggle.addEventListener("change", () => setAdvancedMode(advancedModeToggle.checked));
+
+                // Accordions
+                accordions.forEach((acc) => {
+                    acc.addEventListener("click", function () {
+                        this.classList.toggle("active");
+                        const panel = this.nextElementSibling;
+                        if (panel.style.maxHeight) {
+                            panel.style.maxHeight = null;
+                        } else {
+                            panel.style.maxHeight = panel.scrollHeight + "px";
+                        }
+                    });
+                });
+
+                // Main Enable/Disable Toggles for all three sections.
+                autoFastSyncToggle.addEventListener("change", () =>
+                    toggleOptionsGroup(autoFastSyncToggle, autoFastSyncOptions),
+                );
+                autoDeepSyncToggle.addEventListener("change", () =>
+                    toggleOptionsGroup(autoDeepSyncToggle, autoDeepSyncOptions),
+                );
+                autoProcessToggle.addEventListener("change", () =>
+                    toggleOptionsGroup(autoProcessToggle, autoProcessOptions),
+                );
+                const confirmationCancelBtn = document.getElementById("confirmation-cancel-btn");
+                const confirmationConfirmBtn = document.getElementById("confirmation-confirm-btn");
+                const confirmationModal = document.getElementById("confirmation-modal");
+
+                confirmationCancelBtn.addEventListener("click", closeConfirmationModal);
+                confirmationConfirmBtn.addEventListener("click", () => {
+                    if (typeof confirmCallback === "function") {
+                        confirmCallback();
+                    }
+                    closeConfirmationModal();
+                });
+                // Also add the window click listener for the new modal
+                window.addEventListener("click", (event) => {
+                    if (event.target == confirmationModal) closeConfirmationModal();
+                });
+                // Save Button (integrates cron generation)
+                saveSettingsBtn.addEventListener("click", async () => {
+                    const newUsername = document.getElementById("new_username").value.trim();
+                    const newPassword = document.getElementById("new_password").value;
+                    const initialUsername = "{{ settings.username or 'admin' }}";
+                    const credentialsHaveChanged = newPassword !== "" || newUsername !== initialUsername;
+                    // --- END: Credential Change Check ---
+
+                    const performSave = async () => {
+                        const settingsToSave = {};
+                        // Gather all standard settings using the data-path attribute.
+                        document.querySelectorAll(".setting-input").forEach((input) => {
+                            const path = input.dataset.path.split(".");
+                            let current = settingsToSave;
+                            for (let i = 0; i < path.length - 1; i++) {
+                                current = current[path[i]] = current[path[i]] || {};
+                            }
+                            const value =
+                                input.type === "checkbox"
+                                    ? input.checked
+                                    : input.type === "number"
+                                      ? Number(input.value)
+                                      : input.value;
+                            current[path[path.length - 1]] = value;
+                        });
+
+                        // Generate and add the cron strings from all three widgets.
+                        settingsToSave.tasks.fast_sync_schedule = { cron: fastSyncScheduler.generateCron() };
+                        settingsToSave.tasks.deep_sync_schedule = { cron: deepSyncScheduler.generateCron() };
+                        settingsToSave.tasks.process_schedule = { cron: processScheduler.generateCron() };
+
+                        // Sanity check for overly frequent schedules.
+                        const checkFrequency = (cron, name) => {
+                            const parts = cron.split(" ");
+                            const minutePart = parts[0];
+                            if (
+                                minutePart === "*" ||
+                                (minutePart.startsWith("*/") && parseInt(minutePart.substring(2)) < 5)
+                            ) {
+                                showCustomAlert(
+                                    `The schedule for the <strong>${name} job</strong> is set to run more frequently than every 5 minutes. This is not recommended and may cause issues.`,
+                                );
+                            }
+                        };
+                        checkFrequency(settingsToSave.tasks.fast_sync_schedule.cron, "Fast Sync");
+                        checkFrequency(settingsToSave.tasks.deep_sync_schedule.cron, "Deep Sync");
+                        checkFrequency(settingsToSave.tasks.process_schedule.cron, "Process");
+
+                        // Send the settings to the backend.
+                        // Send the settings to the backend.
+                        try {
+                            const response = await fetch("/api/settings", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify(settingsToSave),
+                            });
+                            if (!response.ok) throw new Error("Server returned an error.");
+
+                            // --- NEW: Handle redirect on credential change ---
+                            if (credentialsHaveChanged) {
+                                showCustomAlert(
+                                    "Credentials updated successfully! You will be logged out and redirected to the login page.",
+                                    '<i class="fas fa-check-circle" style="color: #28a745;"></i> Success',
+                                );
+                                // Wait 3 seconds then redirect to login
+                                setTimeout(() => {
+                                    window.location.href = "/login";
+                                }, 3000);
+                            } else {
+                                // Provide visual feedback on success for non-auth changes.
+                                saveSettingsBtn.textContent = "Saved!";
+                                saveSettingsBtn.classList.remove("blue"); // Remove the blue class
+                                saveSettingsBtn.classList.add("green"); // Add the green class
+
+                                setTimeout(() => {
+                                    saveSettingsBtn.textContent = "Save Changes";
+                                    saveSettingsBtn.classList.remove("green"); // Remove the green class
+                                    saveSettingsBtn.classList.add("blue"); // Add the blue class back
+                                }, 2000);
+                            }
+                        } catch (error) {
+                            showCustomAlert(
+                                `Could not save settings: ${error.message}`,
+                                '<i class="fas fa-times-circle" style="color: #dc3545;"></i> Error',
+                            );
+                        }
+                    };
+
+                    // --- Confirmation Logic ---
+                    if (credentialsHaveChanged) {
+                        showConfirmationModal(
+                            '<i class="fas fa-exclamation-triangle" style="color: #dc3545;"></i> Confirm Changes',
+                            "Changing your username or password will log you out immediately. Are you sure you want to proceed?",
+                            performSave, // The save function is the callback
+                        );
+                    } else {
+                        // If no credentials changed, save immediately without confirmation.
+                        performSave();
+                    }
+                });
+
+                // Other Button Event Listeners
+                customAlertOkBtn.addEventListener("click", closeCustomAlert);
+                window.addEventListener("click", (event) => {
+                    if (event.target == customAlertModal) closeCustomAlert();
+                });
+                audibleAuthCheckBtn.addEventListener("click", () => handleManualAudibleAuthCheck(audibleAuthCheckBtn));
+
+                // Auto Concurrency Button
+                autoConcurrencyBtn.addEventListener("click", async () => {
+                    // Get a reference to the advanced mode input field
+                    const totalCoresInput = document.getElementById("total-processing-cores-input");
+                    const icon = autoConcurrencyBtn.querySelector("i");
+                    icon.classList.remove("fa-magic");
+                    icon.classList.add("fa-spinner", "fa-spin");
+                    autoConcurrencyBtn.disabled = true;
+
+                    try {
+                        const response = await fetch("/api/get_cpu_cores");
+                        const data = await response.json();
+                        if (!response.ok || !data.success) {
+                            throw new Error(data.error || "Server returned an error.");
+                        }
+
+                        const recommended = data.recommended_concurrency;
+
+                        totalCoresDisplay.value = recommended;
+                        totalCoresInput.value = recommended;
+
+                        showCustomAlert(
+                            `Detected ${data.total_cores} CPU cores.<br>Recommended concurrency has been set to <strong>${recommended}</strong>.`,
+                            '<i class="fas fa-check-circle" style="color: #28a745;"></i> Success',
+                        );
+                    } catch (error) {
+                        showCustomAlert(
+                            `Could not auto-detect CPU cores: ${error.message}`,
+                            '<i class="fas fa-times-circle" style="color: #dc3545;"></i> Error',
+                        );
+                    } finally {
+                        icon.classList.add("fa-magic");
+                        icon.classList.remove("fa-spinner", "fa-spin");
+                        autoConcurrencyBtn.disabled = false;
+                    }
+                });
+
+                // "Run Now" Buttons
+                document.querySelectorAll(".run-now-btn").forEach((btn) => {
+                    const jobType = btn.dataset.jobType;
+                    // --- START: MODIFICATION ---
+                    // The toggle ID is now more specific, e.g., "auto-fast-sync-toggle"
+                    const toggleId = `auto-${jobType.toLowerCase().replace("_", "-")}-toggle`;
+                    const toggle = document.getElementById(toggleId);
+                    // --- END: MODIFICATION ---
+
+                    // Enable/disable the button based on the main toggle's state.
+                    const updateButtonState = () => {
+                        btn.disabled = !toggle.checked;
+                    };
+                    toggle.addEventListener("change", updateButtonState);
+
+                    btn.addEventListener("click", async () => {
+                        const icon = btn.querySelector("i");
+                        icon.classList.remove("fa-play");
+                        icon.classList.add("fa-spinner", "fa-spin");
+                        btn.disabled = true;
+
+                        try {
+                            const response = await fetch("/api/run_scheduled_job_now", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ job_type: jobType }),
+                            });
+                            const data = await response.json();
+                            if (!response.ok) throw new Error(data.error || "Failed to start job.");
+
+                            showCustomAlert(
+                                `The ${jobType.toLowerCase().replace("_", " ")} job was started successfully. You can now return to the dashboard to monitor its progress.`,
+                                '<i class="fas fa-check-circle" style="color: #28a745;"></i> Job Started',
+                            );
+                        } catch (error) {
+                            showCustomAlert(
+                                `Could not start the job: ${error.message}`,
+                                '<i class="fas fa-times-circle" style="color: #dc3545;"></i> Error',
+                            );
+                        } finally {
+                            icon.classList.add("fa-play");
+                            icon.classList.remove("fa-spinner", "fa-spin");
+                            updateButtonState(); // Re-set disabled state based on the toggle.
+                        }
+                    });
+
+                    updateButtonState(); // Set initial state on page load.
+                });
+
+                // "Process Error" Checkbox Warning
+                processErrorCheckbox.addEventListener("change", () => {
+                    if (processErrorCheckbox.checked) {
+                        showCustomAlert(
+                            "Enabling automatic processing for <strong>ERROR</strong> books is not recommended for persistent issues.<br><br>The system will only attempt to re-download each failed book <strong>ONCE</strong> automatically.",
+                        );
+                    }
+                });
+
+                // Export/Import Settings Buttons
+                exportSettingsBtn.addEventListener("click", async () => {
+                    try {
+                        const response = await fetch("/api/settings");
+                        const settings = await response.json();
+                        const blob = new Blob([JSON.stringify(settings, null, 2)], { type: "application/json" });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = "audible_downloader_settings.json";
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                    } catch (error) {
+                        showCustomAlert(
+                            "Could not export settings.",
+                            '<i class="fas fa-times-circle" style="color: #dc3545;"></i> Error',
+                        );
+                    }
+                });
+
+                importSettingsBtn.addEventListener("click", () => importFileInput.click());
+
+                importFileInput.addEventListener("change", (event) => {
+                    const file = event.target.files[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = async (e) => {
+                        try {
+                            const settings = JSON.parse(e.target.result);
+                            const response = await fetch("/api/settings", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify(settings),
+                            });
+                            if (!response.ok) throw new Error("Server rejected the settings file.");
+                            showCustomAlert(
+                                "Settings imported successfully! The page will now reload.",
+                                '<i class="fas fa-check-circle" style="color: #28a745;"></i> Success',
+                            );
+                            setTimeout(() => window.location.reload(), 2000);
+                        } catch (error) {
+                            showCustomAlert(
+                                `Error importing settings: ${error.message}`,
+                                '<i class="fas fa-times-circle" style="color: #dc3545;"></i> Error',
+                            );
+                        }
+                    };
+                    reader.readAsText(file);
+                    importFileInput.value = ""; // Clear the input for subsequent imports.
+                });
+
+                // --- 5. INITIAL PAGE LOAD ---
+                // Fetch the current settings from the backend to initialize the page state.
+                fetch("/api/settings")
+                    .then((res) => res.json())
+                    .then((settings) => {
+                        setAdvancedMode(settings.advanced_mode_enabled);
+                        updateChunkConcurrencyVisibility();
+                        // Use a timeout to ensure the UI is rendered before calculating scrollHeight.
+                        setTimeout(() => {
+                            // --- START: MODIFICATION ---
+                            // Initialize all three toggle/panel groups.
+                            toggleOptionsGroup(autoFastSyncToggle, autoFastSyncOptions);
+                            toggleOptionsGroup(autoDeepSyncToggle, autoDeepSyncOptions);
+                            toggleOptionsGroup(autoProcessToggle, autoProcessOptions);
+                            // --- END: MODIFICATION ---
+                        }, 100);
+                    });
+            });
+        </script>
+        <script>
+            document.addEventListener("DOMContentLoaded", () => {
+                // Check if the URL has the '#tasks' hash
+                if (window.location.hash === "#tasks") {
+                    const tasksHeader = document.getElementById("tasks-accordion-header");
+                    if (tasksHeader) {
+                        // --- START: Final Multi-Stage Animation Sequence ---
+
+                        // Step 1: After a delay, scroll the top of the header to the top of the viewport.
+                        setTimeout(() => {
+                            tasksHeader.scrollIntoView({ behavior: "smooth", block: "start" });
+                        }, 500); // 0.5s delay
+
+                        // Step 2: After the scroll starts, click to trigger the opening animation.
+                        setTimeout(() => {
+                            tasksHeader.click();
+                        }, 700); // 1.0s total delay
+
+                        // Step 3: Re-scroll to the SAME header AFTER the animation has finished.
+                        // This corrects the scroll position to account for the newly visible panel content.
+                        // The CSS animation is 300ms, so we wait 400ms to be safe.
+                        setTimeout(() => {
+                            tasksHeader.scrollIntoView({ behavior: "smooth", block: "start" });
+                        }, 900); // 1.4s total delay (1000ms + 400ms)
+
+                        // Step 4: Apply the highlight flash after the final scroll has settled.
+                        setTimeout(() => {
+                            const settingsToHighlight =
+                                tasksHeader.nextElementSibling.querySelectorAll(".toggle-control");
+                            settingsToHighlight.forEach((el) => {
+                                el.classList.add("highlight-flash");
+                            });
+                        }, 1100); // 2.0s total delay
+
+                        // --- END: Final Multi-Stage Animation Sequence ---
+                    }
+                }
+            });
+        </script>
+        <!-- START: SCRIPT FOR PASSWORD VALIDATION -->
+        <script>
+            // This script handles client-side validation for the new password fields.
+            const password = document.getElementById("new_password");
+            const confirm_password = document.getElementById("confirm_password");
+
+            function validatePassword() {
+                if (password.value !== confirm_password.value) {
+                    confirm_password.setCustomValidity("Passwords Don't Match");
+                } else {
+                    confirm_password.setCustomValidity("");
+                }
+            }
+            // Add event listeners to check on change or keyup
+            if (password && confirm_password) {
+                password.onchange = validatePassword;
+                confirm_password.onkeyup = validatePassword;
+            }
+        </script>
+        <!-- END: SCRIPT FOR PASSWORD VALIDATION -->
+        <script src="{{ url_for('static', filename='theme.js') }}"></script>
+    </body>
+</html>

@@ -1,0 +1,42 @@
+services:
+  audiobookup: # Renamed service to match project branding
+    # This section tells Docker Compose to build the image from the source code in this directory.
+    # This is the standard method for users cloning the project from GitHub.
+    build:
+      context: .
+      dockerfile: ./src/dockerfile
+    # ---
+    # In the future, if you publish a pre-built image to a registry like Docker Hub,
+    # you would comment out the 'build' section above and use 'image' instead.
+    # image: yourdockerhubusername/audiobookup:latest
+
+    container_name: audiobookup
+    ports:
+      - "13300:13300"
+    environment:
+      # Set to your user's ID on the host machine to avoid file permission issues.
+      # Find this by running the 'id' command in your server's terminal.
+      - PUID=1000
+      - PGID=1000
+      # Set the timezone for the container itself using a standard IANA name.
+      # This should match the timezone you configure in the application's UI.
+      # A list of valid timezones can be found here: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+      - TZ=Europe/Berlin
+    volumes:
+      # --- Persistent User Data ---
+      # This section maps folders on your host machine to folders inside the container.
+      # The default paths below will create data folders *relative to this file*.
+      # For systems like Unraid, you may want to change these to absolute paths
+      # (e.g., /mnt/user/appdata/audiobookup/config:/config).
+
+      # Volume for application configuration (settings.json, logs, cover cache)
+      - ./appdata/config:/config
+
+      # Volume for critical database and Audible authentication files
+      - ./appdata/database:/database
+
+      # Volume for your final, converted audiobook files (.m4b)
+      # By default, this will create an 'audiobooks' folder in your project directory.
+      - ./audiobooks:/data
+
+    restart: unless-stopped

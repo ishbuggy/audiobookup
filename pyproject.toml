@@ -1,0 +1,23 @@
+# This is the central configuration file for modern Python development tools.
+
+[tool.ruff]
+# Set the maximum line length. 120 is a comfortable modern standard,
+# balancing readability with the width of modern screens.
+line-length = 120
+
+[tool.ruff.lint]
+# Select the rule sets you want to enforce.
+# E, W: pycodestyle errors and warnings (the basis of PEP 8)
+# F: Pyflakes (detects unused imports, undefined variables, etc.)
+# I: isort (enforces sorted, grouped imports)
+# UP: pyupgrade (upgrades syntax to modern Python versions)
+select = ["E", "W", "F", "I", "UP"]
+
+[tool.ruff.format]
+# Define the formatting style to be similar to the `black` code formatter.
+# Use double quotes for strings where possible.
+quote-style = "double"
+# Use spaces for indentation.
+indent-style = "space"
+# This is a `black`-compatible setting for how to handle trailing commas.
+skip-magic-trailing-comma = false

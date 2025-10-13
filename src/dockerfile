@@ -1,0 +1,60 @@
+# Layer 1: Base Image
+FROM python:3.11-slim-bookworm
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+# --- START: Added Locale Configuration ---
+# Set the locale to en_US.UTF-8 to ensure proper handling of all character sets.
+ENV LANG en_US.UTF-8
+ENV LANGUAGE en_US:en
+ENV LC_ALL en_US.UTF-8
+# --- END: Added Locale Configuration ---
+
+# Layer 2: System Dependencies
+# ADDED: 'locales' package is now installed to generate the UTF-8 locale.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    sqlite3 \
+    jq \
+    coreutils \
+    curl \
+    gosu \
+    locales \
+    && sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
+    locale-gen \
+    && rm -rf /var/lib/apt/lists/*
+
+# Layer 3: Create a non-root user
+RUN useradd --system --create-home appuser
+# Set the final working directory for the running application
+WORKDIR /config
+
+# Layer 4: Python Libraries - Copy requirements.txt first to leverage build cache
+COPY src/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Layer 5: Application Source Code
+# Copy all application files to a holding directory for the entrypoint to use
+COPY src/ /app-source/
+
+# Layer 6: Entrypoint Script
+# Copy the entrypoint script to a location in the system's PATH
+COPY bin/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY bin/ /app-source/bin/
+
+# Layer 7: Set Permissions
+RUN chmod +x /usr/local/bin/entrypoint.sh
+RUN chmod +x /app-source/bin/start.sh
+
+# Layer 8: Declare volumes for persistent data
+VOLUME ["/config", "/data"]
+
+# Layer 9: Add a Healthcheck
+HEALTHCHECK --interval=1m --timeout=3s \
+  CMD curl -f http://localhost:13300/ || exit 1
+
+# Layer 10: Set up the Entrypoint
+ENTRYPOINT ["entrypoint.sh"]
+
+# Layer 11: Startup Command
+CMD ["/app-source/bin/start.sh"]
