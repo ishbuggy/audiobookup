@@ -69,6 +69,26 @@ class TaskRunner:
         self._worker_thread.start()
         log.info("TASK_RUNNER: Worker thread has started.")
 
+    def reconfigure(self):
+        """
+        Shuts down the existing worker pool and starts a new one with updated
+        settings. This allows for live changes to the concurrency level.
+        """
+        log.info("TASK_RUNNER: Reconfiguration requested. Updating worker pool...")
+
+        # 1. Gracefully shut down the old executor
+        if self.executor:
+            self.executor.shutdown(wait=True)
+            log.info("TASK_RUNNER: Old worker pool has been shut down.")
+
+        # 2. Re-read the settings from the file to get the new worker count
+        settings = load_settings()
+        self.max_workers = settings.get("job", {}).get("download", {}).get("total_processing_cores", 4)
+
+        # 3. Create a new executor with the new size
+        self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
+        log.info(f"TASK_RUNNER: New worker pool created with {self.max_workers} total threads.")
+
     def stop(self):
         """Stops the worker thread and shuts down the ThreadPoolExecutor."""
         if not self._worker_thread or not self._worker_thread.is_alive():

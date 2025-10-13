@@ -13,6 +13,8 @@ import tempfile
 import time
 from threading import Event, Lock
 
+from . import TEMP_DIR
+
 # Import the task-oriented functions and the global announcer
 from .chunked_conversion_logic import (
     _yield_progress,
@@ -24,7 +26,6 @@ from .db import get_db_connection
 from .eta_estimator import record_conversion_time
 from .logger import log
 from .settings import load_settings
-from . import TEMP_DIR
 
 # Import the task runner and task objects
 from .task_runner import Task, TaskPriority, task_runner

@@ -53,6 +53,9 @@ from audible_downloader.logger import log
 # Import the settings functions from the settings module
 from audible_downloader.settings import deep_update, load_settings, save_settings
 
+# Import the global task_runner instance
+from audible_downloader.task_runner import task_runner
+
 
 # --- Helper Functions ---
 def format_bytes(size_bytes):
@@ -149,10 +152,13 @@ def post_settings():
 
     if save_settings(updated_settings):
         log.info("SETTINGS: Application settings have been updated via the API.")
+
+        # This makes concurrency changes take effect immediately without a restart.
+        task_runner.reconfigure()
+
         # Signal the scheduler that settings might have changed.
         settings_changed_event.set()
 
-        # --- Restored Logic: Handle logout on credential change ---
         if credentials_changed:
             session.pop("username", None)
             # The JS will handle the redirect, but we confirm the logout happened.

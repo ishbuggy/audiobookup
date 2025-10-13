@@ -10,7 +10,7 @@ import atexit
 import os
 
 # Import the app and socketio objects.
-from audible_downloader import app, socketio, TEMP_DIR
+from audible_downloader import TEMP_DIR, app, socketio
 
 # Import the cleanup function.
 from audible_downloader.db import cleanup_stale_jobs
@@ -23,8 +23,6 @@ from audible_downloader.scheduler import scheduler_worker
 
 # Import our new global task_runner instance
 from audible_downloader.task_runner import task_runner
-
-import os
 
 if __name__ == "__main__":
 

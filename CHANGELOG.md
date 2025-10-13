@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2025-10-13
+
+This is a foundational release focused on making the project fully portable, maintainable, and ready for public distribution via GitHub and Docker Compose. It introduces a portable `docker-compose.yml`, a `.gitignore` to ensure a clean repository, and fixes several critical bugs related to the application lifecycle and temporary file handling.
+
+### Added
+
+- **`.gitignore` File:** Added a comprehensive `.gitignore` file to prevent local development files (`.venv`, `node_modules`), user data (`appdata/`), editor settings (`.vscode/`), and other unnecessary files from being committed to the repository.
+- **`docker-compose.override.yml` Support:** The project now implicitly supports a `docker-compose.override.yml` file, allowing users to specify their personal, absolute volume paths without modifying the main, portable compose file.
+- **Attribution Headers:** Added proper license and attribution headers to `chunked_conversion_logic.py` and `processing_logic.py` to credit the original work they were adapted from.
+- **Live Task Runner Reconfiguration:** The `TaskRunner` can now be reconfigured on-the-fly. Changes made to the "Total Processing Cores" setting in the UI now take effect immediately without requiring a container restart.
+
+### Changed
+
+- **MAJOR: `docker-compose.yml` for Portability:** The `docker-compose.yml` file has been completely overhauled to be portable and user-friendly for a public GitHub release.
+    - Replaced all hardcoded, absolute volume paths with relative paths (`./appdata`, `./audiobooks`), allowing for an "out-of-the-box" setup.
+    - Added extensive comments to guide new users through configuration.
+    - Added the standard `TZ` environment variable for robust timezone support in scheduled tasks.
+    - Renamed the service and container to `audiobookup` to match project branding.
+    - Removed the obsolete `version` tag.
+- **Temporary File Handling:** All temporary files generated during the download and conversion process are now created in a dedicated `/config/temp_processing` directory inside a mapped volume. This prevents the container's internal filesystem from filling up, fixing a critical issue for systems with limited Docker image sizes (like Unraid).
+- **`readme.md` Update:** The "Installation" and "Getting Started" sections of the README have been rewritten to reflect the new, simplified `git clone` and `docker compose up` workflow.
+
+### Fixed
+
+- **CRITICAL: Concurrency Setting Not Applying:** Fixed a critical bug where changes to the `Total Processing Cores` setting were not being applied until a full container restart. The Task Runner's worker pool is now correctly reconfigured immediately after settings are saved.
+- **UI Bug in Job Settings:** Fixed a UI bug where the "Auto-detect" button for processing cores only updated the read-only display field and not the hidden input field, which prevented the detected value from being saved correctly.
+- **JavaScript Syntax Error:** Corrected a JavaScript syntax error (`catch error` instead of `catch (error)`) in `settings.html` that prevented the CPU auto-detection logic from running.
+
+### Removed
+
+- **Obsolete `conversion_logic.py`:** Deleted the old, unused `conversion_logic.py` file, which was left over from the v0.13.0 refactor, bringing the codebase in line with the documentation.
+
 ## [0.13.0] - 2025-10-09
 
 This is a landmark architectural release that completely overhauls the backend processing engine for significantly improved performance, efficiency, and intelligent resource management, especially for multi-book download jobs.
