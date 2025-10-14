@@ -10,7 +10,7 @@ jobs:
         runs-on: ubuntu-latest
         permissions:
             contents: read
-            packages: write # This permission is required to push to GitHub Packages
+            packages: write
 
         steps:
             - name: Checkout repository
@@ -33,7 +33,7 @@ jobs:
               uses: docker/build-push-action@v5
               with:
                   context: .
-                  file: ./src/dockerfile # Explicitly point to your dockerfile location
+                  file: ./src/dockerfile
                   push: true
                   tags: ${{ steps.meta.outputs.tags }}
                   labels: ${{ steps.meta.outputs.labels }}
