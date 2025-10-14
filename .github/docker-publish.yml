@@ -1,10 +1,9 @@
 name: Docker Publish
 
-# This action will only run when you create a new tag that starts with 'v' (e.g., v0.14.0, v1.0.0)
+# This action will only run when you create and publish a new Release on GitHub.
 on:
-    push:
-        tags:
-            - "v*"
+    release:
+        types: [published]
 
 jobs:
     build-and-push:
