@@ -1,8 +1,12 @@
 services:
   audiobookup:
-    # This line is for end-users. It tells Docker to pull the pre-built image from
-    # the GitHub Container Registry. Update the tag to the latest release version.
-    image: ghcr.io/ishbuggy/audiobookup:latest
+    # This file is for local development. It builds the image from source code.
+    build:
+      context: .
+      dockerfile: ./src/dockerfile
+      args:
+        - APP_VERSION=v0.14.1-dev
+
     container_name: audiobookup
     ports:
       - "13300:13300"

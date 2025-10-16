@@ -34,63 +34,142 @@ A self-hosted, web-based application for managing and downloading your personal 
 
 ### Prerequisites
 
-- Docker & Docker Compose
+- Docker and Docker Compose installed on your system.
+- Git (only required for the developer installation).
 
 ### Installation
 
-1.  **Create a Project Directory:**
-    On your server, create a dedicated folder where you will store the `docker-compose.yml` file and the application's persistent data.
+This guide provides three methods for installation. For most users, including those on Unraid, the **Docker Compose** method is the recommended and easiest path.
+
+#### Docker Compose (Recommended)
+
+This method uses the pre-built Docker image from GitHub Packages.
+
+1.  **Create a Directory:**
+    On your server, create a dedicated folder to hold your configuration file.
 
     ```bash
     mkdir audiobookup
     cd audiobookup
     ```
 
-2.  **Create the `docker-compose.yml` file:**
-    Inside the `audiobookup` directory, create a new file named `docker-compose.yml`.
-
-    ```bash
-    nano docker-compose.yml
-    ```
-
-3.  **Paste the following content into the file:**
-    This configuration will pull the pre-built, ready-to-run image from GitHub.
+2.  **Create `docker-compose.yml`:**
+    Inside that folder, create a new file named `docker-compose.yml` and paste the following content into it. An example compose file is avaialble in the project repo as `docker-compose.yml`.
 
     ```yaml
     services:
         audiobookup:
-            image: ghcr.io/ishbuggy/audiobookup:v0.14.0 # Update the tag for new releases
+            # PULLS THE PRE-BUILT IMAGE:
+            # For the latest stable version, use the :latest tag.
+            # For maximum stability, pin to a specific version by changing ':latest'
+            # to a release number, e.g., ':v0.14.1'.
+            image: ghcr.io/ishbuggy/audiobookup:latest
             container_name: audiobookup
             ports:
                 - "13300:13300"
             environment:
+                # --- USER & PERMISSIONS ---
+                # Set to your user's ID to avoid file permission issues.
+                # Find this by running the 'id' command in your terminal.
                 - PUID=1000
                 - PGID=1000
+
+                # --- TIMEZONE ---
+                # Set your local timezone to ensure scheduled tasks run correctly.
+                # A full list can be found here: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
                 - TZ=Etc/UTC
             volumes:
+                # --- DATA PATHS ---
+                # It is highly recommended to change these to absolute paths.
+                # This prevents data loss if you move your compose file.
+                # Example: /path/to/my/appdata/audiobookup/config:/config
+
+                # Volume for app configuration, settings, logs, and caches
                 - ./appdata/config:/config
+
+                # Volume for the critical database and Audible auth files
                 - ./appdata/database:/database
+
+                # Volume where your final, converted .m4b audiobook files will be stored
                 - ./audiobooks:/data
             restart: unless-stopped
     ```
 
-4.  **Configure Your Environment:**
-    Before launching, you must edit the `environment` section in the file you just created:
-    - **`PUID` and `PGID`:** Change `1000` to your user's ID to prevent file permission issues. You can find your ID by running the `id` command in your terminal (on Unraid, this is typically `99` and `100`).
-    - **`TZ`:** Change `Etc/UTC` to your local timezone (e.g., `America/New_York`, `Europe/London`). This is crucial for scheduled tasks.
+3.  **Configure and Launch:**
+    - Edit the file you just created to set your `PUID`, `PGID`, `TZ`, and `volumes` to match your system.
+    - From your project directory, run: `docker compose up -d`
 
-5.  **(Optional) Configure Data Paths:**
-    By default, data will be stored in `appdata/` and `audiobooks/` folders inside your project directory. For systems like Unraid, it is highly recommended to change these to **absolute paths** to store your data in your `appdata` and `media` shares (e.g., `/mnt/user/appdata/audiobookup/config:/config`).
+4.  **Access the Web UI:**
+    Navigate to `http://<your-server-ip>:13300`.
 
-6.  **Launch the Application:**
-    From inside your `audiobookup` project directory, run the following command. This will download the image and start the container.
+---
 
-    ```bash
-    docker compose up -d
+#### Unraid Installation
+
+This application is ideal for Unraid using the **Docker Compose Manager** plugin.
+
+1.  **Install Plugin:**
+    On Unraid, go to the **"Apps"** tab and install the **"Docker Compose Manager"** plugin.
+
+2.  **Add New Stack:**
+    - Go to the **"Docker"** tab, open **"Compose Manager"**, and click **"Add New Stack"**.
+    - Give the stack a name (e.g., `audiobookup`).
+    - In the **"Composition"** box, paste the `docker-compose.yml` content from the section above.
+
+3.  **Edit for Unraid:**
+    You **must** edit the pasted content to match your Unraid shares and permissions.
+    - Change `PUID` to `99` and `PGID` to `100`.
+    - Change `TZ` to your correct timezone (e.g., `America/New_York`).
+    - **Crucially, change the `volumes` to use absolute paths to your Unraid shares.** Example:
+
+    ```diff
+    -    volumes:
+    -      - ./appdata/config:/config
+    -      - ./appdata/database:/database
+    -      - ./audiobooks:/data
+    +    volumes:
+    +      - /mnt/user/appdata/audiobookup/config:/config
+    +      - /mnt/user/appdata/audiobookup/database:/database
+    +      - /mnt/user/Audiobooks:/data
     ```
 
-7.  **Access the Web Interface:**
-    Navigate to `http://<your-server-ip>:13300` in your web browser.
+4.  **Launch:**
+    Click **"Save"**, then click the gear icon next to the new stack and select **"Compose Up"**.
+
+5.  **Access the Web UI:**
+    Navigate to `http://<your-server-ip>:13300`.
+
+---
+
+#### Manual Build / For Developers
+
+Follow these steps only if you intend to modify the source code.
+
+1.  **Clone the Repository:**
+
+    ```bash
+    git clone https://github.com/ishbuggy/audiobookup.git
+    cd audiobookup
+    ```
+
+2.  **Create a Development Compose File:**
+    The repository includes a template file. Copy it to create your local, git-ignored development configuration.
+
+    ```bash
+    cp docker-compose.dev.yml.template docker-compose.dev.yml
+    ```
+
+    Now, edit `docker-compose.dev.yml` to set your `PUID`, `PGID`, and desired volume paths.
+
+3.  **Build and Launch:**
+    Use the `-f` flag to specify your development file and `--build` to build the image from your local source code.
+
+    ```bash
+    docker compose -f docker-compose.dev.yml up --build -d
+    ```
+
+4.  **Access the Web UI:**
+    Navigate to `http://<your-server-ip>:13300`.
 
 ---
 

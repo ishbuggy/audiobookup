@@ -203,8 +203,12 @@
         <div id="log-container">
             <div class="log-header">
                 <div id="status-line-wrapper">
+                    <span class="status-indicator"></span>
+                    <span>Server Online</span>
+                    <span>{{ server_version }}</span>
+                    <span style="color: var(--color-text-muted)">|</span>
                     <span class="status-label">Status:</span>
-                    <p id="latest-log-line">Ready.</p>
+                    <p id="latest-log-line"></p>
                 </div>
                 <div class="log-actions">
                     <button id="toggle-log-btn" title="Toggle Log View"><i class="fas fa-chevron-up"></i></button>
@@ -344,6 +348,7 @@
         </div>
 
         <input type="file" id="import-file-input" style="display: none" accept=".json" />
+        <script src="{{ url_for('static', filename='js/common.js') }}"></script>
         <script>
             // --- Element References & Initial State ---
             const logOutput = document.getElementById("log-output");
@@ -1130,71 +1135,6 @@
                 startJob("DOWNLOAD", selectedASINs);
             };
 
-            // --- Custom Alert Logic ---
-            const customAlertModal = document.getElementById("custom-alert-modal");
-            const customAlertMessage = document.getElementById("custom-alert-message");
-            const customAlertOkBtn = document.getElementById("custom-alert-ok-btn");
-
-            // Confirmation Modal Elements
-            const confirmationModal = document.getElementById("confirmation-modal");
-            const confirmationTitle = document.getElementById("confirmation-title");
-            const confirmationMessage = document.getElementById("confirmation-message");
-            const confirmationCancelBtn = document.getElementById("confirmation-cancel-btn");
-            const confirmationConfirmBtn = document.getElementById("confirmation-confirm-btn");
-
-            let confirmCallback = null; // To store the action for the confirm button
-
-            function showCustomAlert(message) {
-                customAlertMessage.textContent = message;
-                document.body.classList.add("modal-open");
-                customAlertModal.style.display = "flex";
-            }
-            function closeCustomAlert() {
-                document.body.classList.remove("modal-open");
-                customAlertModal.style.display = "none";
-            }
-            customAlertOkBtn.onclick = closeCustomAlert;
-
-            // --- Custom Confirmation Modal Logic ---
-            function showConfirmationModal(title, message, onConfirm) {
-                confirmationTitle.innerHTML = title; // Use innerHTML to allow for icons
-                confirmationMessage.textContent = message;
-                confirmCallback = onConfirm; // Store the function to run when 'Confirm' is clicked
-                document.body.classList.add("modal-open");
-                confirmationModal.style.display = "flex";
-            }
-
-            function closeConfirmationModal() {
-                document.body.classList.remove("modal-open");
-                confirmationModal.style.display = "none";
-                confirmCallback = null; // Clear the callback when the modal is closed
-            }
-
-            confirmationCancelBtn.addEventListener("click", closeConfirmationModal);
-            confirmationConfirmBtn.addEventListener("click", () => {
-                // When the confirm button is clicked, execute the stored callback if it exists
-                if (typeof confirmCallback === "function") {
-                    confirmCallback();
-                }
-                closeConfirmationModal(); // Always close the modal after action
-            });
-
-            // --- Main window.onclick handler ---
-            window.onclick = function (event) {
-                if (event.target == bookDetailModal) {
-                    document.body.classList.remove("modal-open");
-                    closeDetailModal();
-                }
-                if (event.target == downloadSelectionModal) {
-                    document.body.classList.remove("modal-open");
-                    closeSelectionModal();
-                }
-                if (event.target == customAlertModal) {
-                    document.body.classList.remove("modal-open");
-                    closeCustomAlert();
-                }
-            };
-
             // --- Lazy Loading Logic ---
             const lazyLoadObserver = new IntersectionObserver((entries, observer) => {
                 entries.forEach((entry) => {
@@ -1377,6 +1317,6 @@
                 }
             });
         </script>
-        <script src="{{ url_for('static', filename='theme.js') }}"></script>
+        <script src="{{ url_for('static', filename='js/theme.js') }}"></script>
     </body>
 </html>

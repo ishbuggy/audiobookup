@@ -28,52 +28,29 @@
         />
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css" />
         <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
-        <!-- We can use the same styles as the login/settings pages -->
-        <style>
-            /* Additional styles for the setup wizard */
-            .setup-card {
-                max-width: 600px;
-                width: 100%;
-                background: white;
-                padding: 2em;
-                border-radius: 8px;
-                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            }
-            .form-group {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                padding: 1em 0;
-                border-top: 1px solid #e9ecef;
-            }
-            .form-group:first-child {
-                border-top: none;
-            }
-            .form-group label {
-                font-weight: 600;
-            }
-            .form-group small {
-                display: block;
-                font-weight: normal;
-                color: #6c757d;
-            }
-            .info-box {
-                background-color: #e9ecef;
-                padding: 1em;
-                border-radius: 5px;
-                margin-bottom: 1.5em;
-                text-align: center;
-            }
-        </style>
     </head>
     <body class="page-centered-container">
-        <button id="theme-toggle-btn" class="top-right-icon-btn" style="right: 9.5em" title="Toggle Theme">
+        <button
+            id="theme-toggle-btn"
+            class="top-right-icon-btn"
+            style="position: absolute; right: 1em; top: 1em"
+            title="Toggle Theme"
+        >
             <i class="fas fa-moon"></i>
         </button>
-        <div class="setup-card">
+        <div class="form-card">
             <!-- Step 1: Configuration Form (Visible by default) -->
             <div id="setup-step-1">
-                <h1><i class="fas fa-key"></i> Connect to Audible</h1>
+                <div class="header-title" style="justify-content: center; margin-bottom: 1em">
+                    <img
+                        src="{{ url_for('static', filename='img/AudioBookup_Icon.png') }}"
+                        alt="AudioBookup Logo"
+                        class="header-logo"
+                    />
+                    <h1>AudioBookup</h1>
+                </div>
+                <h2><i class="fas fa-key"></i> Connect to Audible</h2>
+
                 <p style="text-align: center; color: #555; margin-bottom: 1.5em">
                     First, select your Audible marketplace and configure a few options.
                 </p>
@@ -102,7 +79,7 @@
                     </label>
                 </div>
 
-                <div id="advanced-options-panel" style="display: none; padding-left: 1em; border-left: 3px solid #eee">
+                <div id="advanced-options-panel" class="advanced-setup-panel" style="display: none">
                     <div class="form-group">
                         <label for="profile-name">Profile Name:<small>Internal name for this connection.</small></label>
                         <input type="text" id="profile-name" name="profile_name" />
@@ -132,7 +109,7 @@
                     </label>
                 </div>
 
-                <div id="password-panel" style="display: none; padding-left: 1em; border-left: 3px solid #eee">
+                <div id="password-panel" class="advanced-setup-panel" style="display: none">
                     <div class="form-group stacked">
                         <label for="auth-file-password">Password:</label>
                         <input type="password" id="auth-file-password" name="auth_file_password" class="w-100" />
@@ -150,35 +127,101 @@
 
             <!-- Step 2: Authentication Step (Hidden by default) -->
             <div id="setup-step-2" style="display: none; text-align: center">
-                <h1><i class="fab fa-audible"></i> Log in to Audible</h1>
+                <div class="header-title" style="justify-content: center; margin-bottom: 1em">
+                    <img
+                        src="{{ url_for('static', filename='img/AudioBookup_Icon.png') }}"
+                        alt="AudioBookup Logo"
+                        class="header-logo"
+                    />
+                    <h1>AudioBookup</h1>
+                </div>
+                <h2><i class="fab fa-audible"></i> Log in to Audible</h2>
                 <div class="info-box">
                     <p>
                         Click the button below to open the Audible login page in a new tab. After you log in, you will
-                        be redirected to a page that may look like an error.
+                        be redirected to a page that may look like an error. The page will probably look like the image
+                        below:
                     </p>
-                    <p><strong>This is expected.</strong> Copy the entire URL from that page's address bar.</p>
+                    <img
+                        src="{{ url_for('static', filename='img/setup-redirect-example.png') }}"
+                        alt="Screenshot of the expected Amazon redirect error page"
+                        style="
+                            max-width: 100%;
+                            border-radius: 5px;
+                            border: 1px solid var(--color-border);
+                            margin-top: 1em;
+                        "
+                    />
+                    <p style="margin-top: 1em">
+                        <strong>This is expected.</strong> Copy the entire URL from that page's address bar.
+                    </p>
                 </div>
                 <button id="open-audible-btn" class="action-button green w-100" disabled>
                     <i class="fas fa-spinner fa-spin"></i> Waiting for URL from server...
                 </button>
-                <div id="paste-container" style="margin-top: 1.5em">
-                    <label for="paste-url" style="font-weight: 600; margin-bottom: 0.75em; display: block"
-                        >Paste the copied URL here:</label
-                    >
-                    <input
-                        type="text"
-                        id="paste-url"
-                        class="w-100"
-                        style="padding: 0.8em; font-size: 1em; border-radius: 5px; border: 1px solid #ccc"
-                    />
-                    <button id="submit-url-btn" class="action-button blue w-100" style="margin-top: 1em">
-                        Submit URL
-                    </button>
+                <div class="form-group stacked" style="margin-top: 1.5em">
+                    <label for="paste-url">Paste the copied URL here:</label>
+                    <input type="text" id="paste-url" class="w-100" />
                 </div>
+                <button id="submit-url-btn" class="action-button blue w-100" style="margin-top: 1em">Submit URL</button>
             </div>
 
-            <!-- Step 3: Final Status (Hidden by default) -->
-            <div id="setup-step-3" style="display: none; text-align: center"></div>
+            <!-- Step 3: Performance Optimization (Hidden by default) -->
+            <div id="setup-step-3" style="display: none; text-align: center">
+                <div class="header-title" style="justify-content: center; margin-bottom: 1em">
+                    <img
+                        src="{{ url_for('static', filename='img/AudioBookup_Icon.png') }}"
+                        alt="AudioBookup Logo"
+                        class="header-logo"
+                    />
+                    <h1>AudioBookup</h1>
+                </div>
+                <h2><i class="fas fa-rocket"></i> Performance Optimization</h2>
+                <p style="color: var(--color-text-muted)">
+                    For the fastest audiobook conversions, set the number of processing cores.
+                </p>
+
+                <div class="form-group" style="padding: 2em 0; text-align: left">
+                    <label for="setup-total-cores-input">
+                        Total Processing Cores
+                        <small style="display: block; font-weight: normal">
+                            A good default is your system's total CPU cores minus one.
+                        </small>
+                    </label>
+                    <div style="display: flex; align-items: center; gap: 0.5em">
+                        <input type="number" id="setup-total-cores-input" value="2" min="1" max="16" />
+                        <button
+                            id="setup-auto-concurrency-btn"
+                            class="action-button"
+                            title="Auto-detect based on system hardware"
+                        >
+                            <i class="fas fa-magic"></i> Auto-detect
+                        </button>
+                    </div>
+                </div>
+
+                <p style="font-size: 0.9em; color: var(--color-text-muted); margin-top: 1em">
+                    This setting, along with advanced options, can be changed later on the main
+                    <strong>Settings</strong> page.
+                </p>
+
+                <button id="setup-save-settings-btn" class="action-button green w-100" style="margin-top: 1em">
+                    Save and Continue to Dashboard
+                </button>
+            </div>
+        </div>
+        <div id="custom-alert-modal" class="modal-overlay">
+            <div class="modal-content" style="max-width: 400px; text-align: center">
+                <div class="modal-header">
+                    <h2 id="custom-alert-title" style="width: 100%; text-align: center"></h2>
+                </div>
+                <div class="modal-body">
+                    <p id="custom-alert-message" style="font-size: 1.1em"></p>
+                </div>
+                <div class="modal-footer" style="justify-content: center">
+                    <button id="custom-alert-ok-btn" class="action-button blue">OK</button>
+                </div>
+            </div>
         </div>
 
         <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.2/dist/socket.io.min.js"></script>
@@ -316,6 +359,56 @@
                 });
             });
         </script>
-        <script src="{{ url_for('static', filename='theme.js') }}"></script>
+        <script src="{{ url_for('static', filename='js/common.js') }}"></script>
+        <script>
+            document.addEventListener("DOMContentLoaded", () => {
+                const step2Div = document.getElementById("setup-step-2");
+                const step3Div = document.getElementById("setup-step-3");
+                const saveBtn = document.getElementById("setup-save-settings-btn");
+                const socket = io({ path: "/setup/socket.io" });
+
+                // 1. Setup the auto-detect functionality and get a reference to the handler
+                const triggerAutoDetect = setupAutoConcurrencyDetector(
+                    "setup-auto-concurrency-btn",
+                    "setup-total-cores-input",
+                );
+
+                // 2. Listen for the success event from the backend
+                socket.on("audible_setup_successful", () => {
+                    step2Div.style.display = "none";
+                    step3Div.style.display = "block";
+                    // 3. The user can trigger the autodetect, or continue with the default number of threads
+                });
+
+                // 4. Setup the save button (this logic is unique to this page)
+                const handleSaveAndContinue = async () => {
+                    const coresInput = document.getElementById("setup-total-cores-input");
+                    const cores = parseInt(coresInput.value, 10);
+                    if (!cores || cores < 1) {
+                        alert("Please enter a valid number of cores (at least 1).");
+                        return;
+                    }
+                    saveBtn.classList.add("is-processing");
+                    saveBtn.disabled = true;
+                    const settingsToSave = { job: { download: { total_processing_cores: cores } } };
+                    try {
+                        const response = await fetch("/api/settings", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(settingsToSave),
+                        });
+                        if (!response.ok) throw new Error("Failed to save settings.");
+                        window.location.href = "/";
+                    } catch (error) {
+                        alert(`Error: ${error.message}. Redirecting, but please verify in settings.`);
+                        setTimeout(() => {
+                            window.location.href = "/";
+                        }, 2000);
+                    }
+                };
+                saveBtn.addEventListener("click", handleSaveAndContinue);
+            });
+        </script>
+        <script src="{{ url_for('static', filename='js/theme.js') }}"></script>
     </body>
 </html>

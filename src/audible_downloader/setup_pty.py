@@ -29,7 +29,7 @@ def pty_lifecycle_thread(setup_data):
     global child_pty, is_pty_running
 
     try:
-        command = "audible quickstart" # pexpect prefers a string
+        command = "audible quickstart"  # pexpect prefers a string
         env = os.environ.copy()
         env["HOME"] = DATABASE_DIR
 
@@ -37,7 +37,7 @@ def pty_lifecycle_thread(setup_data):
             if is_pty_running:
                 return
             # Use pexpect.spawn, which returns a powerful child object
-            child_pty = pexpect.spawn(command, cwd=DATABASE_DIR, env=env, encoding='utf-8')
+            child_pty = pexpect.spawn(command, cwd=DATABASE_DIR, env=env, encoding="utf-8")
             is_pty_running = True
 
         # --- PART 1: Initial Automated Prompts using pexpect.expect ---
@@ -58,8 +58,10 @@ def pty_lifecycle_thread(setup_data):
             [
                 ("Do you want to login with external browser?", "y"),
                 # Ruff E501: Break long tuple into multiple lines.
-                ("Do you want to login with a pre-amazon Audible account?",
-                 "y" if setup_data["with_username"] else "n"),
+                (
+                    "Do you want to login with a pre-amazon Audible account?",
+                    "y" if setup_data["with_username"] else "n",
+                ),
                 ("Do you want to continue?", "y"),
             ]
         )
@@ -69,7 +71,6 @@ def pty_lifecycle_thread(setup_data):
             child_pty.expect(prompt_text, timeout=20)
             # The .sendline() method sends our answer.
             child_pty.sendline(answer_text)
-
 
         # --- PART 2: Extract Login URL and Signal Frontend ---
         # Wait for the prompt text first, to ensure the process is at the right stage.
@@ -84,18 +85,16 @@ def pty_lifecycle_thread(setup_data):
         login_url = child_pty.match.group(0)
 
         if not login_url:
-             # This should now be virtually impossible, but the check remains for safety.
-             raise pexpect.exceptions.TIMEOUT("Could not find login URL after the prompt.")
+            # This should now be virtually impossible, but the check remains for safety.
+            raise pexpect.exceptions.TIMEOUT("Could not find login URL after the prompt.")
 
         log.info(f"PTY_SETUP: Found Audible login URL: {login_url}")
         socketio.emit("audible_login_url_ready", {"url": login_url})
-
 
         # --- PART 3: Wait for User to Submit URL via the Queue ---
         log.info("PTY_SETUP: Automation thread is now waiting for user to submit the redirected URL.")
         final_url_from_user = url_queue.get(timeout=600)
         child_pty.sendline(final_url_from_user)
-
 
         # --- PART 4: Finalize and Validate ---
         # Wait for the process to naturally terminate. The EOF (End Of File) pattern
@@ -109,21 +108,21 @@ def pty_lifecycle_thread(setup_data):
         validation_env = os.environ.copy()
         validation_env["HOME"] = DATABASE_DIR
         # Use pexpect for the validation as well for consistency and robustness
-        validation_child = pexpect.spawn("audible library list", env=validation_env, encoding='utf-8')
+        validation_child = pexpect.spawn("audible library list", env=validation_env, encoding="utf-8")
         validation_child.expect(pexpect.EOF)
         validation_child.close()
 
         if validation_child.exitstatus == 0:
             with open(SETUP_FLAG_FILE, "w") as f:
                 f.write("Setup completed successfully.")
-            final_message = "SUCCESS! Authentication is valid. You will be redirected automatically."
-            socketio.emit("pty_output", {"output": final_message})
+            # MODIFIED: Instead of a generic message, emit a specific event
+            # to tell the frontend to show the optimization modal.
+            socketio.emit("audible_setup_successful")
         else:
             # Capture the error output from the failed validation command
             error_output = validation_child.before or "Unknown validation error."
             final_message = (
-                f"FAILED. The new authentication token could not be validated.\n"
-                f"Error: {error_output.strip()}"
+                f"FAILED. The new authentication token could not be validated.\nError: {error_output.strip()}"
             )
             socketio.emit("pty_output", {"output": final_message})
 
@@ -131,10 +130,7 @@ def pty_lifecycle_thread(setup_data):
         log.error(f"PTY_SETUP: A timeout or unexpected process exit occurred: {e}", exc_info=True)
         # Get any remaining output from the buffer for debugging
         buffer_contents = child_pty.before if child_pty else ""
-        error_msg = (
-            f"FAILED: The setup script did not respond as expected.\n\n"
-            f"Details:\n{buffer_contents}"
-        )
+        error_msg = f"FAILED: The setup script did not respond as expected.\n\nDetails:\n{buffer_contents}"
         socketio.emit("pty_output", {"output": error_msg})
     except Exception as e:
         log.error(f"PTY_SETUP: An unexpected error occurred in the lifecycle thread: {e}", exc_info=True)

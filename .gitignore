@@ -63,8 +63,9 @@ audiobooks/
 src/audible_downloader/settings.json
 /config/settings.json
 
-# Docker override files should NOT be committed to the repository.
+# Docker override and development files should not be committed.
 docker-compose.override.yml
+docker-compose.dev.yml
 
 # --- OS-generated files ---
 .DS_Store

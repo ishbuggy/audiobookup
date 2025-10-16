@@ -3,26 +3,28 @@ FROM python:3.11-slim-bookworm
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
-# --- START: Added Locale Configuration ---
 # Set the locale to en_US.UTF-8 to ensure proper handling of all character sets.
 ENV LANG en_US.UTF-8
 ENV LANGUAGE en_US:en
 ENV LC_ALL en_US.UTF-8
-# --- END: Added Locale Configuration ---
+# Accept a build argument for the version
+ARG APP_VERSION
+# Set it as an environment variable so the app can read it at runtime
+ENV APP_VERSION=${APP_VERSION}
 
 # Layer 2: System Dependencies
 # ADDED: 'locales' package is now installed to generate the UTF-8 locale.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    sqlite3 \
-    jq \
-    coreutils \
-    curl \
-    gosu \
-    locales \
-    && sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
-    locale-gen \
-    && rm -rf /var/lib/apt/lists/*
+  ffmpeg \
+  sqlite3 \
+  jq \
+  coreutils \
+  curl \
+  gosu \
+  locales \
+  && sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
+  locale-gen \
+  && rm -rf /var/lib/apt/lists/*
 
 # Layer 3: Create a non-root user
 RUN useradd --system --create-home appuser

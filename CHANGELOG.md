@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2025-10-14
+
+This is a bugfix and user experience release that improves the first-run setup process, standardizes the UI, and provides a clearer installation path for new users.
+
+### Added
+
+- **Interactive Performance Optimization:** Added a new final step to the initial setup wizard that prompts the user to auto-detect and set the optimal number of processing cores for their system, ensuring the best performance from day one.
+- **Server Status & Version Footer:** The application version and a "Server Online" indicator are now displayed in the footer of the application pages for clear, at-a-glance feedback.
+- **Developer Workflow:** Added a `docker-compose.dev.yml.template` to the repository to formalize and simplify the build-from-source workflow for developers.
+
+### Changed
+
+- **MAJOR: Documentation Overhaul:** The `readme.md` has been completely rewritten for end-users. It now provides a simple copy-paste `docker-compose.yml` and includes dedicated, easy-to-follow installation guides for standard Docker Compose and Unraid.
+- **`docker-compose.yml` Simplification:** The main `docker-compose.yml` in the repository is now the user-facing version, containing only the `image` directive to prevent errors on platforms like Unraid's Compose Manager. The `build` configuration is now exclusively in the developer template.
+- **Code Quality:** Refactored some duplicated JavaScript for modals and the auto-concurrency detector into a single, shared `src/static/js/common.js` file to improve maintainability.
+
+### Fixed
+
+- **UI/UX (First Run):** Fixed numerous UI/UX bugs across all setup pages, including:
+    - Incorrect dark mode colors and inconsistent element widths.
+    - Improper alignment of branding headers and the theme toggle button.
+    - Fixed an issue where the custom alert modal would render HTML tags as plain text instead of formatted content.
+
 ## [0.14.0] - 2025-10-13
 
 This is a foundational release focused on making the project fully portable, maintainable, and ready for public distribution via GitHub and Docker Compose. It introduces a portable `docker-compose.yml`, a `.gitignore` to ensure a clean repository, and fixes several critical bugs related to the application lifecycle and temporary file handling.

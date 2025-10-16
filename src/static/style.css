@@ -83,7 +83,7 @@ body.modal-open {
 }
 
 .form-card {
-    max-width: 450px;
+    max-width: 600px;
     width: 100%;
     background: var(--color-bg-container);
     padding: 2em;
@@ -155,6 +155,7 @@ h2 {
         border-color 0.2s ease;
     text-decoration: none;
     display: inline-block;
+    box-sizing: border-box;
 }
 
 .action-button:hover:not(:disabled) {
@@ -498,6 +499,28 @@ h2 {
     border-radius: 4px;
     background-color: var(--color-bg-button-hover); /* Placeholder color */
     flex-shrink: 0; /* Prevents image from shrinking in a flex container */
+}
+
+/* --- 3f. Server Status Footer Style --- */
+.server-status-footer {
+    position: fixed;
+    bottom: 1em;
+    left: 1em;
+    display: flex;
+    align-items: center;
+    gap: 0.75em;
+    font-size: 0.9em;
+    color: var(--color-text-muted);
+}
+
+.server-status-footer .status-indicator,
+#status-line-wrapper .status-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background-color: #28a745; /* Green for online */
+    box-shadow: 0 0 8px #28a745;
+    animation: pulse 2s infinite;
 }
 
 /* ==========================================================================
@@ -976,8 +999,9 @@ h2 {
     display: flex;
     align-items: center;
     flex-grow: 1;
-    overflow: hidden;
     margin: 0 1.5em;
+    gap: 0.75em;
+    color: var(--color-text-muted);
 }
 .status-label {
     font-weight: 600;
@@ -1230,6 +1254,42 @@ body.advanced-mode .radio-group-item.advanced-setting {
     flex-grow: 1;
 }
 
+/* --- 4d. Setup & Login Pages (First Run) --- */
+
+/* Overriding the default .form-group for the setup wizard layout */
+.form-card .form-group {
+    border-top: 1px solid var(--color-border);
+}
+
+.form-card .form-group:first-child {
+    border-top: none;
+}
+
+.form-card .form-group label {
+    font-weight: 600;
+}
+
+.form-card .form-group small {
+    display: block;
+    font-weight: normal;
+    color: var(--color-text-muted);
+}
+
+.form-card .info-box {
+    background-color: var(--color-bg);
+    border: 1px solid var(--color-border);
+    padding: 1em;
+    border-radius: 5px;
+    margin-bottom: 1.5em;
+    text-align: center;
+}
+
+/* Style for the advanced options panels */
+.advanced-setup-panel {
+    padding-left: 1em;
+    border-left: 3px solid var(--color-border);
+}
+
 /* ==========================================================================
    5. Utility Styles
    ========================================================================== */
@@ -1297,6 +1357,21 @@ body.dark-mode .action-button:hover:not(:disabled) {
 
 .highlight-flash {
     animation: highlight-fade 4s ease-out;
+}
+
+@keyframes pulse {
+    0% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(40, 167, 69, 0.7);
+    }
+    70% {
+        transform: scale(1);
+        box-shadow: 0 0 0 10px rgba(40, 167, 69, 0);
+    }
+    100% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(40, 167, 69, 0);
+    }
 }
 
 /* ==========================================================================

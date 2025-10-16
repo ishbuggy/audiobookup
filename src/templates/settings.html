@@ -740,6 +740,7 @@
             </div>
         </div>
 
+        <script src="{{ url_for('static', filename='js/common.js') }}"></script>
         <script>
             // --- 1. WAIT FOR THE DOM TO BE FULLY LOADED ---
             document.addEventListener("DOMContentLoaded", () => {
@@ -1176,41 +1177,12 @@
                 audibleAuthCheckBtn.addEventListener("click", () => handleManualAudibleAuthCheck(audibleAuthCheckBtn));
 
                 // Auto Concurrency Button
-                autoConcurrencyBtn.addEventListener("click", async () => {
-                    // Get a reference to the advanced mode input field
-                    const totalCoresInput = document.getElementById("total-processing-cores-input");
-                    const icon = autoConcurrencyBtn.querySelector("i");
-                    icon.classList.remove("fa-magic");
-                    icon.classList.add("fa-spinner", "fa-spin");
-                    autoConcurrencyBtn.disabled = true;
-
-                    try {
-                        const response = await fetch("/api/get_cpu_cores");
-                        const data = await response.json();
-                        if (!response.ok || !data.success) {
-                            throw new Error(data.error || "Server returned an error.");
-                        }
-
-                        const recommended = data.recommended_concurrency;
-
-                        totalCoresDisplay.value = recommended;
-                        totalCoresInput.value = recommended;
-
-                        showCustomAlert(
-                            `Detected ${data.total_cores} CPU cores.<br>Recommended concurrency has been set to <strong>${recommended}</strong>.`,
-                            '<i class="fas fa-check-circle" style="color: #28a745;"></i> Success',
-                        );
-                    } catch (error) {
-                        showCustomAlert(
-                            `Could not auto-detect CPU cores: ${error.message}`,
-                            '<i class="fas fa-times-circle" style="color: #dc3545;"></i> Error',
-                        );
-                    } finally {
-                        icon.classList.add("fa-magic");
-                        icon.classList.remove("fa-spinner", "fa-spin");
-                        autoConcurrencyBtn.disabled = false;
-                    }
-                });
+                // We pass the IDs for the button, the read-only display, and the hidden savable input.
+                setupAutoConcurrencyDetector(
+                    "auto-concurrency-btn",
+                    "total-cores-display",
+                    "total-processing-cores-input",
+                );
 
                 // "Run Now" Buttons
                 document.querySelectorAll(".run-now-btn").forEach((btn) => {
@@ -1401,6 +1373,13 @@
             }
         </script>
         <!-- END: SCRIPT FOR PASSWORD VALIDATION -->
-        <script src="{{ url_for('static', filename='theme.js') }}"></script>
+        <script src="{{ url_for('static', filename='js/theme.js') }}"></script>
+
+        <!-- Server Status Footer -->
+        <div class="server-status-footer">
+            <span class="status-indicator"></span>
+            <span>Server Online</span>
+            <span>{{ server_version }}</span>
+        </div>
     </body>
 </html>

@@ -318,6 +318,13 @@
                 }
             }
         </script>
-        <script src="{{ url_for('static', filename='theme.js') }}"></script>
+        <script src="{{ url_for('static', filename='js/theme.js') }}"></script>
+
+        <!-- Server Status Footer -->
+        <div class="server-status-footer">
+            <span class="status-indicator"></span>
+            <span>Server Online</span>
+            <span>{{ server_version }}</span>
+        </div>
     </body>
 </html>

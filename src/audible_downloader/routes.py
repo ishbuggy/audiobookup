@@ -79,7 +79,15 @@ def index():
         with open(LOG_FILE, encoding="utf-8") as f:
             log_history = "".join(deque(f, MAX_LOG_LINES))
     settings = load_settings()
-    return render_template("index.html", stats=stats, books=books, log_history=log_history, settings=settings)
+    server_version = os.getenv("APP_VERSION", "local-dev")
+    return render_template(
+        "index.html",
+        stats=stats,
+        books=books,
+        log_history=log_history,
+        settings=settings,
+        server_version=server_version,
+    )
 
 
 @app.route("/setup")
@@ -95,14 +103,16 @@ def settings():
     """Renders the settings page."""
     # This function now only handles rendering the page. All save logic is in the API.
     current_settings = load_settings()
-    return render_template("settings.html", settings=current_settings)
+    server_version = os.getenv("APP_VERSION", "local-dev")
+    return render_template("settings.html", settings=current_settings, server_version=server_version)
 
 
 @app.route("/history")
 @login_required
 def history():
     """Renders the dedicated job history page."""
-    return render_template("history.html")
+    server_version = os.getenv("APP_VERSION", "local-dev")
+    return render_template("history.html", server_version=server_version)
 
 
 ## The SSE stream endpoint
