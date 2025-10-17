@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.2] - 2025-10-17
+
+This is a quality-of-life and code-health release that resolves numerous UI bugs, improves the user experience on the settings page, and prepares the frontend for future development.
+
+### Changed
+
+- **JavaScript Modularization:** All inline JavaScript from `index.html`, `settings.html`, `history.html`, and `setup.html` has been extracted into dedicated external module files (`index.js`, `settings.js`, etc.) to improve maintainability and prepare for a future framework migration.
+- **Improved Performance Setting:** The "Total Processing Cores" setting is no longer hidden in Advanced Mode and is now directly editable in the simple UI, making it easier for all users to configure application performance.
+- **Documentation:** The main `readme.md` has been updated with a project logo and screenshots for a more professional and engaging presentation along with more installation and setup details.
+
+### Fixed
+
+- **CRITICAL: File Permissions:** The Docker entrypoint now sets a `umask` of `0000`, ensuring that all files and directories created by the container (e.g., `.m4b` audiobooks) have correct group-write permissions. This resolves a major usability issue for users on systems like Unraid.
+- **UI (Settings):** Fixed numerous responsive CSS bugs where cron inputs and radio buttons would wrap incorrectly or be pushed off-screen on narrow viewports.
+- **UI (Footer):** The fixed server status footer no longer overlaps the main content container on pages without a log bar.
+- **UI (Jobs):** The progress bar for books with only a single chapter now correctly displays a "Processing" state instead of jumping directly from "Downloading" to "Merging".
+
 ## [0.14.1] - 2025-10-14
 
 This is a bugfix and user experience release that improves the first-run setup process, standardizes the UI, and provides a clearer installation path for new users.
