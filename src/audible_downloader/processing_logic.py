@@ -127,6 +127,9 @@ class BookProcessor:
         # --- 3. Spawn all the ENCODE_CHAPTER tasks ---
         chapters = self.context.get("chapters", [])
         self.total_chunks = len(chapters)
+
+        _yield_progress(self.asin, f"Preparing to process {self.total_chunks} chunk(s)", 30, self.job_id)
+
         if self.total_chunks == 0:
             log.warning(f"TASK-PREPARE ({self.asin}): Book has no chapter information. Cannot process.")
             self._update_db_on_failure("Book has no chapter information.")

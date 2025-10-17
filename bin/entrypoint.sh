@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# Set a sane umask for file permissions (drwxrwxr-x for dirs, -rw-rw-r-- for files)
+# This ensures that files created by the container are manageable by the host user.
+umask 0000
+
 # --- Generate secret key on first run ---
 # Define the path for the persistent secret key within the /config volume
 SECRET_FILE="/config/secret.key"

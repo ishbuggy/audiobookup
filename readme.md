@@ -1,29 +1,37 @@
-# AudioBookup
+<p align="center">
+  <img src="src/static/img/AudioBookup_Icon.png" width="250" title="AudioBookup Logo">
+</p>
+<h1 align="center">AudioBookup</h1>
+<h3 align="center">A self-hosted application with a modern web interface for managing and downloading your personal Audible audiobook library.</h3>
 
-A self-hosted, web-based application for managing and downloading your personal Audible audiobook library. This entire system runs as a single Docker container, providing a seamless user experience from first-run authentication to day-to-day library management, all through a clean web interface.
+<br/>
+
+<p align="center">
+  <img src="src/static/img/audiobookup-main-screenshots.png" title="AudioBookup Screenshots">
+</p>
+
+This entire system runs as a single Docker container, providing a seamless user experience from first-run authentication to basic day-to-day library management, all through a clean web interface. It features persistent background jobs for syncing and downloading, intelligent parallel processing to maximize conversion speed, and provides granular, real-time progress updates directly in the UI.
 
 ## Features
 
 - **Modern & Responsive UI:** Manage your library through a redesigned dashboard, optimized for both desktop and mobile use.
 - **Light & Dark Modes:** Switch between light and dark themes, with your preference saved in your browser for future visits.
-- **Secure User Login:** The entire web interface is protected by a persistent, session-based authentication system, with a mandatory password change on first launch.
+- **Secure User Login:** The entire web interface is protected by a persistent, session-based authentication system.
 - **Search, Sort, & Filter:** Instantly search your library by title, author, or narrator, filter by book status (New, Missing, etc.), and sort by multiple criteria.
 - **Persistent Background Jobs:** Start a library sync or a batch download and safely close your browser. The job runs on the server and you can reconnect to it at any time.
-- **Live Job Status Panel:** A collapsible "Job Status" panel shows **granular, real-time progress** with percentage completion and an **estimated time remaining**. Sync jobs now provide **phased updates** (e.g., "Phase 1/3: Fetching from Audible").
+- **Live Job Status Panel:** A collapsible "Job Status" panel shows **granular, real-time progress**.
 - **Independent Sync Modes (Fast & Deep):**
     - **Fast Sync (API-only):** A lightweight sync that only checks for new books from Audible. Perfect for frequent, low-impact checks.
     - **Deep Sync (Full Scan):** A comprehensive sync that also scans all local files to detect manual changes.
-- **Advanced, Timezone-Aware Scheduling:** The application is powered by a robust, cron-based scheduler for maximum flexibility and reliability.
+- **Advanced Scheduling:** The application is powered by a robust, cron-based scheduler for maximum flexibility and reliability.
     - **Independent Schedules:** Configure separate, automated schedules for Fast Syncs, Deep Syncs, and Download jobs.
     - **Simple & Advanced Modes:** Configure schedules using a simple UI (e.g., "every 4 hours" or "daily at 02:00"). Enable **Advanced Mode** to set schedules with full, standard **cron expressions**.
-    - **Timezone Support:** A dedicated setting allows you to select your local timezone, ensuring all scheduled jobs run at the correct local time.
-- **Intelligent Parallel Processing:** The application uses a sophisticated, priority-based task runner to process multiple books and chapters in parallel. It intelligently allocates all available CPU cores to the highest-priority tasks, ensuring maximum efficiency and the fastest possible completion time for each book.
-- **"Head-Start" Downloads:** For multi-book jobs, the system automatically prioritizes the download of the first book to begin the CPU-intensive encoding process as quickly as possible, while subsequent book downloads are staggered to run efficiently in the background.
+    - **Timezone Support:** A dedicated setting allows you to select your local timezone, ensuring all scheduled jobs run at the correct local time. _Ensure the timezone is properly set in your docker compose file for this feature to work properly._
+- **Intelligent Parallel Processing:** The application uses a sophisticated, priority-based task runner to process multiple books and chapters in parallel. It intelligently allocates all available CPU cores to the highest-priority tasks, ensuring maximum efficiency and the fastest possible completion time for each book based on the resources allocated to the container.
 - **Job Management:** Cancel in-progress download jobs directly from the UI.
-- **Paginated Job History with Filtering & Search:** View a complete, paginated history of all past jobs on a dedicated `/history` page. The page includes powerful controls to instantly **filter** by job type and status, and to **search** for jobs containing specific books by title or author. History items for download jobs include book cover thumbnails for easy identification.
-- **Detailed Book View:** Click on any book to see a detailed modal with high-resolution art and full metadata.
-- **On-Demand Full Summaries:** Fetch full, untruncated book summaries on demand from the detail view.
-- **Extensive Configuration:** Configure all features from a dedicated `/settings` page. This includes custom folder/file naming templates, audio quality, and a simplified "Job Settings" UI that allows for auto-detection of CPU cores in Normal Mode, or manual control over `Total Processing Cores` and `Max Parallel Downloads` in Advanced Mode.
+- **Job History with Filtering & Search:** View a complete history of all past jobs on a dedicated `/history` page. The page includes controls to **filter** by job type and status, and to **search** for jobs containing specific books by title or author.
+- **Detailed Book View:** Click on any book to see a detailed modal with high-resolution art and full metadata. By default, summaries of each item are truncated, but a full summary of the book can be grabbed with a single button.
+- **Settings Configuration:** Configure features from a dedicated `/settings` page. This includes custom folder/file naming templates, audio quality, and a simplified "Job Settings" UI that allows for auto-detection of CPU cores in Normal Mode, or manual control over `Total Processing Cores` and `Max Parallel Downloads` in Advanced Mode.
 - **Audible Connection Health Check:** The app automatically checks if its connection to Audible is still valid on a periodic basis and displays a prominent warning banner if re-authentication is needed.
 - **DRM-Free Conversion:** Converts your audiobooks into standard `.m4b` files with chapters and metadata intact.
 - **Simple Docker Deployment:** Runs as a single, easy-to-manage Docker container with a clean, separated data structure.
@@ -35,6 +43,7 @@ A self-hosted, web-based application for managing and downloading your personal 
 ### Prerequisites
 
 - Docker and Docker Compose installed on your system.
+- An audible account.
 - Git (only required for the developer installation).
 
 ### Installation
@@ -192,8 +201,8 @@ After setting your password, you will be guided through a graphical user interfa
 3.  **Open Login Page:** The application will communicate with Audible's servers. A new button, "Open Audible Login Page", will appear. Click this button to open the official Audible login page in a new browser tab.
 4.  **Log In to Audible:** Log in to your Audible account in the new tab.
 5.  **Copy the Redirect URL:** After logging in, your browser will be redirected to a page that likely shows an error (e.g., "Page not found"). **This is expected.** Copy the _entire URL_ from your browser's address bar.
-6.  **Submit the URL:** Return to the application tab, paste the long URL into the input box, and click "Submit URL".
-7.  **Validation & Success:** The application will validate your login. Upon success, you will be automatically redirected to the main dashboard.
+6.  **Submit the URL and Validate:** Return to the application tab, paste the long URL into the input box, and click "Submit URL". The application will validate your login.
+7.  **Performance Optimization:** Set the number of workers that will be spun up to process books. Use the auto detect feature that can detemrine how many CPU cores are avaiable to the container, or manually enter a number. After this is complete, you will be automatically redirected to the main dashboard.
 
 ---
 
@@ -213,7 +222,7 @@ The dashboard is organized into a responsive two-column layout for a clear infor
 - **Status Column (Right):** This area provides an at-a-glance overview of your library.
     - **Library Status:** Colorful cards show the total number of books that are Downloaded, New, Missing, or have Errors.
 - **Full Library:** Below the main columns, a responsive grid displays your entire audiobook library, which can be instantly **searched**, **sorted**, and **filtered by status**.
-- **Status Bar & Activity Log:** A sticky footer shows the most recent status update and can be expanded to view the full application log.
+- **Status Bar & Activity Log:** A sticky footer shows the most recent status update and can be expanded to view the full application log for some debugging without needing to dig into docker logs.
 
 ### Core Actions
 
@@ -227,15 +236,66 @@ The dashboard is organized into a responsive two-column layout for a clear infor
 
 ## Updating the Application
 
-Updating to a new version is simple:
+The update process depends on your original installation method.
 
-1.  Open your `docker-compose.yml` file.
-2.  Update the image tag to the new version (e.g., change `v0.14.0` to `v0.15.0`).
-3.  Run the following commands in your project directory to download the new image and restart the container:
+---
+
+#### Docker Compose (Recommended)
+
+This is the standard update method for users who deployed using a `docker-compose.yml` file.
+
+1.  **Navigate to your project directory:**
+    Open a terminal and `cd` into the folder where your `docker-compose.yml` file is located.
+
+    ```bash
+    cd /path/to/your/audiobookup
+    ```
+
+2.  **Handle the Image Tag:**
+    - **If you are using the `:latest` tag** in your `docker-compose.yml`, you don't need to edit the file.
+    - **If you pinned a specific version** (e.g., `ghcr.io/ishbuggy/audiobookup:v0.14.1`), you must open your `docker-compose.yml` file and update the tag to the new version (e.g., `:v0.14.2`).
+
+3.  **Pull the new image and restart the container:**
+    Run the following two commands. The `pull` command downloads the new image, and the `up -d` command restarts the container with the new image.
 
     ```bash
     docker compose pull
     docker compose up -d
+    ```
+
+---
+
+#### Unraid
+
+Updating on Unraid uses the **Docker Compose Manager** plugin's built-in functionality.
+
+1.  On your Unraid dashboard, go to the **"Docker"** tab.
+2.  Click on **"Compose Manager"**.
+3.  Find your `audiobookup` stack in the list.
+4.  **If you pinned a specific version** in your composition, click the **"Edit"** button, change the image tag to the new version (e.g., `:v0.14.2`), and click **"Save"**. If you are using `:latest`, you can skip this step.
+5.  Click the gear icon next to the `audiobookup` stack and select **"Update"**. This will pull the new image and automatically recreate the container.
+
+---
+
+#### Manual Build / For Developers
+
+This method is for users who are building the image from the source code.
+
+1.  **Navigate to the repository directory:**
+    Open a terminal and `cd` into the cloned `audiobookup` repository.
+
+2.  **Pull the latest code from GitHub:**
+    This command will download all the latest source code changes.
+
+    ```bash
+    git pull
+    ```
+
+3.  **Rebuild and restart the container:**
+    Run the `docker compose` command with the `--build` flag. This forces Docker to rebuild the image using the new code you just pulled.
+
+    ```bash
+    docker compose -f docker-compose.dev.yml up -d --build
     ```
 
 ### Managing Settings

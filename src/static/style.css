@@ -134,6 +134,7 @@ h2 {
     border-radius: 8px;
     box-shadow: 0 4px 6px var(--color-shadow);
     position: relative; /* For positioning child icon buttons */
+    margin-bottom: 3em;
 }
 
 /* ==========================================================================
@@ -351,7 +352,8 @@ h2 {
 .form-group input[type="text"],
 .form-group input[type="password"],
 .form-group input[type="number"],
-.form-group input[type="time"] {
+.form-group input[type="time"],
+.cron-input-group input[type="text"] {
     font-size: 1em;
     padding: 0.8em;
     border-radius: 5px;
@@ -1176,6 +1178,12 @@ input:checked + .slider:before {
 .radio-group-item input[type="radio"]:checked ~ .radio-circle .radio-dot {
     transform: translate(-50%, -50%) scale(1);
 }
+.radio-buttons-wrapper {
+    display: flex;
+    gap: 1.5em;
+    flex-grow: 1;
+    justify-content: flex-end;
+}
 
 /* Advanced Mode & Cron Inputs */
 .advanced-setting {
@@ -1197,6 +1205,15 @@ body.advanced-mode .simple-setting {
 .radio-group-item.advanced-setting {
     display: none;
 }
+.setting-item.advanced-setting[id$="-cron-container"] {
+    padding: 1em 0;
+}
+.setting-item.advanced-setting[id$="-cron-container"] small {
+    flex-basis: 100%; /* Force the text to take up the full width, pushing inputs to a new line */
+    font-size: 0.9em;
+    color: var(--color-text-muted);
+    margin-bottom: 0.5em; /* Add some space below the text */
+}
 body.advanced-mode .radio-group-item.advanced-setting {
     display: inline-flex;
 }
@@ -1204,6 +1221,7 @@ body.advanced-mode .radio-group-item.advanced-setting {
     display: flex;
     gap: 0.5em;
     flex-grow: 1;
+    align-items: center;
 }
 .cron-input-group input {
     font-family: monospace;
@@ -1474,5 +1492,22 @@ body.dark-mode .action-button:hover:not(:disabled) {
         flex-basis: 100%;
         margin-top: 0.75em;
         text-align: left;
+    }
+    /* Allow cron inputs to wrap on narrow screens */
+    .cron-input-group {
+        flex-wrap: wrap;
+    }
+
+    /* Stack the "Schedule Type" label above the radio buttons */
+    .schedule-type-group {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.5em !important;
+    }
+
+    /* Allow radio buttons to wrap and align them to the start */
+    .radio-buttons-wrapper {
+        flex-wrap: wrap;
+        justify-content: flex-start;
     }
 }
