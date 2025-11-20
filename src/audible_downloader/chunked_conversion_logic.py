@@ -18,6 +18,7 @@ from . import (
     announcer,  # Import announcer for progress updates
 )
 from .logger import log
+from .process_registry import process_registry
 from .settings import load_settings
 
 # A lock to safely track progress across multiple threads, which will still be useful.
@@ -72,10 +73,14 @@ def prepare_book_assets(asin, job_id, temp_dir):
         "-o",
         temp_dir,
     ]
+    process = None
     try:
         process = subprocess.Popen(
             download_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env
         )
+        # REGISTER THE PROCESS
+        process_registry.register(job_id, process)
+
         for line in iter(process.stderr.readline, ""):
             match = re.search(r"(\d+)%", line)
             if match:
@@ -83,11 +88,19 @@ def prepare_book_assets(asin, job_id, temp_dir):
                 overall_progress = 5 + int(download_percent * 0.20)  # Download is ~20% of the job
                 _yield_progress(asin, f"Downloading... {download_percent}%", overall_progress, job_id)
         if process.wait() != 0:
+            # Check if the process was killed intentionally
+            if process.returncode == -15:  # -15 is SIGTERM
+                log.info(f"PREPARE ({asin}): Download cancelled.")
+                return None
             raise subprocess.CalledProcessError(process.returncode, download_command, stderr=process.stderr.read())
         log.info(f"PREPARE ({asin}): Download finished.")
     except subprocess.CalledProcessError as e:
         log.error(f"PREPARE ({asin}): Download failed. Stderr: {e.stderr}")
         return None
+    finally:
+        # ALWAYS UNREGISTER
+        if process:
+            process_registry.unregister(job_id, process)
 
     # --- 2. Get Metadata & Decryption Keys ---
     _yield_progress(asin, "Preparing metadata...", 25, job_id)
@@ -131,6 +144,68 @@ def prepare_book_assets(asin, job_id, temp_dir):
         else:
             raise ValueError("No voucher or AAX file found for decryption.")
 
+        # --- 2a. Load Initial Chapters ---
+        with open(json_file, encoding="utf-8") as cj:
+            chapter_data = json.load(cj)
+        chapters_list = chapter_data.get("content_metadata", {}).get("chapter_info", {}).get("chapters", [])
+
+        # --- 2b. STRETCH GOAL: Time-Based Auto-Chunking ---
+        # If the book has 0 or 1 chapter, we assume it's un-chunked and split it by time.
+        if len(chapters_list) <= 1:
+            try:
+                # Use ffprobe to get total duration in seconds
+                probe_cmd = (
+                    [
+                        "ffprobe",
+                        "-v",
+                        "error",
+                        "-show_entries",
+                        "format=duration",
+                        "-of",
+                        "default=noprint_wrappers=1:nokey=1",
+                    ]
+                    + decryption_args
+                    + [audio_file]
+                )
+                # We run this synchronously as it's very fast
+                probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, check=True)
+                total_duration_sec = float(probe_result.stdout.strip())
+
+                # --- SETTINGS FOR AUTO-CHUNKING ---
+                TRIGGER_THRESHOLD = 1800  # Only chunk if book is longer than 30 minutes
+                CHUNK_SIZE_SEC = 900  # Target chunk size: 15 minutes
+
+                # Only apply if the book is actually longer than the threshold
+                if total_duration_sec > TRIGGER_THRESHOLD:
+                    log.info(
+                        f"PREPARE ({asin}): Single chapter detected ({int(total_duration_sec / 60)}m). Applying auto-chunking (15m)."
+                    )
+                    new_chapters = []
+
+                    # Calculate number of chunks needed
+                    num_chunks = int(total_duration_sec // CHUNK_SIZE_SEC)
+                    if total_duration_sec % CHUNK_SIZE_SEC > 0:
+                        num_chunks += 1
+
+                    for i in range(num_chunks):
+                        start_sec = i * CHUNK_SIZE_SEC
+                        # Ensure the last chunk doesn't go past the end
+                        end_sec = min((i + 1) * CHUNK_SIZE_SEC, total_duration_sec)
+
+                        # Convert to milliseconds for compatibility with the rest of the system
+                        start_ms = int(start_sec * 1000)
+                        length_ms = int((end_sec - start_sec) * 1000)
+
+                        new_chapters.append(
+                            {"title": f"Part {i + 1}", "start_offset_ms": start_ms, "length_ms": length_ms}
+                        )
+
+                    # Replace the original list with our generated one
+                    chapters_list = new_chapters
+
+            except Exception as e:
+                log.warning(f"PREPARE ({asin}): Auto-chunking failed (falling back to original): {e}")
+
         # --- 3. Prepare FFmpeg Metadata File ---
         chapter_txt_path = os.path.join(temp_dir, "chapters.txt")
         log.info(f"PREPARE ({asin}): Writing metadata to {chapter_txt_path}")
@@ -145,7 +220,7 @@ def prepare_book_assets(asin, job_id, temp_dir):
             release_year = release_date.split("-")[0] if release_date else ""
             f.write(f"year={release_year}\n")
 
-            # This part requires an ffprobe call, which was also missing
+            # Determine Copyright info
             ffprobe_command = ["ffprobe"] + decryption_args + [audio_file]
             probe_result = subprocess.run(ffprobe_command, capture_output=True, text=True, encoding="utf-8")
             copyright_info = "Unknown"
@@ -155,7 +230,7 @@ def prepare_book_assets(asin, job_id, temp_dir):
                         copyright_info = line.split(":", 1)[1].strip()
                     else:
                         copyright_info = line.strip()
-                    break  # Stop after finding the first match
+                    break
             f.write(f"copyright={copyright_info}\n")
 
             summary = (
@@ -171,17 +246,12 @@ def prepare_book_assets(asin, job_id, temp_dir):
                 f.write(f"series={book_info['series'][0].get('title', 'N/A')}\n")
                 f.write(f"series-part={book_info['series'][0].get('sequence', 'N/A')}\n")
 
-            with open(json_file, encoding="utf-8") as cj:
-                chapter_data = json.load(cj)
-            chapters_list = chapter_data.get("content_metadata", {}).get("chapter_info", {}).get("chapters", [])
+            # Write chapters (Using our potentially modified list)
             for chapter in chapters_list:
                 f.write("[CHAPTER]\nTIMEBASE=1/1000\n")
                 f.write(f"START={chapter.get('start_offset_ms', 0)}\n")
                 f.write(f"END={chapter.get('start_offset_ms', 0) + chapter.get('length_ms', 0)}\n")
                 f.write(f"title={chapter.get('title', 'Chapter')}\n")
-        with open(json_file, encoding="utf-8") as f:
-            chapter_data = json.load(f)
-        chapters = chapter_data.get("content_metadata", {}).get("chapter_info", {}).get("chapters", [])
 
         # --- 4. Return all context needed for later steps ---
         return {
@@ -189,7 +259,7 @@ def prepare_book_assets(asin, job_id, temp_dir):
             "audio_file": audio_file,
             "cover_file": cover_file,
             "chapter_file": chapter_txt_path,
-            "chapters": chapters,
+            "chapters": chapters_list,  # Return the list we definitely used
             "book_info": book_info,
         }
 
@@ -234,13 +304,35 @@ def encode_chapter_chunk(asin, job_id, temp_dir, chunk_info, context):
         + audio_flags
         + ["-map_metadata", "-1", output_path]
     )
+
+    process = None
     try:
-        subprocess.run(split_command, check=True)
+        # Switch to Popen to capture PID
+        process = subprocess.Popen(split_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process_registry.register(job_id, process)
+
+        # Wait for finish
+        _, stderr = process.communicate()
+
+        if process.returncode != 0:
+            # Handle Cancellation (SIGTERM is -15)
+            if process.returncode == -15:
+                log.info(f"ENCODE ({asin}): Chunk {chunk_index + 1} cancelled.")
+                return None
+            # Handle actual errors
+            raise subprocess.CalledProcessError(process.returncode, split_command, stderr=stderr)
+
         log.info(f"ENCODE ({asin}): Finished encoding chunk {chunk_index + 1}/{total_chunks}")
         return output_path
+
     except subprocess.CalledProcessError as e:
-        log.error(f"ENCODE ({asin}): Failed to encode chunk {chunk_index + 1}. Stderr: {e.stderr}")
+        # Decode stderr if it exists and is bytes
+        err_text = e.stderr.decode("utf-8") if isinstance(e.stderr, bytes) else str(e.stderr)
+        log.error(f"ENCODE ({asin}): Failed to encode chunk {chunk_index + 1}. Stderr: {err_text}")
         return None
+    finally:
+        if process:
+            process_registry.unregister(job_id, process)
 
 
 def merge_book_chunks(asin, job_id, temp_dir, final_output_path, context, encoded_chunk_paths):
@@ -280,18 +372,29 @@ def merge_book_chunks(asin, job_id, temp_dir, final_output_path, context, encode
         + ["-metadata:s:v", 'title="Album cover"', "-metadata:s:v", 'comment="Cover (front)"', final_output_path]
     )
 
+    process = None
     try:
         # Using Popen to capture logs in real-time if needed for debugging
         process = subprocess.Popen(
             merge_command, cwd=temp_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8"
         )
+        process_registry.register(job_id, process)  # <--- REGISTER
+
         _, stderr = process.communicate()  # Wait for completion
 
         if process.returncode != 0:
+            # Handle Cancellation
+            if process.returncode == -15:
+                log.info(f"MERGE ({asin}): Merge process cancelled.")
+                return False
             raise subprocess.CalledProcessError(process.returncode, merge_command, stderr=stderr)
 
         log.info(f"MERGE ({asin}): Successfully merged and finalized file at {final_output_path}")
         return True
+
     except subprocess.CalledProcessError as e:
         log.error(f"MERGE ({asin}): Final merge failed. Stderr:\n{e.stderr}")
         return False
+    finally:
+        if process:
+            process_registry.unregister(job_id, process)  # <--- UNREGISTER

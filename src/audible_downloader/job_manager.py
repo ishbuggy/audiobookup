@@ -11,6 +11,7 @@ from threading import Event, Lock, Thread
 from . import announcer, app  # Needed for the app_context
 from .db import get_books_for_auto_job, get_db_connection
 from .logger import log
+from .process_registry import process_registry
 from .processing_logic import BookProcessor
 from .settings import load_settings
 from .sync_logic import run_sync_logic
@@ -379,10 +380,22 @@ def start_new_job(job_type, asins=None, job_params=None):
 def cancel_active_job():
     """Sends the cancellation signal to the active job."""
     with job_lock:
-        if active_job["job_id"] is None or active_job["stop_event"] is None:
+        job_id = active_job["job_id"]  # Capture local var for clarity
+
+        if job_id is None or active_job["stop_event"] is None:
             return False, {"error": "No active job to cancel."}
 
-        log.info(f"API: Received cancel request for job {active_job['job_id']}")
-        active_job["stop_event"].set()  # This sets the signal
+        log.info(f"API: Received cancel request for job {job_id}")
 
-        return True, {"success": True, "message": "Cancel signal sent."}
+        # 1. Signal the Python threads to stop gracefully
+        active_job["stop_event"].set()
+
+        # 2. Force kill any underlying subprocesses (ffmpeg, audible-cli)
+        # This ensures we don't wait for a 40-minute encode to finish before stopping.
+        killed_count = process_registry.kill_job_processes(job_id)
+
+        message = "Cancel signal sent."
+        if killed_count > 0:
+            message += f" Terminated {killed_count} active background process(es)."
+
+        return True, {"success": True, "message": message}

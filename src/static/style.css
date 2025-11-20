@@ -525,6 +525,65 @@ h2 {
     animation: pulse 2s infinite;
 }
 
+/* --- 3f. Toast Notifications --- */
+
+#toast-container {
+    position: fixed;
+    top: 80px; /* Below the header */
+    right: 20px;
+    z-index: 3000;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.toast {
+    min-width: 250px;
+    background-color: var(--color-bg-container);
+    color: var(--color-text-primary);
+    border: 1px solid var(--color-border);
+    border-left-width: 5px;
+    padding: 15px 20px;
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    opacity: 0;
+    transform: translateX(20px);
+    transition:
+        opacity 0.3s ease,
+        transform 0.3s ease;
+}
+
+.toast.show {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+.toast.success {
+    border-left-color: var(--color-accent-green);
+}
+.toast.error {
+    border-left-color: var(--color-accent-red);
+}
+.toast.info {
+    border-left-color: var(--color-accent-blue);
+}
+
+.toast i {
+    font-size: 1.2em;
+}
+.toast.success i {
+    color: var(--color-accent-green);
+}
+.toast.error i {
+    color: var(--color-accent-red);
+}
+.toast.info i {
+    color: var(--color-accent-blue);
+}
+
 /* ==========================================================================
    4. Page-Specific Styles
    ========================================================================== */

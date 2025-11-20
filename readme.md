@@ -28,7 +28,9 @@ This entire system runs as a single Docker container, providing a seamless user 
     - **Simple & Advanced Modes:** Configure schedules using a simple UI (e.g., "every 4 hours" or "daily at 02:00"). Enable **Advanced Mode** to set schedules with full, standard **cron expressions**.
     - **Timezone Support:** A dedicated setting allows you to select your local timezone, ensuring all scheduled jobs run at the correct local time. _Ensure the timezone is properly set in your docker compose file for this feature to work properly._
 - **Intelligent Parallel Processing:** The application uses a sophisticated, priority-based task runner to process multiple books and chapters in parallel. It intelligently allocates all available CPU cores to the highest-priority tasks, ensuring maximum efficiency and the fastest possible completion time for each book based on the resources allocated to the container.
-- **Job Management:** Cancel in-progress download jobs directly from the UI.
+    - **Smart Auto-Chunking:** Automatically detects books consisting of a single massive chapter (longer than 30 minutes) and splits them into 15-minute segments for easier playback navigation.
+- **Robust Job Cancellation:** The "Cancel Job" button now performs a hard stop on background processes, terminating downloads and encodings instantly.
+- **Maintenance Tools:** Built-in tools to **Clear Image Cache** and **Reset Audible Connection** directly from the Settings UI, removing the need for manual file system operations.
 - **Job History with Filtering & Search:** View a complete history of all past jobs on a dedicated `/history` page. The page includes controls to **filter** by job type and status, and to **search** for jobs containing specific books by title or author.
 - **Detailed Book View:** Click on any book to see a detailed modal with high-resolution art and full metadata. By default, summaries of each item are truncated, but a full summary of the book can be grabbed with a single button.
 - **Settings Configuration:** Configure features from a dedicated `/settings` page. This includes custom folder/file naming templates, audio quality, and a simplified "Job Settings" UI that allows for auto-detection of CPU cores in Normal Mode, or manual control over `Total Processing Cores` and `Max Parallel Downloads` in Advanced Mode.
@@ -300,27 +302,28 @@ This method is for users who are building the image from the source code.
 
 ### Managing Settings
 
-Application settings are stored on your host machine at `./appdata/config/settings.json`. You can back up this file to save your configuration.
+Application settings are stored on your host machine at `./appdata/config/settings.json`. You can back up this file to save your configuration, and can import a saved configuration file.
 
 ### Clearing the Image Cache
 
-Cover art is cached on your host machine at `./appdata/config/covers`. To refresh them:
+Cover art is cached on your host machine at `./appdata/config/covers`. If images appear broken or you want to force a refresh:
 
-1.  Stop the container: `docker-compose down`
-2.  Delete the covers directory: `rm -rf ./appdata/config/covers`
-3.  Restart and run a **Sync Library**.
+1.  Navigate to the **Settings** page.
+2.  Scroll to the **Audible Connection** section.
+3.  Click the **"Clear Cache"** button.
+4.  Confirm the action. All images will be deleted and re-downloaded during the next **Sync Library**.
 
 ### Resetting Your Audible Connection
 
-If your connection to Audible expires (e.g., you change your Audible password), use the **"Re-authenticate"** button that appears in the UI banner. For a full manual reset of the Audible connection:
+If your connection to Audible expires (e.g., you change your Audible password) or you wish to switch accounts:
 
-1.  Stop the container: `docker-compose down`
-2.  Delete the Audible setup flag and the authentication directory from your **database** volume:
-    ```bash
-    rm ./appdata/database/.setup_complete
-    rm -rf ./appdata/database/.audible
-    ```
-3.  Restart the container: `docker-compose up -d`. You will be guided through the **Audible Setup** part of the first-time setup process again.
+1.  Navigate to the **Settings** page.
+2.  Scroll to the **Audible Connection** section.
+3.  Click the **"Reset Connection"** button.
+4.  Confirm the action. The application will securely delete your authentication tokens and restart itself.
+5.  You will be automatically redirected to the **First-Time Setup** wizard to reconnect.
+
+_(Manual Method: If you cannot access the UI, you can still reset by stopping the container and deleting `.setup_complete` and the `.audible` directory from your `/database` volume.)_
 
 ### Resetting Your Local User Password
 

@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2025-11-20
+
+This release focuses on stability, user experience, and architectural improvements. It introduces a modular frontend structure, robust job cancellation, smart auto-chunking for large files, and several quality-of-life UI enhancements.
+
+### Added
+
+- **Smart Auto-Chunking:** Books that consist of a single long chapter (over 30 minutes) are now automatically split into 15-minute segments during conversion, ensuring better navigation on players that struggle with massive files.
+- **True Job Cancellation:** The "Cancel Job" button now instantly terminates active background processes (like `ffmpeg` encoding or `audible-cli` downloads) via `SIGTERM`, stopping jobs immediately rather than waiting for the current step to finish.
+- **Maintenance Tools:** Added dedicated buttons in the Settings menu to **Reset Audible Connection** and **Clear Image Cache** without needing to access the file system.
+- **Toast Notifications:** Replaced blocking alerts with non-intrusive "Toast" popups for actions like saving settings or starting jobs.
+- **Copy Log Button:** Added a button to the activity log footer to instantly copy the full log contents to the clipboard.
+- **Startup Cleanup:** The application now automatically detects and removes orphaned temporary files from previous sessions (e.g., after a container crash) upon startup to prevent disk bloat.
+
+### Changed
+
+- **MAJOR: Frontend Modularization:** The monolithic `index.js` has been refactored into distinct ES6 modules (`job-manager`, `library-manager`, `modal-manager`). This improves code maintainability and prepares the application for a future migration to a modern frontend framework.
+- **Sync Logic:** The library sync process now registers its subprocesses, allowing it to be safely and instantly cancelled by the Job Manager.
+
+### Fixed
+
+- **CRITICAL: Reverse Proxy Compatibility:** Resolved a critical issue where the application would return a `403 Forbidden` error when accessed through a reverse proxy with a Web Application Firewall (WAF) enabled.
+- **CRITICAL: Application Security:** Hardened the login process against Open Redirect vulnerabilities by validating the `next` redirect parameter on the server.
+- **CRITICAL: Login Page Access:** Fixed a bug that caused an `Internal Server Error` when accessing the login page via a `GET` request.
+- **UI (Settings):** Corrected a bug where clicking the descriptive text for the new "Reset Connection" feature would incorrectly trigger the button's action.
+
 ## [0.14.2] - 2025-10-17
 
 This is a quality-of-life and code-health release that resolves numerous UI bugs, improves the user experience on the settings page, and prepares the frontend for future development.

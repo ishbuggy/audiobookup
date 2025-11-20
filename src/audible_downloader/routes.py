@@ -521,6 +521,33 @@ def cancel_job():
         return jsonify(result), 404
 
 
+@app.route("/api/clear_image_cache", methods=["POST"])
+@login_required
+def clear_image_cache():
+    """
+    Deletes all cached cover art from the /config/covers directory.
+    This forces a re-download of all images on the next library sync.
+    """
+    log.warning("Received request to clear the image cache.")
+    try:
+        # The COVERS_DIR constant is already imported from __init__.py
+        if os.path.isdir(COVERS_DIR):
+            # Use shutil.rmtree to recursively delete the entire directory
+            shutil.rmtree(COVERS_DIR)
+            log.info(f"Successfully removed image cache directory: {COVERS_DIR}")
+
+        # Re-create the empty directory immediately so the app doesn't crash
+        # if it tries to write a new cover before a sync is run.
+        os.makedirs(COVERS_DIR, exist_ok=True)
+        log.info(f"Re-created empty image cache directory: {COVERS_DIR}")
+
+        return jsonify(success=True, message="Image cache has been cleared. Run a library sync to re-download covers.")
+
+    except Exception as e:
+        log.error(f"An error occurred while clearing the image cache: {e}", exc_info=True)
+        return jsonify(error=f"An error occurred while clearing the cache: {e}"), 500
+
+
 @app.route("/api/reset_authentication", methods=["POST"])
 @login_required
 def reset_authentication():
@@ -707,8 +734,14 @@ def login():
             # If credentials are valid, store username in the session
             session["username"] = username
 
-            # The login_required decorator on 'index' will handle the redirect
-            # to the correct setup step if needed.
+            # --- SECURITY: Validate the 'next' parameter before redirecting ---
+            # Get the requested redirect path from the URL query parameter.
+            next_page = request.args.get("next")
+
+            # Validate that the path is a local, relative path.
+            # This prevents "Open Redirect" vulnerabilities where an attacker could
+            # craft a link that logs a user in and then redirects them to a malicious site.
+            # A safe path must start with '/' and not with '//' or any protocol.
             next_page = request.args.get("next")
             return redirect(next_page or url_for("index"))
         else:

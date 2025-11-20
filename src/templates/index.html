@@ -211,6 +211,7 @@
                     <p id="latest-log-line"></p>
                 </div>
                 <div class="log-actions">
+                    <button id="copy-log-btn" title="Copy Log to Clipboard"><i class="fas fa-copy"></i></button>
                     <button id="toggle-log-btn" title="Toggle Log View"><i class="fas fa-chevron-up"></i></button>
                     <form id="clear-log-form" action="/clear_log" method="post" style="margin: 0">
                         <button type="submit" title="Clear Log">Clear</button>
@@ -351,7 +352,8 @@
         <!-- Load shared helper functions first -->
         <script src="{{ url_for('static', filename='js/ui.js') }}"></script>
         <!-- Load the page-specific logic for the index page -->
-        <script src="{{ url_for('static', filename='js/index.js') }}"></script>
+        <!-- MODIFIED: Added type="module" -->
+        <script type="module" src="{{ url_for('static', filename='js/index.js') }}"></script>
         <!-- Load the theme switcher last -->
         <script src="{{ url_for('static', filename='js/theme.js') }}"></script>
     </body>

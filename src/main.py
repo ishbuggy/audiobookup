@@ -9,6 +9,9 @@ import atexit
 # Import the 'os' module to interact with the filesystem
 import os
 
+# Import the 'shutil' module for directory cleanup
+import shutil
+
 # Import the app and socketio objects.
 from audible_downloader import TEMP_DIR, app, socketio
 
@@ -25,6 +28,15 @@ from audible_downloader.scheduler import scheduler_worker
 from audible_downloader.task_runner import task_runner
 
 if __name__ == "__main__":
+    # --- Startup Cleanup: Temp Directory ---
+    # If the container crashed or was force-stopped previously, temp files
+    # (partial downloads, chunks) might be left behind. We wipe them now.
+    if os.path.exists(TEMP_DIR):
+        try:
+            shutil.rmtree(TEMP_DIR)
+            log.info(f"STARTUP: Cleared stale temporary files from {TEMP_DIR}")
+        except Exception as e:
+            log.warning(f"STARTUP: Failed to clear temp dir {TEMP_DIR}: {e}")
 
     # Ensure the temporary processing directory exists on startup.
     # This prevents errors if the directory gets deleted or is missing on a fresh install.

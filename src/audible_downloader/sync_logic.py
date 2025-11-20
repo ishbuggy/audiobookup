@@ -12,6 +12,7 @@ from . import DATABASE_DIR
 # Import necessary components from our other modules
 from .db import get_db_connection
 from .logger import log
+from .process_registry import process_registry
 
 
 # --- Private Helper: Yields progress updates in the correct format ---
@@ -58,8 +59,23 @@ def _fetch_and_update_from_audible(job_id, sync_mode="DEEP"):
             command = ["audible", "api", endpoint]
             env = os.environ.copy()
             env["HOME"] = DATABASE_DIR
-            result = subprocess.run(command, capture_output=True, text=True, check=True, encoding="utf-8", env=env)
-            response = json.loads(result.stdout)
+
+            # --- CHANGED: Use Popen + Registry ---
+            process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env
+            )
+            process_registry.register(job_id, process)
+            stdout, stderr = process.communicate()
+            process_registry.unregister(job_id, process)
+
+            if process.returncode != 0:
+                if process.returncode == -15:  # SIGTERM (Cancelled)
+                    log.info(f"SYNC-LOGIC ({job_id}): API fetch cancelled.")
+                    yield from _yield_progress("Cancelled", 100)
+                    return 0  # Return 0 items to stop gracefully
+                raise subprocess.CalledProcessError(process.returncode, command, stderr=stderr)
+
+            response = json.loads(stdout)
             items_on_page = response.get("items", [])
             if not items_on_page:
                 break
@@ -104,12 +120,20 @@ def _fetch_and_update_from_audible(job_id, sync_mode="DEEP"):
                     with open(original_cover_path, "wb") as f:
                         for chunk in response.iter_content(chunk_size=8192):
                             f.write(chunk)
-                    # Ruff E501: Break long command list into multiple lines
                     ffmpeg_command = [
-                        "ffmpeg", "-y", "-i", original_cover_path,
-                        "-vf", "scale=200:200", thumb_cover_path
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        original_cover_path,
+                        "-vf",
+                        "scale=200:200",
+                        thumb_cover_path,
                     ]
-                    subprocess.run(ffmpeg_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    # --- CHANGED: Popen + Registry for cover resize ---
+                    p_cover = subprocess.Popen(ffmpeg_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    process_registry.register(job_id, p_cover)
+                    p_cover.communicate()
+                    process_registry.unregister(job_id, p_cover)
                 except (requests.exceptions.RequestException, subprocess.CalledProcessError) as e:
                     log.warning(f"SYNC-LOGIC ({job_id}): Could not process cover for {asin}: {e}")
 
@@ -145,8 +169,18 @@ def _fetch_and_update_from_audible(job_id, sync_mode="DEEP"):
                     ),
                     # Ruff E501: Break long tuple of arguments into multiple lines
                     (
-                        asin, author, title, series, narrator, runtime_min, release_date, publisher,
-                        language, purchase_date, summary, date_added
+                        asin,
+                        author,
+                        title,
+                        series,
+                        narrator,
+                        runtime_min,
+                        release_date,
+                        publisher,
+                        language,
+                        purchase_date,
+                        summary,
+                        date_added,
                     ),
                 )
             else:
@@ -160,8 +194,18 @@ def _fetch_and_update_from_audible(job_id, sync_mode="DEEP"):
                     ),
                     # Ruff E501: Break long tuple of arguments into multiple lines
                     (
-                        author, title, series, narrator, runtime_min, release_date, publisher,
-                        language, purchase_date, date_added, summary, asin
+                        author,
+                        title,
+                        series,
+                        narrator,
+                        runtime_min,
+                        release_date,
+                        publisher,
+                        language,
+                        purchase_date,
+                        date_added,
+                        summary,
+                        asin,
                     ),
                 )
         con.commit()
@@ -216,13 +260,35 @@ def _scan_local_filesystem(job_id):
                 asin = cache[filepath]["asin"]
                 cache_hits += 1
             else:
-                # Ruff E501: Break long command list into multiple lines
                 ffprobe_cmd = [
-                    "ffprobe", "-v", "quiet", "-show_entries", "format_tags=asin",
-                    "-of", "default=noprint_wrappers=1:nokey=1", filepath
+                    "ffprobe",
+                    "-v",
+                    "quiet",
+                    "-show_entries",
+                    "format_tags=asin",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    filepath,
                 ]
-                result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, check=True)
-                asin = result.stdout.strip()
+
+                # --- CHANGED: Use Popen + Registry ---
+                process = subprocess.Popen(ffprobe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                process_registry.register(job_id, process)
+                stdout, stderr = process.communicate()
+                process_registry.unregister(job_id, process)
+
+                if process.returncode != 0:
+                    if process.returncode == -15:  # SIGTERM
+                        log.info(f"SYNC-LOGIC ({job_id}): File scan cancelled.")
+                        yield from _yield_progress("Cancelled", 100)
+                        return found_files  # Return what we have so far
+                    # Determine if this is a critical error or just a bad file
+                    log.warning(f"SYNC-LOGIC ({job_id}): ffprobe failed for '{filepath}': {stderr}")
+                    continue  # Skip this file
+
+                asin = stdout.strip()
+                # -------------------------------------
+
             if asin:
                 found_files[asin] = filepath
                 new_cache_lines.append(f"{current_mtime}|{asin}|{filepath}\n")
@@ -234,6 +300,7 @@ def _scan_local_filesystem(job_id):
     log.info(f"SYNC-LOGIC ({job_id}): Scan complete. Processed {files_processed} files ({cache_hits} from cache).")
 
     return found_files
+
 
 # --- Private Helper 3: Reconcile DB with filesystem scan ---
 def _reconcile_database(job_id, found_files):
@@ -263,8 +330,7 @@ def _reconcile_database(job_id, found_files):
         con.commit()
     # Ruff E501: Break long f-string into multiple lines
     log.info(
-        f"SYNC-LOGIC ({job_id}): Sync complete. "
-        f"Marked Missing: {marked_missing}, Untracked Fixed: {fixed_untracked}"
+        f"SYNC-LOGIC ({job_id}): Sync complete. Marked Missing: {marked_missing}, Untracked Fixed: {fixed_untracked}"
     )
 
 

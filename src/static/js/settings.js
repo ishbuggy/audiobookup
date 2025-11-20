@@ -56,44 +56,6 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     /**
-     * Displays the custom-styled modal alert.
-     * @param {string} message - The main message content (can include HTML).
-     * @param {string} [title='<i class...'] - The title content (can include HTML for icons).
-     */
-    function showCustomAlert(
-        message,
-        title = '<i class="fas fa-exclamation-triangle" style="color: #ffc107;"></i> Warning',
-    ) {
-        document.getElementById("custom-alert-title").innerHTML = title;
-        document.getElementById("custom-alert-message").innerHTML = message;
-        document.getElementById("custom-alert-modal").style.display = "flex";
-        document.body.classList.add("modal-open");
-    }
-
-    /**
-     * Hides the custom-styled modal alert.
-     */
-    function closeCustomAlert() {
-        document.getElementById("custom-alert-modal").style.display = "none";
-        document.body.classList.remove("modal-open");
-    }
-
-    let confirmCallback = null; // To store the action for the confirm button
-
-    function showConfirmationModal(title, message, onConfirm) {
-        document.getElementById("confirmation-title").innerHTML = title;
-        document.getElementById("confirmation-message").textContent = message;
-        confirmCallback = onConfirm;
-        document.getElementById("confirmation-modal").style.display = "flex";
-        document.body.classList.add("modal-open");
-    }
-
-    function closeConfirmationModal() {
-        document.getElementById("confirmation-modal").style.display = "none";
-        document.body.classList.remove("modal-open");
-        confirmCallback = null; // Clear the callback
-    }
-    /**
      * Handles the API call and UI updates for the manual authentication check.
      * @param {HTMLButtonElement} btn - The "Run Authentication Check" button.
      */
@@ -265,8 +227,6 @@ document.addEventListener("DOMContentLoaded", () => {
     const autoProcessToggle = document.getElementById("auto-process-toggle");
     const autoProcessOptions = document.getElementById("auto-process-options");
     const processErrorCheckbox = document.getElementById("auto-process-error-checkbox");
-    const customAlertOkBtn = document.getElementById("custom-alert-ok-btn");
-    const customAlertModal = document.getElementById("custom-alert-modal");
     const saveSettingsBtn = document.getElementById("save-settings-btn");
     const exportSettingsBtn = document.getElementById("export-settings-btn");
     const importSettingsBtn = document.getElementById("import-settings-btn");
@@ -277,6 +237,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const advancedModeToggle = document.getElementById("advanced-mode-toggle");
     const totalCoresDisplay = document.getElementById("total-cores-display");
     const totalCoresInput = document.getElementById("total-processing-cores-input");
+    const resetAuthBtn = document.getElementById("reset-auth-btn");
+    const clearCacheBtn = document.getElementById("clear-cache-btn");
 
     // --- 4. ATTACH ALL EVENT LISTENERS ---
 
@@ -284,6 +246,66 @@ document.addEventListener("DOMContentLoaded", () => {
     const fastSyncScheduler = setupSchedulerWidget("fast_sync", "0 */4 * * *");
     const deepSyncScheduler = setupSchedulerWidget("deep_sync", "0 3 * * *");
     const processScheduler = setupSchedulerWidget("process", "0 4 * * *");
+
+    if (resetAuthBtn) {
+        resetAuthBtn.addEventListener("click", () => {
+            // Use the global confirmation modal function from ui.js
+            showConfirmationModal(
+                '<i class="fas fa-trash-alt"></i> Reset Audible Connection?',
+                "This will delete your current Audible login credentials and force the application to restart. You will be required to complete the setup wizard again. Are you sure?",
+                // The third argument is the callback function to run on confirmation.
+                // We call the global handleResetAuth function from ui.js.
+                handleResetAuth 
+            );
+        });
+    }
+
+    // START: CLEAR CACHE BUTTON
+    if (clearCacheBtn) {
+        // This is the function that will be called if the user clicks "Confirm".
+        const handleClearCache = async () => {
+            // Immediately show a "processing" alert to the user.
+            showCustomAlert(
+                "Clearing the image cache... Please wait.",
+                '<i class="fas fa-spinner fa-spin"></i> Processing...'
+            );
+
+            try {
+                // Call the new API endpoint.
+                const response = await fetch("/api/clear_image_cache", { method: "POST" });
+                const data = await response.json();
+
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || "Failed to clear cache on the server.");
+                }
+
+                // On success, update the alert with the success message from the server.
+                showCustomAlert(
+                    data.message,
+                    '<i class="fas fa-check-circle" style="color: #28a745;"></i> Success'
+                );
+
+            } catch (error) {
+                console.error("Clear image cache failed:", error);
+                // On failure, update the alert to show the error.
+                showCustomAlert(
+                    `Could not clear the image cache: ${error.message}`,
+                    '<i class="fas fa-times-circle" style="color: #dc3545;"></i> Error'
+                );
+            }
+        };
+
+        // Attach the main click listener to the button.
+        clearCacheBtn.addEventListener("click", () => {
+            // Use our global confirmation modal function from ui.js.
+            showConfirmationModal(
+                '<i class="fas fa-broom"></i> Clear Image Cache?',
+                "This will delete all downloaded cover art. Are you sure you want to proceed? The images will be re-downloaded on the next library sync.",
+                // Pass the handleClearCache function as the callback to run on confirmation.
+                handleClearCache
+            );
+        });
+    }
 
     // Advanced Mode Toggle
     const setAdvancedMode = (isAdvanced) => {
@@ -331,21 +353,8 @@ document.addEventListener("DOMContentLoaded", () => {
     autoProcessToggle.addEventListener("change", () =>
         toggleOptionsGroup(autoProcessToggle, autoProcessOptions),
     );
-    const confirmationCancelBtn = document.getElementById("confirmation-cancel-btn");
-    const confirmationConfirmBtn = document.getElementById("confirmation-confirm-btn");
-    const confirmationModal = document.getElementById("confirmation-modal");
 
-    confirmationCancelBtn.addEventListener("click", closeConfirmationModal);
-    confirmationConfirmBtn.addEventListener("click", () => {
-        if (typeof confirmCallback === "function") {
-            confirmCallback();
-        }
-        closeConfirmationModal();
-    });
-    // Also add the window click listener for the new modal
-    window.addEventListener("click", (event) => {
-        if (event.target == confirmationModal) closeConfirmationModal();
-    });
+
 
     // --- Accordion Resize on Window Change ---
     // This ensures that if an accordion is open and the window is resized
@@ -448,6 +457,9 @@ document.addEventListener("DOMContentLoaded", () => {
                         saveSettingsBtn.classList.remove("green");
                         saveSettingsBtn.classList.add("blue");
                     }, 2000);
+                    if (window.showToast) {
+                        window.showToast("Settings saved successfully!", "success");
+                    }
                 }
             } catch (error) {
                 showCustomAlert(
@@ -470,11 +482,6 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     });
 
-    // Other Button Event Listeners
-    customAlertOkBtn.addEventListener("click", closeCustomAlert);
-    window.addEventListener("click", (event) => {
-        if (event.target == customAlertModal) closeCustomAlert();
-    });
     audibleAuthCheckBtn.addEventListener("click", () => handleManualAudibleAuthCheck(audibleAuthCheckBtn));
 
 // Auto Concurrency Button
@@ -606,7 +613,14 @@ document.addEventListener("DOMContentLoaded", () => {
     fetch("/api/settings")
         .then((res) => res.json())
         .then((settings) => {
-            // This will set the body class and populate the cron widgets correctly.
+            // Populate the widgets with server data first
+            if (settings.tasks) {
+                fastSyncScheduler.populateFromCron(settings.tasks.fast_sync_schedule.cron);
+                deepSyncScheduler.populateFromCron(settings.tasks.deep_sync_schedule.cron);
+                processScheduler.populateFromCron(settings.tasks.process_schedule.cron);
+            }
+
+            // This will set the body class and update the UI visibility
             setAdvancedMode(settings.advanced_mode_enabled);
         });
 

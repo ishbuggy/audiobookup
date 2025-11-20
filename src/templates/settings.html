@@ -200,6 +200,36 @@
                             </button>
                             <div id="audible-auth-check-result" style="font-size: 0.9em; min-height: 1.2em"></div>
                         </div>
+                        <div style="border-top: 1px solid var(--color-border); margin-top: 1em; padding-top: 1em">
+                            <div class="form-group">
+                                <label>
+                                    Clear Image Cache
+                                    <small style="display: block; font-weight: normal; color: #6c757d">
+                                        This will delete all downloaded cover art. The images will be re-downloaded the
+                                        next time you run a library sync. This can be useful for fixing corrupted or
+                                        missing images.
+                                    </small>
+                                </label>
+                                <button id="clear-cache-btn" class="action-button">
+                                    <i class="fas fa-broom"></i> Clear Cache
+                                </button>
+                            </div>
+                        </div>
+                        <div style="border-top: 1px solid var(--color-border); margin-top: 1em; padding-top: 1em">
+                            <div class="form-group">
+                                <label>
+                                    Reset Audible Connection
+                                    <small style="display: block; font-weight: normal; color: #dc3545">
+                                        <strong>Warning:</strong> This will delete your current Audible login
+                                        credentials and force the application to restart. You will be required to
+                                        complete the setup wizard again.
+                                    </small>
+                                </label>
+                                <button id="reset-auth-btn" class="action-button">
+                                    <i class="fas fa-trash-alt"></i> Reset
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </div>
                 <div class="accordion-item">
