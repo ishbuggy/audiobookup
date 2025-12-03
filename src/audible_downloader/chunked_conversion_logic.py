@@ -23,7 +23,6 @@ from .settings import load_settings
 
 # A lock to safely track progress across multiple threads, which will still be useful.
 progress_lock = Lock()
-00
 
 
 def _yield_progress(asin, status_text, progress, job_id=None):
@@ -75,8 +74,15 @@ def prepare_book_assets(asin, job_id, temp_dir):
     ]
     process = None
     try:
+        # FIX: Added errors="replace" to handle non-UTF-8 characters in download progress output
         process = subprocess.Popen(
-            download_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env
+            download_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
         )
         # REGISTER THE PROCESS
         process_registry.register(job_id, process)
@@ -107,7 +113,16 @@ def prepare_book_assets(asin, job_id, temp_dir):
     try:
         endpoint, params = f"/1.0/library/{asin}", "response_groups=media,contributors,series,category_ladders"
         meta_command = ["audible", "api", "-p", params, endpoint]
-        result = subprocess.run(meta_command, capture_output=True, text=True, check=True, encoding="utf-8", env=env)
+        # FIX: Added errors="replace"
+        result = subprocess.run(
+            meta_command,
+            capture_output=True,
+            text=True,
+            check=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
         book_info = json.loads(result.stdout).get("item")
 
         def _find_file_by_ext(directory, extensions):
@@ -134,8 +149,15 @@ def prepare_book_assets(asin, job_id, temp_dir):
             )
             decryption_args = ["-audible_key", key, "-audible_iv", iv]
         elif audio_file and audio_file.lower().endswith(".aax"):
+            # FIX: Added errors="replace"
             result = subprocess.run(
-                ["audible", "activation-bytes"], capture_output=True, text=True, check=True, encoding="utf-8", env=env
+                ["audible", "activation-bytes"],
+                capture_output=True,
+                text=True,
+                check=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
             )
             activation_bytes = result.stdout.strip()
             if not activation_bytes:
@@ -168,7 +190,10 @@ def prepare_book_assets(asin, job_id, temp_dir):
                     + [audio_file]
                 )
                 # We run this synchronously as it's very fast
-                probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, check=True)
+                # FIX: Added errors="replace"
+                probe_result = subprocess.run(
+                    probe_cmd, capture_output=True, text=True, check=True, encoding="utf-8", errors="replace"
+                )
                 total_duration_sec = float(probe_result.stdout.strip())
 
                 # --- SETTINGS FOR AUTO-CHUNKING ---
@@ -178,7 +203,8 @@ def prepare_book_assets(asin, job_id, temp_dir):
                 # Only apply if the book is actually longer than the threshold
                 if total_duration_sec > TRIGGER_THRESHOLD:
                     log.info(
-                        f"PREPARE ({asin}): Single chapter detected ({int(total_duration_sec / 60)}m). Applying auto-chunking (15m)."
+                        f"PREPARE ({asin}): Single chapter detected ({int(total_duration_sec / 60)}m). "
+                        "Applying auto-chunking (15m)."
                     )
                     new_chapters = []
 
@@ -222,7 +248,10 @@ def prepare_book_assets(asin, job_id, temp_dir):
 
             # Determine Copyright info
             ffprobe_command = ["ffprobe"] + decryption_args + [audio_file]
-            probe_result = subprocess.run(ffprobe_command, capture_output=True, text=True, encoding="utf-8")
+            # FIX: Added errors="replace" - This is where the user's specific crash occurred
+            probe_result = subprocess.run(
+                ffprobe_command, capture_output=True, text=True, encoding="utf-8", errors="replace"
+            )
             copyright_info = "Unknown"
             for line in probe_result.stderr.splitlines():
                 if "copyright" in line.lower():
@@ -308,6 +337,7 @@ def encode_chapter_chunk(asin, job_id, temp_dir, chunk_info, context):
     process = None
     try:
         # Switch to Popen to capture PID
+        # FIX: Not using text=True here as ffmpeg output is usually binary/mixed, but handled decoding in exception
         process = subprocess.Popen(split_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         process_registry.register(job_id, process)
 
@@ -326,8 +356,8 @@ def encode_chapter_chunk(asin, job_id, temp_dir, chunk_info, context):
         return output_path
 
     except subprocess.CalledProcessError as e:
-        # Decode stderr if it exists and is bytes
-        err_text = e.stderr.decode("utf-8") if isinstance(e.stderr, bytes) else str(e.stderr)
+        # FIX: Safer decoding of stderr
+        err_text = e.stderr.decode("utf-8", errors="replace") if isinstance(e.stderr, bytes) else str(e.stderr)
         log.error(f"ENCODE ({asin}): Failed to encode chunk {chunk_index + 1}. Stderr: {err_text}")
         return None
     finally:
@@ -375,8 +405,15 @@ def merge_book_chunks(asin, job_id, temp_dir, final_output_path, context, encode
     process = None
     try:
         # Using Popen to capture logs in real-time if needed for debugging
+        # FIX: Added errors="replace"
         process = subprocess.Popen(
-            merge_command, cwd=temp_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8"
+            merge_command,
+            cwd=temp_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         process_registry.register(job_id, process)  # <--- REGISTER
 

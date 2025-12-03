@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1] - 2025-12-03
+
+### Fixed
+
+- **CRITICAL: Unicode Metadata Crash:** Fixed a critical bug where the download process would crash when processing books containing special characters (e.g., copyright symbols ©, accented letters) in their metadata. The system now gracefully handles non-UTF-8 characters during the metadata extraction phase.
+
 ## [0.15.0] - 2025-11-20
 
 This release focuses on stability, user experience, and architectural improvements. It introduces a modular frontend structure, robust job cancellation, smart auto-chunking for large files, and several quality-of-life UI enhancements.
