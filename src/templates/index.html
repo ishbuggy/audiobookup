@@ -211,11 +211,14 @@
                     <p id="latest-log-line"></p>
                 </div>
                 <div class="log-actions">
+                    <button id="download-log-btn" title="Download Full Log" style="margin-right: 0.5em">
+                        <i class="fas fa-file-download"></i>
+                    </button>
                     <button id="copy-log-btn" title="Copy Log to Clipboard"><i class="fas fa-copy"></i></button>
-                    <button id="toggle-log-btn" title="Toggle Log View"><i class="fas fa-chevron-up"></i></button>
                     <form id="clear-log-form" action="/clear_log" method="post" style="margin: 0">
                         <button type="submit" title="Clear Log">Clear</button>
                     </form>
+                    <button id="toggle-log-btn" title="Toggle Log View"><i class="fas fa-chevron-up"></i></button>
                 </div>
             </div>
             <pre id="log-output">{{ log_history }}</pre>

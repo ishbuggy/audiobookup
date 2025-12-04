@@ -59,6 +59,7 @@ def _fetch_and_update_from_audible(job_id, sync_mode="DEEP"):
             command = ["audible", "api", endpoint]
             env = os.environ.copy()
             env["HOME"] = DATABASE_DIR
+            log.debug(f"SYNC-LOGIC ({job_id}): Fetching page {page}: {endpoint}")
 
             # --- CHANGED: Use Popen + Registry ---
             process = subprocess.Popen(
@@ -257,9 +258,11 @@ def _scan_local_filesystem(job_id):
         try:
             current_mtime = str(int(os.path.getmtime(filepath)))
             if filepath in cache and cache[filepath]["mtime"] == current_mtime:
+                log.debug(f"SYNC-LOGIC ({job_id}): Cache HIT for {filepath}")
                 asin = cache[filepath]["asin"]
                 cache_hits += 1
             else:
+                log.debug(f"SYNC-LOGIC ({job_id}): Cache MISS for {filepath}. Running ffprobe...")
                 ffprobe_cmd = [
                     "ffprobe",
                     "-v",

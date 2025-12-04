@@ -107,7 +107,7 @@ class TaskRunner:
         if not self._worker_thread or not self._worker_thread.is_alive():
             log.error("TASK_RUNNER: Attempted to submit task, but the runner is not active.")
             return
-        log.info(f"TASK_RUNNER: Submitting new task for Job {task.job_id} with priority {task.priority.name}")
+        log.debug(f"TASK_RUNNER: Submitting new task for Job {task.job_id} with priority {task.priority.name}")
         self.queue.put(task)
 
     def _worker_loop(self):
@@ -132,14 +132,14 @@ class TaskRunner:
     def _run_and_log_task(self, task: Task):
         """Wrapper to execute a task and handle logging and task completion."""
         try:
-            log.info(f"TASK_RUNNER: Worker picked up task for Job {task.job_id} (Priority: {task.priority.name})")
+            log.debug(f"TASK_RUNNER: Worker picked up task for Job {task.job_id} (Priority: {task.priority.name})")
             task.run()
         except Exception as e:
             log.error(f"TASK_RUNNER: Task for Job {task.job_id} failed with an exception: {e}", exc_info=True)
         finally:
             # This is crucial for the PriorityQueue to know the task is done.
             self.queue.task_done()
-            log.info(f"TASK_RUNNER: Worker finished task for Job {task.job_id} (Priority: {task.priority.name})")
+            log.debug(f"TASK_RUNNER: Worker finished task for Job {task.job_id} (Priority: {task.priority.name})")
 
 
 # --- Global Instance ---

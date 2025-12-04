@@ -35,6 +35,14 @@ def _yield_progress(asin, status_text, progress, job_id=None):
         "status_text": status_text,
         "progress": progress,
     }
+
+    # --- INFER FINAL STATUS ---
+    # This ensures the frontend knows to mark the item green/red and log it.
+    if status_text == "Complete!":
+        payload["final_status"] = "success"
+    elif status_text in ["Failed!", "Cancelled"]:
+        payload["final_status"] = "error"
+
     # Announce the update to all listening clients.
     announcer.announce(f"event: job_update\ndata: {json.dumps(payload)}\n\n")
 
@@ -74,7 +82,7 @@ def prepare_book_assets(asin, job_id, temp_dir):
     ]
     process = None
     try:
-        # FIX: Added errors="replace" to handle non-UTF-8 characters in download progress output
+        log.debug(f"PREPARE ({asin}): Running command: {' '.join(download_command)}")
         process = subprocess.Popen(
             download_command,
             stdout=subprocess.PIPE,
@@ -113,7 +121,7 @@ def prepare_book_assets(asin, job_id, temp_dir):
     try:
         endpoint, params = f"/1.0/library/{asin}", "response_groups=media,contributors,series,category_ladders"
         meta_command = ["audible", "api", "-p", params, endpoint]
-        # FIX: Added errors="replace"
+        log.debug(f"PREPARE ({asin}): Fetching metadata: {' '.join(meta_command)}")
         result = subprocess.run(
             meta_command,
             capture_output=True,
@@ -314,7 +322,7 @@ def encode_chapter_chunk(asin, job_id, temp_dir, chunk_info, context):
     """
     chunk_index = chunk_info["index"]
     total_chunks = chunk_info["total_chunks"]
-    log.info(f"ENCODE ({asin}): Starting encoding for chunk {chunk_index + 1}/{total_chunks}")
+    log.debug(f"ENCODE ({asin}): Starting encoding for chunk {chunk_index + 1}/{total_chunks}")
 
     settings = load_settings()
     quality = settings.get("conversion", {}).get("quality", "High")
@@ -338,6 +346,7 @@ def encode_chapter_chunk(asin, job_id, temp_dir, chunk_info, context):
     try:
         # Switch to Popen to capture PID
         # FIX: Not using text=True here as ffmpeg output is usually binary/mixed, but handled decoding in exception
+        log.debug(f"ENCODE ({asin}): Command: {' '.join(split_command)}")
         process = subprocess.Popen(split_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         process_registry.register(job_id, process)
 
@@ -352,7 +361,7 @@ def encode_chapter_chunk(asin, job_id, temp_dir, chunk_info, context):
             # Handle actual errors
             raise subprocess.CalledProcessError(process.returncode, split_command, stderr=stderr)
 
-        log.info(f"ENCODE ({asin}): Finished encoding chunk {chunk_index + 1}/{total_chunks}")
+        log.debug(f"ENCODE ({asin}): Finished encoding chunk {chunk_index + 1}/{total_chunks}")
         return output_path
 
     except subprocess.CalledProcessError as e:
@@ -404,6 +413,7 @@ def merge_book_chunks(asin, job_id, temp_dir, final_output_path, context, encode
 
     process = None
     try:
+        log.debug(f"MERGE ({asin}): Command: {' '.join(merge_command)}")
         # Using Popen to capture logs in real-time if needed for debugging
         # FIX: Added errors="replace"
         process = subprocess.Popen(

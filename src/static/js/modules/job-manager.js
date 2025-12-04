@@ -19,8 +19,14 @@ const latestLogLine = document.getElementById("latest-log-line");
 
 // --- Helper: Add Log Line ---
 function addLogLine(text) {
-    logOutput.textContent += text + "\n";
+    const now = new Date();
+    const timeString = now.toLocaleTimeString('en-US', { hour12: false });
+    const line = `[${timeString}] ${text}`;
+    
+    logOutput.textContent += line + "\n";
     logOutput.scrollTop = logOutput.scrollHeight;
+    
+    // Update the status bar footer, but keep it short (no timestamp)
     if (text.trim()) {
         latestLogLine.textContent = text;
     }
@@ -66,11 +72,18 @@ export function initializeSSEConnection(onJobFinishedCallback) {
 
         if (targetButton) {
             targetButton.classList.add("is-processing");
+            let startMsg = `--- Job ${jobData.job_id} (${jobData.job_type}) Started ---`;
+            
             if (jobStartSource !== "manual") {
-                addLogLine(`--- New job ${jobData.job_id} (${jobData.job_type}) started automatically. ---`);
+                startMsg += " (Automatic)";
                 targetButton.classList.add("is-automatic");
-            } else {
-                addLogLine(`--- New job ${jobData.job_id} (${jobData.job_type}) started. ---`);
+            }
+            addLogLine(startMsg);
+
+            // NEW: List the books being processed if available
+            if (jobData.items && jobData.items.length > 0) {
+                const titles = jobData.items.map(item => item.title).join(", ");
+                addLogLine(`Queue: ${titles}`);
             }
         }
 
@@ -85,24 +98,46 @@ export function initializeSSEConnection(onJobFinishedCallback) {
         }
     });
 
-    jobEventSource.addEventListener("job_update", (event) => {
+jobEventSource.addEventListener("job_update", (event) => {
         const data = JSON.parse(event.data);
         const item = processingList.querySelector(`.processing-item[data-asin="${data.asin}"]`);
+        
         if (item) {
+            // Update Sync Stage text if applicable
             if (data.stage_text) {
                 const stageElement = document.getElementById("sync-stage-text");
                 if (stageElement) stageElement.textContent = data.stage_text;
             }
+
+            // Update Status Text and Progress Bar
             item.querySelector(".status-text").textContent = data.status_text;
             item.querySelector(".progress-bar-inner").style.width = `${data.progress}%`;
-            if (data.final_status === "success") item.classList.add("success");
-            else if (data.final_status === "error") item.classList.add("error");
+            
+            const title = item.querySelector('.processing-item-title').textContent;
+
+            // --- LOGGING LOGIC ---
+            
+            // 1. Log "Processing..." when the download starts (progress 5%)
+            if (data.status_text === "Downloading..." && !item.classList.contains("processing-started")) {
+                addLogLine(`Processing: ${title}...`);
+                item.classList.add("processing-started"); // Prevent duplicate logs
+            }
+
+            // 2. Log Completion/Failure based on the flag we just added in the backend
+            if (data.final_status === "success") {
+                item.classList.add("success");
+                addLogLine(`✓ Completed: ${title}`);
+            }
+            else if (data.final_status === "error") {
+                item.classList.add("error");
+                addLogLine(`✗ Failed: ${title}`);
+            }
         }
     });
 
     jobEventSource.addEventListener("job_finished", (event) => {
         const data = JSON.parse(event.data);
-        addLogLine(`--- Job ${data.job_id} finished with status: ${data.status}. Refreshing library... ---`);
+        addLogLine(`--- Job ${data.job_id} Finished. Status: ${data.status} ---`);
 
         if (data.job_type === "DOWNLOAD") {
             data.items.forEach((finalItem) => {

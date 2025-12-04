@@ -17,7 +17,7 @@ def setup_logging():
     """
     # Get the root logger
     logger = logging.getLogger()
-    logger.setLevel(logging.INFO)  # Set the minimum level of logs to capture
+    logger.setLevel(logging.DEBUG)  # Set the minimum level of logs to capture
 
     # Create a formatter to define the log message structure
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -26,11 +26,13 @@ def setup_logging():
     # This handler sends logs to the standard output
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
+    console_handler.setLevel(logging.INFO)
 
     # --- File Handler ---
     # This handler writes logs to the specified log file
     file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
     file_handler.setFormatter(formatter)
+    file_handler.setLevel(logging.DEBUG)
 
     # Add both handlers to the root logger
     # Check if handlers are already present to avoid duplication on reloads

@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.2] - 2025-12-04
+
+This release focuses on significantly improving the debugging experience and user feedback loop. It introduces a comprehensive logging overhaul and several quality-of-life UI improvements.
+
+### Added
+
+- **Log Management Tools:** Added buttons to the dashboard footer to **Download** the full debug log as a file and **Copy** the visible log to the clipboard.
+- **Enhanced UI Logging:** The dashboard log now includes timestamps, lists specific books in the queue, and provides clear, granular updates when individual books start processing and finish.
+
+### Changed
+
+- **Logging Architecture:** Implemented a "Quiet UI, Loud File" strategy. The visible UI log remains clean and readable (INFO level), while the downloadable `app.log` now captures verbose `DEBUG` details, including full ffmpeg command traces and API responses for easier troubleshooting.
+
 ## [0.15.1] - 2025-12-03
 
 ### Fixed

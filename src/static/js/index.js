@@ -34,10 +34,11 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     });
     
-    // 5. Wire up Log Toggle (Simple UI logic kept here or could move to a utils file)
+    // 5. Wire up Log Toggle and Copy
     const logContainer = document.getElementById("log-container");
     const toggleLogBtn = document.getElementById("toggle-log-btn");
     const copyLogBtn = document.getElementById("copy-log-btn");
+    const downloadLogBtn = document.getElementById("download-log-btn");
     if (toggleLogBtn && logContainer) {
         const toggleIcon = toggleLogBtn.querySelector("i");
         toggleLogBtn.addEventListener("click", () => {
@@ -62,6 +63,12 @@ document.addEventListener("DOMContentLoaded", () => {
             }).catch(err => {
                 console.error('Failed to copy log:', err);
             });
+        });
+    }
+    if (downloadLogBtn) {
+        downloadLogBtn.addEventListener("click", () => {
+            // Trigger the download by navigating to the API endpoint
+            window.location.href = "/api/logs/download";
         });
     }
 });

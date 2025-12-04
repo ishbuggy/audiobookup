@@ -15,6 +15,7 @@ from flask import (  # type: ignore
     redirect,
     render_template,
     request,
+    send_file,
     send_from_directory,
     session,
     url_for,
@@ -713,6 +714,21 @@ def fetch_full_summary(asin):
     except sqlite3.Error as e:
         log.error(f"Database error updating full summary for {asin}: {e}", exc_info=True)
         return jsonify(error="Failed to update database."), 500
+
+
+@app.route("/api/logs/download")
+@login_required
+def download_log():
+    if not os.path.exists(LOG_FILE):
+        return jsonify(error="Log file not found."), 404
+
+    # Serve the file as an attachment so the browser downloads it
+    return send_file(
+        LOG_FILE,
+        as_attachment=True,
+        download_name=f"audiobookup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log",
+        mimetype="text/plain",
+    )
 
 
 # --- Authentication Routes ---

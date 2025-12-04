@@ -5,7 +5,7 @@ services:
       context: .
       dockerfile: ./src/dockerfile
       args:
-        - APP_VERSION=v0.14.1-dev
+        - APP_VERSION=v0.15.2-dev
 
     container_name: audiobookup
     ports:
