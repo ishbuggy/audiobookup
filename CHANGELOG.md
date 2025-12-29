@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.3] - 2025-12-30
+
+### Fixed
+- **CRITICAL: Enhanced AAX (AAXC) Processing:** Fixed a major bug where books using the `.aaxc` format with encrypted key rotation (often multi-part or very long books) would fail to decrypt properly during chapter splitting, resulting in empty or corrupted audio chunks. The system now performs a lossless decryption of the master file before processing to ensure perfect seeking integrity.
+
 ## [0.15.2] - 2025-12-04
 
 This release focuses on significantly improving the debugging experience and user feedback loop. It introduces a comprehensive logging overhaul and several quality-of-life UI improvements.

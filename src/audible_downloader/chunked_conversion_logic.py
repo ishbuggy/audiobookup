@@ -82,7 +82,7 @@ def prepare_book_assets(asin, job_id, temp_dir):
     ]
     process = None
     try:
-        log.debug(f"PREPARE ({asin}): Running command: {' '.join(download_command)}")
+        # FIX: Added errors="replace" to handle non-UTF-8 characters in download progress output
         process = subprocess.Popen(
             download_command,
             stdout=subprocess.PIPE,
@@ -121,7 +121,7 @@ def prepare_book_assets(asin, job_id, temp_dir):
     try:
         endpoint, params = f"/1.0/library/{asin}", "response_groups=media,contributors,series,category_ladders"
         meta_command = ["audible", "api", "-p", params, endpoint]
-        log.debug(f"PREPARE ({asin}): Fetching metadata: {' '.join(meta_command)}")
+        # FIX: Added errors="replace"
         result = subprocess.run(
             meta_command,
             capture_output=True,
@@ -174,12 +174,56 @@ def prepare_book_assets(asin, job_id, temp_dir):
         else:
             raise ValueError("No voucher or AAX file found for decryption.")
 
-        # --- 2a. Load Initial Chapters ---
+        # --- 2b. [NEW] Decrypt Entire Book First ---
+        # This fixes seeking issues with .aaxc files where key rotation causes chunks to fail decryption
+        # if seeking is done without decoding the previous segments.
+        # We decrypt the WHOLE file to a temporary .m4b (lossless copy) and use that for splitting.
+
+        _yield_progress(asin, "Decrypting master file...", 28, job_id)
+        log.info(f"PREPARE ({asin}): Decrypting master file to ensure seek integrity...")
+
+        decrypted_master_file = os.path.join(temp_dir, "master_decrypted.m4b")
+        decrypt_cmd = (
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+            + decryption_args
+            + ["-i", audio_file]
+            + ["-c", "copy"]  # Stream copy is fast and lossless
+            + ["-map", "0:a"]
+            + [decrypted_master_file]
+        )
+
+        # Run decryption
+        d_proc = subprocess.Popen(decrypt_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process_registry.register(job_id, d_proc)
+        _, d_stderr = d_proc.communicate()
+        process_registry.unregister(job_id, d_proc)
+
+        if d_proc.returncode != 0:
+            # Handle Cancellation
+            if d_proc.returncode == -15:
+                log.info(f"PREPARE ({asin}): Decryption cancelled.")
+                return None
+            raise subprocess.CalledProcessError(d_proc.returncode, decrypt_cmd, stderr=d_stderr)
+
+        # Swap the audio file variable to point to the clean, decrypted version
+        # And delete the encrypted one to save space
+        try:
+            os.remove(audio_file)
+            log.info(f"PREPARE ({asin}): Removed encrypted source file.")
+        except OSError:
+            pass  # Ignore deletion errors
+
+        audio_file = decrypted_master_file
+        decryption_args = []  # Clear args, we don't need them for the plain file
+
+        log.info(f"PREPARE ({asin}): Master file decrypted successfully.")
+
+        # --- 2c. Load Initial Chapters ---
         with open(json_file, encoding="utf-8") as cj:
             chapter_data = json.load(cj)
         chapters_list = chapter_data.get("content_metadata", {}).get("chapter_info", {}).get("chapters", [])
 
-        # --- 2b. STRETCH GOAL: Time-Based Auto-Chunking ---
+        # --- 2d. STRETCH GOAL: Time-Based Auto-Chunking ---
         # If the book has 0 or 1 chapter, we assume it's un-chunked and split it by time.
         if len(chapters_list) <= 1:
             try:
@@ -194,7 +238,7 @@ def prepare_book_assets(asin, job_id, temp_dir):
                         "-of",
                         "default=noprint_wrappers=1:nokey=1",
                     ]
-                    + decryption_args
+                    # Note: No decryption args needed anymore!
                     + [audio_file]
                 )
                 # We run this synchronously as it's very fast
@@ -255,8 +299,8 @@ def prepare_book_assets(asin, job_id, temp_dir):
             f.write(f"year={release_year}\n")
 
             # Determine Copyright info
-            ffprobe_command = ["ffprobe"] + decryption_args + [audio_file]
-            # FIX: Added errors="replace" - This is where the user's specific crash occurred
+            ffprobe_command = ["ffprobe"] + [audio_file]  # No decryption args needed
+            # FIX: Added errors="replace"
             probe_result = subprocess.run(
                 ffprobe_command, capture_output=True, text=True, encoding="utf-8", errors="replace"
             )
@@ -292,11 +336,11 @@ def prepare_book_assets(asin, job_id, temp_dir):
 
         # --- 4. Return all context needed for later steps ---
         return {
-            "decryption_args": decryption_args,
-            "audio_file": audio_file,
+            "decryption_args": decryption_args,  # This will now be empty list []
+            "audio_file": audio_file,  # This will point to the decrypted file
             "cover_file": cover_file,
             "chapter_file": chapter_txt_path,
-            "chapters": chapters_list,  # Return the list we definitely used
+            "chapters": chapters_list,
             "book_info": book_info,
         }
 
