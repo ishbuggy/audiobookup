@@ -135,52 +135,61 @@ jobEventSource.addEventListener("job_update", (event) => {
         }
     });
 
-    jobEventSource.addEventListener("job_finished", (event) => {
-        const data = JSON.parse(event.data);
-        addLogLine(`--- Job ${data.job_id} Finished. Status: ${data.status} ---`);
+jobEventSource.addEventListener("job_finished", (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            addLogLine(`--- Job ${data.job_id} Finished. Status: ${data.status} ---`);
 
-        if (data.job_type === "DOWNLOAD") {
-            data.items.forEach((finalItem) => {
-                const itemElement = processingList.querySelector(`.processing-item[data-asin="${finalItem.asin}"]`);
-                if (itemElement) {
-                    itemElement.classList.remove("success", "error", "cancelled");
-                    switch (finalItem.status) {
-                        case "COMPLETED": itemElement.classList.add("success"); break;
-                        case "FAILED": itemElement.classList.add("error"); break;
-                        case "CANCELLED":
-                            itemElement.classList.add("cancelled");
-                            itemElement.querySelector(".status-text").textContent = "Cancelled";
-                            break;
+            if (data.job_type === "DOWNLOAD" && Array.isArray(data.items)) {
+                data.items.forEach((finalItem) => {
+                    const itemElement = processingList.querySelector(`.processing-item[data-asin="${finalItem.asin}"]`);
+                    if (itemElement) {
+                        itemElement.classList.remove("success", "error", "cancelled");
+                        switch (finalItem.status) {
+                            case "COMPLETED": itemElement.classList.add("success"); break;
+                            case "FAILED": itemElement.classList.add("error"); break;
+                            case "CANCELLED":
+                                itemElement.classList.add("cancelled");
+                                itemElement.querySelector(".status-text").textContent = "Cancelled";
+                                break;
+                        }
                     }
-                }
+                });
+            } else if (data.job_type === "SYNC") {
+                processingList.innerHTML = "";
+            }
+
+            // Update Header Text
+            processingPanelTitle.textContent = `Job ${data.job_id} Finished (${data.status})`;
+            
+            // Lock the panel header (prevent toggling)
+            processingPanelHeader.removeEventListener("click", toggleProcessingPanel);
+            processingPanelHeader.style.cursor = "default";
+
+        } catch (error) {
+            console.error("Error processing job_finished event:", error);
+        } finally {
+            // --- CRITICAL CLEANUP: ALWAYS RUNS ---
+            
+            // Remove spinners from buttons
+            document.querySelectorAll(".action-button").forEach((btn) => {
+                btn.classList.remove("is-processing", "is-automatic");
             });
-        } else if (data.job_type === "SYNC") {
-            processingList.innerHTML = "";
+
+            // Hide Cancel / Show Clear
+            cancelJobBtn.style.display = "none";
+            cancelJobBtn.disabled = false;
+            cancelJobBtn.textContent = "Cancel Job";
+            clearReportBtn.style.display = "inline-block";
+
+            currentJobId = null;
+            
+            // Unlock the UI
+            setTimeout(() => {
+                setActionsBusy(false);
+                if (onJobFinishedCallback) onJobFinishedCallback(); // Refresh library
+            }, 1000);
         }
-
-        // Reset UI
-        document.querySelectorAll(".action-button").forEach((btn) => {
-            btn.classList.remove("is-processing", "is-automatic");
-        });
-
-        const panelTitle = document.getElementById("processing-panel-title");
-        if (panelTitle) panelTitle.innerHTML = `Job Status`;
-
-        processingPanelTitle.textContent = `Job ${data.job_id} Finished (${data.status})`;
-        processingPanelHeader.removeEventListener("click", toggleProcessingPanel);
-        processingPanelHeader.style.cursor = "default";
-
-        cancelJobBtn.style.display = "none";
-        cancelJobBtn.disabled = false;
-        cancelJobBtn.textContent = "Cancel Job";
-        clearReportBtn.style.display = "inline-block";
-
-        currentJobId = null;
-        
-        setTimeout(() => {
-            setActionsBusy(false);
-            if (onJobFinishedCallback) onJobFinishedCallback(); // Refresh library callback
-        }, 1000);
     });
 }
 
