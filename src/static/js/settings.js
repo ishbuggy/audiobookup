@@ -217,6 +217,38 @@ document.addEventListener("DOMContentLoaded", () => {
         return { populateFromCron, generateCron };
     };
 
+    const verifyLibBtn = document.getElementById("verify-library-btn");
+
+    if (verifyLibBtn) {
+        verifyLibBtn.addEventListener("click", () => {
+            window.showConfirmationModal(
+                '<i class="fas fa-stethoscope"></i> Verify Library?',
+                "This will scan all downloaded files to check for corruption or truncation. Any bad files will be marked as ERROR in your library. This may take a few minutes.",
+                async () => {
+                    try {
+                        // Start the job via the standard API
+                        const response = await fetch("/api/jobs/start", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ job_type: "VERIFY" }),
+                        });
+                        const data = await response.json();
+                        if (response.ok && data.success) {
+                            window.showCustomAlert(
+                                "Verification started. Check the Dashboard for progress.",
+                                '<i class="fas fa-check-circle" style="color: #28a745;"></i> Started'
+                            );
+                        } else {
+                            throw new Error(data.error || "Failed to start job.");
+                        }
+                    } catch (error) {
+                        window.showCustomAlert(`Error: ${error.message}`);
+                    }
+                }
+            );
+        });
+    }
+
     // --- 3. GET ALL ELEMENT REFERENCES ---
     const accordions = document.querySelectorAll(".accordion-header");
     // Get references for the new sync toggles and panels.

@@ -15,6 +15,7 @@ from .process_registry import process_registry
 from .processing_logic import BookProcessor
 from .settings import load_settings
 from .sync_logic import run_sync_logic
+from .verification_logic import run_verification_logic
 
 # --- Globals for Job Management ---
 job_lock = Lock()
@@ -117,6 +118,38 @@ def sync_worker(job_id, app_context, stop_event, job_params=None):
 
 
 # --- END: SYNC WORKER ---
+
+
+def verify_worker(job_id, app_context, stop_event):
+    """Runs the library verification logic."""
+    with app_context:
+        try:
+            with get_db_connection() as con:
+                con.execute("UPDATE jobs SET status = 'RUNNING' WHERE job_id = ?", (job_id,))
+                con.commit()
+
+            # Run the logic
+            run_verification_logic(job_id)
+
+            end_time_iso = datetime.utcnow().isoformat()
+            with get_db_connection() as con:
+                con.execute(
+                    "UPDATE jobs SET status = 'COMPLETED', end_time = ? WHERE job_id = ?", (end_time_iso, job_id)
+                )
+                con.commit()
+
+        except Exception as e:
+            log.error(f"WORKER: Verify job {job_id} failed: {e}", exc_info=True)
+            with get_db_connection() as con:
+                con.execute("UPDATE jobs SET status = 'FAILED' WHERE job_id = ?", (job_id,))
+                con.commit()
+        finally:
+            # Send standard finish event so UI resets
+            payload = {"job_id": job_id, "status": "COMPLETED", "job_type": "VERIFY"}
+            announcer.announce(f"event: job_finished\ndata: {json.dumps(payload)}\n\n")
+            with job_lock:
+                if active_job["job_id"] == job_id:
+                    active_job["job_id"] = None
 
 
 ## The worker now announces events to the SSE stream, and responds to cancellation signal
@@ -270,7 +303,7 @@ def start_new_job(job_type, asins=None, job_params=None):
             return False, {"error": f"A job (ID: {active_job['job_id']}) is already in progress."}
 
         # Validate job type
-        if job_type not in ["DOWNLOAD", "SYNC"]:
+        if job_type not in ["DOWNLOAD", "SYNC", "VERIFY"]:
             return False, {"error": f"Invalid job type specified: {job_type}"}
 
         con = get_db_connection()
@@ -329,6 +362,10 @@ def start_new_job(job_type, asins=None, job_params=None):
                 worker_target = sync_worker
                 worker_args = (job_id, app.app_context(), stop_event, job_params)
                 # No items to insert for a sync job
+
+            elif job_type == "VERIFY":
+                worker_target = verify_worker
+                worker_args = (job_id, app.app_context(), stop_event)
 
             con.commit()
 

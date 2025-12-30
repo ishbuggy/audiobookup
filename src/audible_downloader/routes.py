@@ -500,6 +500,10 @@ def start_job():
         # For a SYNC job, 'asins' is always None.
         success, result = start_new_job(job_type="SYNC", asins=None, job_params=job_params)
 
+    elif job_type == "VERIFY":
+        # Verification jobs don't need params or ASINs
+        success, result = start_new_job(job_type="VERIFY", asins=None)
+
     else:
         return jsonify(error="Invalid or missing 'job_type'."), 400
 

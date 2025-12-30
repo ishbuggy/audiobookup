@@ -91,7 +91,7 @@ export function initializeSSEConnection(onJobFinishedCallback) {
         setActionsBusy(true);
         currentJobId = jobData.job_id;
 
-        if (jobData.job_type === "SYNC") {
+        if (jobData.job_type === "SYNC" || jobData.job_type === "VERIFY") {
             rebuildSyncPanel(jobData);
         } else if (jobData.job_type === "DOWNLOAD") {
             rebuildProcessingPanel(jobData);
@@ -187,13 +187,21 @@ jobEventSource.addEventListener("job_update", (event) => {
 // --- Panel Rebuilders ---
 function rebuildSyncPanel(jobData) {
     currentJobId = jobData.job_id;
-    // --- SYNC CANCELLATION ENABLED HERE ---
     document.getElementById("cancel-job-btn").style.display = "inline-block";
     
+    // Determine labels based on job type
+    let title = "Library Synchronization";
+    let asin = "sync-job";
+    
+    if (jobData.job_type === "VERIFY") {
+        title = "Library Integrity Check";
+        asin = "verify-job";
+    }
+
     processingList.innerHTML = `
-    <div class="processing-item" data-asin="sync-job">
+    <div class="processing-item" data-asin="${asin}">
         <div class="processing-item-info">
-            <p class="processing-item-title">Library Synchronization</p>
+            <p class="processing-item-title">${title}</p>
             <p class="processing-item-author" id="sync-stage-text">Processing...</p>
         </div>
         <div class="processing-item-status">

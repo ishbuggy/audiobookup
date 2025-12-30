@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.4] - 2025-12-30
+
+This release introduces a "Smart Download Strategy" that balances speed with absolute reliability, along with tools to audit existing libraries for corruption.
+
+### Added
+- **Library Integrity Check:** Added a new tool in **Settings > Audible Connection** that scans your entire downloaded library. It compares actual file durations against metadata to identify and flag truncated or corrupt files as `ERROR`, allowing for easy re-downloading.
+- **Duration Integrity Guard:** The download pipeline now strictly verifies that the downloaded file matches the expected runtime from Audible before processing begins, preventing "silent truncation" errors caused by network drops.
+
+### Changed
+- **Smart Download Strategy:** The application now attempts to use the high-speed `.aaxc` format first. If decryption or key rotation issues are detected, it automatically falls back to the legacy `.aax` format. This restores fast download speeds for 95% of books while maintaining 100% compatibility for complex multi-part titles.
+- **Optimized Decryption:** The processing engine now attempts a fast "Stream Copy" decryption first. It verifies seek integrity and only falls back to the slower "FLAC Decode" method if the file structure requires it, significantly speeding up processing for standard books.
+
 ## [0.15.3] - 2025-12-30
 
 ### Fixed
