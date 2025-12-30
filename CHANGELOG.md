@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.5] - 2025-12-30
+
+### Fixed
+- **UI Freeze:** Fixed a race condition in the "Job Finished" event handler. Previously, if a minor UI update failed (e.g., finding a DOM element), the interface would remain locked in a "Processing" state even though the background job had completed successfully. The handler is now wrapped in a safety block to ensure the UI always unlocks.
+
 ## [0.15.4] - 2025-12-30
 
 This release introduces a "Smart Download Strategy" that balances speed with absolute reliability, along with tools to audit existing libraries for corruption.
