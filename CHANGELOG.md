@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.6] - 2026-01-02
+
+### Fixed
+- **UI State Management:** Fixed a visual bug where the "Job Status" panel header would display the title of the *previous* completed job instead of the *current* running job when transitioning between tasks (e.g., Sync -> Download).
+- **Frontend Self-Healing:** Implemented a "Watchdog" system in the dashboard. If the browser misses a "Job Finished" signal from the server (due to network blips), the UI now automatically detects the completion within 5 seconds and unlocks the interface, preventing buttons from getting stuck in a disabled state.
+
 ## [0.15.5] - 2025-12-30
 
 ### Fixed

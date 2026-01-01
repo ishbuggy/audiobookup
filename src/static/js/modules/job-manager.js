@@ -5,6 +5,7 @@ let jobEventSource = null;
 let currentJobId = null;
 let isBusy = false;
 let jobStartSource = null; // 'manual' or null
+let _refreshCallback = null; // Store the callback for the watchdog
 
 // --- DOM Elements ---
 const processingPanel = document.getElementById("processing-panel");
@@ -13,7 +14,6 @@ const processingPanelHeader = document.querySelector("#processing-panel .panel-h
 const processingPanelTitle = processingPanelHeader.querySelector("h3");
 const cancelJobBtn = document.getElementById("cancel-job-btn");
 const clearReportBtn = document.getElementById("clear-report-btn");
-const authWarningBanner = document.getElementById("auth-warning-banner");
 const logOutput = document.getElementById("log-output");
 const latestLogLine = document.getElementById("latest-log-line");
 
@@ -23,11 +23,13 @@ function addLogLine(text) {
     const timeString = now.toLocaleTimeString('en-US', { hour12: false });
     const line = `[${timeString}] ${text}`;
     
-    logOutput.textContent += line + "\n";
-    logOutput.scrollTop = logOutput.scrollHeight;
+    if (logOutput) {
+        logOutput.textContent += line + "\n";
+        logOutput.scrollTop = logOutput.scrollHeight;
+    }
     
-    // Update the status bar footer, but keep it short (no timestamp)
-    if (text.trim()) {
+    // Update the status bar footer
+    if (text.trim() && latestLogLine) {
         latestLogLine.textContent = text;
     }
 }
@@ -40,11 +42,119 @@ function setActionsBusy(busy) {
         btn.disabled = busy;
         if (!busy) {
             btn.classList.remove("loading");
-            // Remove processing classes
             btn.classList.remove("is-processing");
             btn.classList.remove("is-automatic");
         }
     });
+}
+
+// --- Helper: Visual Force Complete ---
+// Updates the panel visuals when the watchdog detects a silent completion
+function forceVisualCompletion() {
+    const items = processingList.querySelectorAll(".processing-item");
+    items.forEach(item => {
+        // If not already marked as success/error
+        if (!item.classList.contains("success") && !item.classList.contains("error") && !item.classList.contains("cancelled")) {
+            item.classList.add("success");
+            const statusText = item.querySelector(".status-text");
+            if (statusText) statusText.textContent = "Completed";
+            const progressBar = item.querySelector(".progress-bar-inner");
+            if (progressBar) progressBar.style.width = "100%";
+        }
+    });
+}
+
+// --- Helper: Cleanup/Reset UI ---
+function cleanupUIState() {
+    // Remove spinners from buttons
+    document.querySelectorAll(".action-button").forEach((btn) => {
+        btn.classList.remove("is-processing", "is-automatic");
+    });
+
+    // Hide Cancel / Show Clear
+    if (cancelJobBtn) {
+        cancelJobBtn.style.display = "none";
+        cancelJobBtn.disabled = false;
+        cancelJobBtn.textContent = "Cancel Job";
+    }
+    if (clearReportBtn) {
+        clearReportBtn.style.display = "inline-block";
+    }
+
+    currentJobId = null;
+    
+    // Unlock the UI
+    setTimeout(() => {
+        setActionsBusy(false);
+        if (_refreshCallback) _refreshCallback(); 
+    }, 1000);
+}
+
+// --- Watchdog: Self-Healing Logic ---
+function startJobWatchdog() {
+    setInterval(async () => {
+        // We poll if we have a currentJobId OR if we want to catch external jobs starting
+        try {
+            const response = await fetch("/api/jobs/active");
+            if (response.ok) {
+                const data = await response.json();
+                
+                const serverHasJob = !!data.job_id;
+                const uiHasJob = !!currentJobId;
+
+                if (serverHasJob && !uiHasJob) {
+                    // CASE 1: Server started a job (e.g. Scheduled) that UI missed
+                    console.log(`Watchdog: Detected new external Job ${data.job_id}`);
+                    currentJobId = data.job_id;
+                    setActionsBusy(true);
+                    rebuildPanelForJob(data);
+                }
+                else if (serverHasJob && uiHasJob && data.job_id !== currentJobId) {
+                    // CASE 2: ID Mismatch (Smart Chaining: Sync finished, Download started)
+                    // Do NOT unlock UI. Switch context immediately.
+                    console.log(`Watchdog: Switching from Job ${currentJobId} to Job ${data.job_id}`);
+                    
+                    // Visually complete the old job in the log before switching
+                    addLogLine(`--- Job ${currentJobId} Finished (Transitioning) ---`);
+                    
+                    currentJobId = data.job_id;
+                    // Ensure buttons stay locked
+                    setActionsBusy(true); 
+                    rebuildPanelForJob(data);
+                }
+                else if (!serverHasJob && uiHasJob) {
+                    // CASE 3: Job finished silently (Event missed)
+                    console.warn(`Watchdog: UI stuck on Job ${currentJobId}, but server is Idle. Resetting.`);
+                    addLogLine("--- Watchdog: Detected job completion. Resetting UI. ---");
+                    
+                    if (processingPanelTitle) {
+                        processingPanelTitle.textContent = `Job ${currentJobId} Finished (Recovered)`;
+                        if (processingPanelHeader) {
+                            processingPanelHeader.removeEventListener("click", toggleProcessingPanel);
+                            processingPanelHeader.style.cursor = "default";
+                        }
+                    }
+                    
+                    // Update visual state of items to look "done"
+                    forceVisualCompletion();
+                    
+                    // Unlock controls
+                    cleanupUIState();
+                }
+            }
+        } catch (e) {
+            // Network error - ignore and try next tick
+        }
+    }, 5000); // Poll every 5 seconds
+}
+
+// --- Panel Rebuilders (Dispatcher) ---
+function rebuildPanelForJob(jobData) {
+    if (jobData.job_type === "SYNC" || jobData.job_type === "VERIFY") {
+        rebuildSyncPanel(jobData);
+    } else if (jobData.job_type === "DOWNLOAD") {
+        rebuildProcessingPanel(jobData);
+    }
 }
 
 // --- Core: Toggle Panel ---
@@ -54,6 +164,8 @@ export function toggleProcessingPanel() {
 
 // --- Core: Initialize SSE ---
 export function initializeSSEConnection(onJobFinishedCallback) {
+    _refreshCallback = onJobFinishedCallback;
+
     if (jobEventSource) {
         jobEventSource.close();
     }
@@ -67,7 +179,6 @@ export function initializeSSEConnection(onJobFinishedCallback) {
         const jobData = JSON.parse(event.data);
         const jobTypeLower = jobData.job_type.toLowerCase();
 
-        // Find the specific button that corresponds to this job type
         const targetButton = document.querySelector(`.action-button[data-script="${jobTypeLower}"]`);
 
         if (targetButton) {
@@ -80,7 +191,6 @@ export function initializeSSEConnection(onJobFinishedCallback) {
             }
             addLogLine(startMsg);
 
-            // NEW: List the books being processed if available
             if (jobData.items && jobData.items.length > 0) {
                 const titles = jobData.items.map(item => item.title).join(", ");
                 addLogLine(`Queue: ${titles}`);
@@ -91,39 +201,30 @@ export function initializeSSEConnection(onJobFinishedCallback) {
         setActionsBusy(true);
         currentJobId = jobData.job_id;
 
-        if (jobData.job_type === "SYNC" || jobData.job_type === "VERIFY") {
-            rebuildSyncPanel(jobData);
-        } else if (jobData.job_type === "DOWNLOAD") {
-            rebuildProcessingPanel(jobData);
-        }
+        rebuildPanelForJob(jobData);
     });
 
-jobEventSource.addEventListener("job_update", (event) => {
+    jobEventSource.addEventListener("job_update", (event) => {
         const data = JSON.parse(event.data);
         const item = processingList.querySelector(`.processing-item[data-asin="${data.asin}"]`);
         
         if (item) {
-            // Update Sync Stage text if applicable
             if (data.stage_text) {
                 const stageElement = document.getElementById("sync-stage-text");
                 if (stageElement) stageElement.textContent = data.stage_text;
             }
 
-            // Update Status Text and Progress Bar
             item.querySelector(".status-text").textContent = data.status_text;
             item.querySelector(".progress-bar-inner").style.width = `${data.progress}%`;
             
             const title = item.querySelector('.processing-item-title').textContent;
 
-            // --- LOGGING LOGIC ---
-            
-            // 1. Log "Processing..." when the download starts (progress 5%)
+            // Logging Logic
             if (data.status_text === "Downloading..." && !item.classList.contains("processing-started")) {
                 addLogLine(`Processing: ${title}...`);
-                item.classList.add("processing-started"); // Prevent duplicate logs
+                item.classList.add("processing-started"); 
             }
 
-            // 2. Log Completion/Failure based on the flag we just added in the backend
             if (data.final_status === "success") {
                 item.classList.add("success");
                 addLogLine(`✓ Completed: ${title}`);
@@ -135,12 +236,12 @@ jobEventSource.addEventListener("job_update", (event) => {
         }
     });
 
-jobEventSource.addEventListener("job_finished", (event) => {
+    jobEventSource.addEventListener("job_finished", (event) => {
         try {
             const data = JSON.parse(event.data);
             addLogLine(`--- Job ${data.job_id} Finished. Status: ${data.status} ---`);
 
-            if (data.job_type === "DOWNLOAD" && Array.isArray(data.items)) {
+            if (data.job_type === "DOWNLOAD") {
                 data.items.forEach((finalItem) => {
                     const itemElement = processingList.querySelector(`.processing-item[data-asin="${finalItem.asin}"]`);
                     if (itemElement) {
@@ -159,44 +260,40 @@ jobEventSource.addEventListener("job_finished", (event) => {
                 processingList.innerHTML = "";
             }
 
-            // Update Header Text
-            processingPanelTitle.textContent = `Job ${data.job_id} Finished (${data.status})`;
+            if (processingPanelTitle) {
+                processingPanelTitle.textContent = `Job ${data.job_id} Finished (${data.status})`;
+            }
             
-            // Lock the panel header (prevent toggling)
-            processingPanelHeader.removeEventListener("click", toggleProcessingPanel);
-            processingPanelHeader.style.cursor = "default";
+            if (processingPanelHeader) {
+                processingPanelHeader.removeEventListener("click", toggleProcessingPanel);
+                processingPanelHeader.style.cursor = "default";
+            }
 
         } catch (error) {
             console.error("Error processing job_finished event:", error);
         } finally {
-            // --- CRITICAL CLEANUP: ALWAYS RUNS ---
-            
-            // Remove spinners from buttons
-            document.querySelectorAll(".action-button").forEach((btn) => {
-                btn.classList.remove("is-processing", "is-automatic");
-            });
-
-            // Hide Cancel / Show Clear
-            cancelJobBtn.style.display = "none";
-            cancelJobBtn.disabled = false;
-            cancelJobBtn.textContent = "Cancel Job";
-            clearReportBtn.style.display = "inline-block";
-
-            currentJobId = null;
-            
-            // Unlock the UI
-            setTimeout(() => {
-                setActionsBusy(false);
-                if (onJobFinishedCallback) onJobFinishedCallback(); // Refresh library
-            }, 1000);
+            cleanupUIState();
         }
     });
+
+    startJobWatchdog();
 }
 
 // --- Panel Rebuilders ---
 function rebuildSyncPanel(jobData) {
     currentJobId = jobData.job_id;
-    document.getElementById("cancel-job-btn").style.display = "inline-block";
+    
+    // 1. Reset Buttons
+    if (cancelJobBtn) cancelJobBtn.style.display = "inline-block";
+    if (clearReportBtn) clearReportBtn.style.display = "none"; // Hide residual clear button
+
+    // 2. Reset Header Title & Unlock
+    if (processingPanelTitle) processingPanelTitle.textContent = `Job ${currentJobId} Status`;
+    if (processingPanelHeader) {
+        processingPanelHeader.removeEventListener("click", toggleProcessingPanel); // Prevent duplicates
+        processingPanelHeader.addEventListener("click", toggleProcessingPanel);
+        processingPanelHeader.style.cursor = "pointer";
+    }
     
     // Determine labels based on job type
     let title = "Library Synchronization";
@@ -227,44 +324,57 @@ function rebuildSyncPanel(jobData) {
 
 function rebuildProcessingPanel(jobData) {
     currentJobId = jobData.job_id;
-    document.getElementById("cancel-job-btn").style.display = "inline-block";
+    
+    // 1. Reset Buttons
+    if (cancelJobBtn) cancelJobBtn.style.display = "inline-block";
+    if (clearReportBtn) clearReportBtn.style.display = "none"; // Hide residual clear button
+
+    // 2. Reset Header Title & Unlock
+    if (processingPanelTitle) processingPanelTitle.textContent = `Job ${currentJobId} Status`;
+    if (processingPanelHeader) {
+        processingPanelHeader.removeEventListener("click", toggleProcessingPanel); // Prevent duplicates
+        processingPanelHeader.addEventListener("click", toggleProcessingPanel);
+        processingPanelHeader.style.cursor = "pointer";
+    }
+
     processingList.innerHTML = "";
 
-    jobData.items.forEach((book) => {
-        const item = document.createElement("div");
-        item.className = "processing-item";
-        item.setAttribute("data-asin", book.asin);
+    if (jobData.items) {
+        jobData.items.forEach((book) => {
+            const item = document.createElement("div");
+            item.className = "processing-item";
+            item.setAttribute("data-asin", book.asin);
 
-        let statusText = "Queued...";
-        let progress = 0;
-        let itemClass = "";
+            let statusText = "Queued...";
+            let progress = 0;
+            let itemClass = "";
 
-        switch (book.status) {
-            case "PROCESSING": statusText = "Processing..."; progress = 25; break;
-            case "COMPLETED": statusText = "Complete!"; progress = 100; itemClass = "success"; break;
-            case "FAILED": statusText = "Failed!"; progress = 100; itemClass = "error"; break;
-        }
-        if (itemClass) item.classList.add(itemClass);
+            switch (book.status) {
+                case "PROCESSING": statusText = "Processing..."; progress = 25; break;
+                case "COMPLETED": statusText = "Complete!"; progress = 100; itemClass = "success"; break;
+                case "FAILED": statusText = "Failed!"; progress = 100; itemClass = "error"; break;
+            }
+            if (itemClass) item.classList.add(itemClass);
 
-        item.innerHTML = `
-        <img class="processing-item-thumb" src="${book.cover_url}" alt="Cover">
-        <div class="processing-item-info">
-            <p class="processing-item-title">${book.title}</p>
-            <p class="processing-item-author">${book.author}</p>
-        </div>
-        <div class="processing-item-status">
-            <p class="status-text">${statusText}</p>
-            <div class="progress-bar">
-                <div class="progress-bar-inner" style="width: ${progress}%;"></div>
+            item.innerHTML = `
+            <img class="processing-item-thumb" src="${book.cover_url}" alt="Cover">
+            <div class="processing-item-info">
+                <p class="processing-item-title">${book.title}</p>
+                <p class="processing-item-author">${book.author}</p>
             </div>
-            <div class="status-icon success"><i class="fas fa-check-circle"></i></div>
-            <div class="status-icon error"><i class="fas fa-times-circle"></i></div>
-            <div class="status-icon cancelled"><i class="fas fa-ban"></i></div>
-        </div>
-    `;
-        processingList.appendChild(item);
-    });
-
+            <div class="processing-item-status">
+                <p class="status-text">${statusText}</p>
+                <div class="progress-bar">
+                    <div class="progress-bar-inner" style="width: ${progress}%;"></div>
+                </div>
+                <div class="status-icon success"><i class="fas fa-check-circle"></i></div>
+                <div class="status-icon error"><i class="fas fa-times-circle"></i></div>
+                <div class="status-icon cancelled"><i class="fas fa-ban"></i></div>
+            </div>
+        `;
+            processingList.appendChild(item);
+        });
+    }
     processingPanel.classList.add("open");
 }
 
@@ -279,8 +389,7 @@ export async function checkForActiveJob() {
             console.log(`Found active job ${jobData.job_id} (${jobData.job_type}) on page load.`);
             addLogLine(`--- Reconnected to active job ${jobData.job_id}. ---`);
             setActionsBusy(true);
-            if (jobData.job_type === "SYNC") rebuildSyncPanel(jobData);
-            else if (jobData.job_type === "DOWNLOAD") rebuildProcessingPanel(jobData);
+            rebuildPanelForJob(jobData);
         }
     } catch (error) {
         console.error("Error checking for active job:", error);
@@ -321,7 +430,7 @@ export function startSyncJob(clickedButton) {
     startJob("SYNC", null, clickedButton, job_params);
 }
 
-// --- Public Panel Helpers (for other modules) ---
+// --- Public Panel Helpers ---
 export function openProcessingPanel(selectedBooks) {
     processingList.innerHTML = "";
     if (selectedBooks) {
@@ -352,48 +461,52 @@ export function openProcessingPanel(selectedBooks) {
 }
 
 // --- Event Listeners (Internal) ---
-// Setup internal listeners for buttons that live permanently on the page
 document.addEventListener("DOMContentLoaded", () => {
-    // Cancel Button
-    cancelJobBtn.addEventListener("click", async (event) => {
-        event.stopPropagation();
-        if (!currentJobId) return;
+    if (cancelJobBtn) {
+        cancelJobBtn.addEventListener("click", async (event) => {
+            event.stopPropagation();
+            if (!currentJobId) return;
 
-        cancelJobBtn.disabled = true;
-        cancelJobBtn.textContent = "Cancelling...";
+            cancelJobBtn.disabled = true;
+            cancelJobBtn.textContent = "Cancelling...";
 
-        try {
-            const response = await fetch("/api/jobs/cancel", { method: "POST" });
-            const data = await response.json();
-            if (data.success) {
-                addLogLine(`--- Cancel signal sent for job ${currentJobId}. ---`);
-            } else {
-                throw new Error(data.error || "Failed to send cancel signal.");
+            try {
+                const response = await fetch("/api/jobs/cancel", { method: "POST" });
+                const data = await response.json();
+                if (data.success) {
+                    addLogLine(`--- Cancel signal sent for job ${currentJobId}. ---`);
+                } else {
+                    throw new Error(data.error || "Failed to send cancel signal.");
+                }
+            } catch (error) {
+                console.error("Failed to cancel job:", error);
+                cancelJobBtn.disabled = false;
+                cancelJobBtn.textContent = "Cancel Job";
             }
-        } catch (error) {
-            console.error("Failed to cancel job:", error);
-            cancelJobBtn.disabled = false;
-            cancelJobBtn.textContent = "Cancel Job";
-        }
-    });
+        });
+    }
 
-    // Clear Report Button
-    clearReportBtn.addEventListener("click", (event) => {
-        event.stopPropagation();
-        const finishedItems = processingList.querySelectorAll(".success, .error, .cancelled");
-        finishedItems.forEach((item) => item.remove());
-        clearReportBtn.style.display = "none";
+    if (clearReportBtn) {
+        clearReportBtn.addEventListener("click", (event) => {
+            event.stopPropagation();
+            const finishedItems = processingList.querySelectorAll(".success, .error, .cancelled");
+            finishedItems.forEach((item) => item.remove());
+            clearReportBtn.style.display = "none";
 
-        if (processingList.children.length === 0) {
-            processingPanel.classList.remove("open");
-            processingPanelTitle.textContent = "Job Status";
-            processingPanelHeader.addEventListener("click", toggleProcessingPanel);
-            processingPanelHeader.style.cursor = "pointer";
-        } else {
-            processingPanelTitle.textContent = "Job Status";
-        }
-    });
+            if (processingList.children.length === 0) {
+                processingPanel.classList.remove("open");
+                if (processingPanelTitle) processingPanelTitle.textContent = "Job Status";
+                if (processingPanelHeader) {
+                    processingPanelHeader.addEventListener("click", toggleProcessingPanel);
+                    processingPanelHeader.style.cursor = "pointer";
+                }
+            } else {
+                if (processingPanelTitle) processingPanelTitle.textContent = "Job Status";
+            }
+        });
+    }
 
-    // Header Toggle
-    processingPanelHeader.addEventListener("click", toggleProcessingPanel);
+    if (processingPanelHeader) {
+        processingPanelHeader.addEventListener("click", toggleProcessingPanel);
+    }
 });
