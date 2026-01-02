@@ -202,7 +202,12 @@ After setting your password, you will be guided through a graphical user interfa
 2.  **Start Connection:** Click the "Start Connection" button.
 3.  **Open Login Page:** The application will communicate with Audible's servers. A new button, "Open Audible Login Page", will appear. Click this button to open the official Audible login page in a new browser tab.
 4.  **Log In to Audible:** Log in to your Audible account in the new tab.
-5.  **Copy the Redirect URL:** After logging in, your browser will be redirected to a page that likely shows an error (e.g., "Page not found"). **This is expected.** Copy the _entire URL_ from your browser's address bar.
+5.  **Copy the Redirect URL:** After logging in, your browser will be redirected to a page that likely shows an error (e.g., "Looking for something?" or "Page not found"). **This is expected.** The page will look something like the image below. Copy the _entire URL_ from your browser's address bar.
+
+    <p align="center">
+      <img src="src/static/img/setup-redirect-example.png" width="600" title="Expected Amazon Redirect Error">
+    </p>
+
 6.  **Submit the URL and Validate:** Return to the application tab, paste the long URL into the input box, and click "Submit URL". The application will validate your login.
 7.  **Performance Optimization:** Set the number of workers that will be spun up to process books. Use the auto detect feature that can detemrine how many CPU cores are avaiable to the container, or manually enter a number. After this is complete, you will be automatically redirected to the main dashboard.
 
@@ -214,23 +219,16 @@ Once setup is complete, the application will always start in **Normal Mode**, ta
 
 ### Dashboard Overview
 
-The dashboard is organized into a responsive two-column layout for a clear information hierarchy.
-
-- **Header:** The header contains the application logo and title, along with quick-access icons for **Theme Toggling**, **Settings**, **Job History**, and **Logging Out**.
-- **Main Action Column (Left):** This is the primary interaction area.
-    - **Core Actions:** The main "Sync Library" and "Process Downloads" buttons are at the top.
-    - **Automation Banner:** A banner appears here if automated tasks are disabled, linking directly to the relevant settings.
-    - **Job Status:** When a job is active, a collapsible panel appears in this column, showing real-time progress. This panel persists even if you reload the page. You can **Cancel** running download jobs from here.
-- **Status Column (Right):** This area provides an at-a-glance overview of your library.
-    - **Library Status:** Colorful cards show the total number of books that are Downloaded, New, Missing, or have Errors.
-- **Full Library:** Below the main columns, a responsive grid displays your entire audiobook library, which can be instantly **searched**, **sorted**, and **filtered by status**.
-- **Status Bar & Activity Log:** A sticky footer shows the most recent status update and can be expanded to view the full application log for some debugging without needing to dig into docker logs.
+- **Job Status Panel:** When a Sync or Download is active, a real-time progress panel appears. You can safely close the browser while jobs run in the background, or click **Cancel Job** to stop them immediately.
+- **Automation Banner:** If your scheduled tasks are disabled, a banner will appear to remind you. Clicking it takes you directly to the scheduler settings.
+- **Library Grid:** The main view supports instant client-side searching, sorting, and filtering (e.g., viewing only "Error" items).
+- **Activity Log:** The sticky footer shows the latest status. Expand it to view the live log, copy it to your clipboard, or download the full `app.log` file for debugging.
 
 ### Core Actions
 
-- **Sync Library:** The main button on the dashboard always performs a comprehensive **Deep Sync**. It connects to the Audible API, downloads cover art, and reconciles the database with a full scan of all local files. This runs as a **persistent background job**, so you can safely close the browser. More frequent, API-only **Fast Syncs** can be configured as a separate, automated task on the Settings page.
-- **Process Downloads:** Opens a selection modal to start a batch download, which runs as a persistent background job.
-- **Retry Button:** For any book with a status of `ERROR` or `MISSING`, a "Retry" button will appear on its card to process only that book using the persistent job system.
+-   **Sync Library:** Triggers a manual **Deep Sync** (API fetch + full disk scan). This ensures your database matches your files perfectly.
+-   **Process Downloads:** Opens a selection modal to batch download books marked as `NEW`, `MISSING`, or `ERROR`.
+-   **Retry:** Appears on individual book cards if a previous download failed. Clicking it re-queues just that book.
 
 ---
 
@@ -325,6 +323,16 @@ If your connection to Audible expires (e.g., you change your Audible password) o
 
 _(Manual Method: If you cannot access the UI, you can still reset by stopping the container and deleting `.setup_complete` and the `.audible` directory from your `/database` volume.)_
 
+### Verifying Library Integrity
+
+If you suspect files are corrupt or incomplete (e.g., a 13-hour book is only 2 hours long), you can audit your library:
+
+1.  Navigate to the **Settings** page.
+2.  Scroll to the **Audible Connection** section.
+3.  Click the **"Verify Files"** button.
+4.  The application will scan every downloaded book. If a discrepancy is found, the book's status will change to **ERROR**.
+5.  Go to the Dashboard, filter by **Error**, and click **Retry** to re-download the correct file.
+
 ### Resetting Your Local User Password
 
 If you forget the password you set for the web UI, you can reset it manually:
@@ -335,6 +343,12 @@ If you forget the password you set for the web UI, you can reset it manually:
 4.  Save and close the file.
 5.  Restart the container: `docker-compose up -d`.
 6.  You can now log in with the default credentials (`admin` / `changeme`) and will be forced to set a new password.
+
+### Getting Detailed Logs
+
+To help with debugging or reporting issues, the application logs can be accessed directly from the footer of the dashboard.
+*   **Copy Log:** Copies the currently visible log lines to your clipboard.
+*   **Download Log:** Downloads the full `app.log` file (which contains detailed `DEBUG` information not shown in the UI) to your computer.
 
 ### Accessing the Database Manually
 
