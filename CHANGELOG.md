@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-01-03
+
+### Added
+- **Multi-Architecture Support (ARM64/Apple Silicon):** The application is now built as a multi-architecture Docker image. It runs natively on **Apple M-Series chips (M1/M2/M3/M4)** and **Raspberry Pi (64-bit)** without emulation, resulting in significantly better performance and stability.
+- **Robust Startup Permissions:** The container startup script has been improved to handle permission setting on the `/data` volume more gracefully. It now catches file system errors (common on macOS mounts) without crashing the container, and allows users to opt-out of permission checks completely by setting the environment variable `SKIP_DATA_PERMS=true`.
+
+### Fixed
+- **macOS OOM Crashes:** Resolved an issue where running the Intel image on Apple Silicon via Rosetta 2 emulation would cause the container to crash with Exit Code 137 (Out of Memory).
+
 ## [0.15.6] - 2026-01-02
 
 ### Fixed

@@ -85,6 +85,10 @@ This method uses the pre-built Docker image from GitHub Packages.
                 - PUID=1000
                 - PGID=1000
 
+                # OPTIONAL: Set to 'true' to skip permission checks on /data on startup.
+                # Recommended for macOS users or libraries with 1000+ books to speed up boot time.
+                # - SKIP_DATA_PERMS=true
+
                 # --- TIMEZONE ---
                 # Set your local timezone to ensure scheduled tasks run correctly.
                 # A full list can be found here: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
@@ -368,3 +372,16 @@ sqlite> SELECT author, title FROM audiobooks WHERE status = 'ERROR';
 sqlite> .exit
 exit
 ```
+
+### Optimizing Startup Speed (macOS / Large Libraries)
+
+On startup, the container ensures you have write permissions to your `/data` folder. On macOS (due to Docker file sharing) or with extremely large libraries (1000+ books), this scan can take several minutes, making the app look like it has hung.
+
+To skip this check, add the following environment variable to your `docker-compose.yml`:
+
+```yaml
+environment:
+  - SKIP_DATA_PERMS=true
+```
+
+*Note: If you use this, ensure your host folder permissions are correct manually, or the app may fail to write files.*

@@ -11,6 +11,11 @@ services:
       # Find this by running the 'id' command in your server's terminal.
       - PUID=1000
       - PGID=1000
+                
+      # OPTIONAL: Set to 'true' to skip permission checks on /data on startup.
+      # Recommended for macOS users or libraries with 1000+ books to speed up boot time.
+      # - SKIP_DATA_PERMS=true
+
       # Set the timezone for the container itself using a standard IANA name.
       # This should match the timezone you configure in the application's UI.
       # A list of valid timezones can be found here: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
