@@ -38,6 +38,15 @@ This entire system runs as a single Docker container, providing a seamless user 
 - **DRM-Free Conversion:** Converts your audiobooks into standard `.m4b` files with chapters and metadata intact.
 - **Simple Docker Deployment:** Runs as a single, easy-to-manage Docker container with a clean, separated data structure.
 
+## Audio Conversion & Quality
+
+Unlike some archival tools that simply strip DRM and copy the raw stream (which is fast but can lead to imprecise chapter cuts), AudioBookUp **re-encodes** your books into a standardized, high-quality AAC format.
+
+**Why do we re-encode?**
+*   **Precision:** Re-encoding allows for frame-perfect chapter splitting. This ensures chapters start *exactly* at the correct millisecond, preventing cut-off words or awkward glitches often found in direct-stream copies.
+*   **Universal Compatibility:** The resulting `.m4b` files are clean, standardized containers guaranteed to work on any player—from modern media servers (Audiobookshelf, Plex) to legacy hardware and mobile apps.
+*   **Storage Control:** You can choose your preferred quality (High, Standard, Low) to balance audio fidelity with file size.
+
 ---
 
 ## Getting Started
