@@ -40,7 +40,7 @@ This entire system runs as a single Docker container, providing a seamless user 
 
 ## Audio Conversion & Quality
 
-AudioBookUp **re-encodes** your books into a standardized, high-quality AAC format. This is done for a number of reasons, because although stripping DRM and simply copying the raw data stream is fast and efective, there are some benefits to re-encoding the file, even if it takes more processing time to do it.
+AudioBookUp **re-encodes** your books into a standardized, high-quality AAC format. This is done for a number of reasons, because although stripping DRM and simply copying the raw data stream is fast and effective, there are some benefits to re-encoding the file, even if it takes more processing time to do it.
 
 **Why do we re-encode?**
 *   **Precision:** Re-encoding allows for frame-perfect chapter splitting. This ensures chapters start *exactly* at the correct millisecond, preventing cut-off words or awkward glitches often found in direct-stream copies.
