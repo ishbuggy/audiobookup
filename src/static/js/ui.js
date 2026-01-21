@@ -34,7 +34,8 @@ document.addEventListener('DOMContentLoaded', () => {
     window.showConfirmationModal = function(title, message, onConfirm) {
         if (!confirmationModal) return;
         confirmationTitle.innerHTML = title;
-        confirmationMessage.textContent = message;
+        // Use innerHTML to allow <strong> tags
+        confirmationMessage.innerHTML = message; 
         confirmCallback = onConfirm;
         document.body.classList.add("modal-open");
         confirmationModal.style.display = "flex";

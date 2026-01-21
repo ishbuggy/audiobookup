@@ -382,30 +382,54 @@ def prepare_book_assets(asin, job_id, temp_dir):
         chapter_txt_path = os.path.join(temp_dir, "chapters.txt")
         with open(chapter_txt_path, "w", encoding="utf-8") as f:
             f.write(";FFMETADATA1\n")
-            f.write(f"title={book_info.get('title', 'N/A')}\n")
+
+            # --- Standard Tags ---
+            title = book_info.get("title", "N/A")
+            f.write(f"title={title}\n")
+            f.write(f"album={title}\n")  # Players often treat Audiobooks as Albums
+
             authors = ", ".join([a.get("name", "N/A") for a in book_info.get("authors", [])])
             f.write(f"artist={authors}\n")
+            f.write(f"album_artist={authors}\n")
+
             narrators = ", ".join([n.get("name", "N/A") for n in book_info.get("narrators", [])])
-            f.write(f"composer={narrators}\n")
+            f.write(f"composer={narrators}\n")  # 'Composer' is the standard field for Narrator in M4B
+
+            # Genre Extraction (e.g., "Fiction > Sci-Fi")
+            categories = []
+            if book_info.get("category_ladders"):
+                for ladder in book_info["category_ladders"]:
+                    if ladder.get("ladder"):
+                        # Get the last (most specific) category name
+                        categories.append(ladder["ladder"][-1].get("name", ""))
+            genre_str = ", ".join(filter(None, categories))
+            if genre_str:
+                f.write(f"genre={genre_str}\n")
+
+            # Dates
             release_date = book_info.get("release_date", "") or ""
+            f.write(f"date={release_date}\n")  # Full YYYY-MM-DD
             release_year = release_date.split("-")[0] if release_date else ""
             f.write(f"year={release_year}\n")
 
-            # Determine Copyright
-            ffprobe_command = ["ffprobe"] + [audio_file]
-            probe_result = subprocess.run(
-                ffprobe_command, capture_output=True, text=True, encoding="utf-8", errors="replace"
-            )
-            copyright_info = "Unknown"
-            for line in probe_result.stderr.splitlines():
-                if "copyright" in line.lower():
-                    if ":" in line:
-                        copyright_info = line.split(":", 1)[1].strip()
-                    else:
-                        copyright_info = line.strip()
-                    break
-            f.write(f"copyright={copyright_info}\n")
+            # Copyright (Prefer API data over file probe)
+            copyright_info = book_info.get("copy_right")
+            if not copyright_info:
+                # Fallback to probe if API is empty
+                ffprobe_command = ["ffprobe"] + [audio_file]
+                probe_result = subprocess.run(
+                    ffprobe_command, capture_output=True, text=True, encoding="utf-8", errors="replace"
+                )
+                for line in probe_result.stderr.splitlines():
+                    if "copyright" in line.lower():
+                        if ":" in line:
+                            copyright_info = line.split(":", 1)[1].strip()
+                        else:
+                            copyright_info = line.strip()
+                        break
+            f.write(f"copyright={copyright_info or 'Unknown'}\n")
 
+            # Summary / Description
             summary = (
                 (book_info.get("merchandising_summary") or "")
                 .replace("</p>", "\n")
@@ -414,7 +438,15 @@ def prepare_book_assets(asin, job_id, temp_dir):
                 .strip()
             )
             f.write(f"description={summary}\n")
-            f.write(f"asin={asin}\n")
+            f.write(f"comment={summary}\n")  # 'comment' is often used by players for the long description
+
+            # --- Custom / Extended Tags (Uppercase for custom keys) ---
+            f.write(f"PUBLISHER={book_info.get('publisher_name', 'N/A')}\n")
+            f.write(f"LANGUAGE={book_info.get('language', 'N/A')}\n")
+            f.write(f"AUDIBLE_ASIN={asin}\n")  # Used by some library tools to match metadata
+            f.write(f"asin={asin}\n")  # Lowercase fallback
+
+            # Series Info
             if book_info.get("series"):
                 f.write(f"series={book_info['series'][0].get('title', 'N/A')}\n")
                 f.write(f"series-part={book_info['series'][0].get('sequence', 'N/A')}\n")

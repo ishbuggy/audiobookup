@@ -1003,6 +1003,11 @@ h2 {
     background-color: #0056b3;
 }
 
+/* Ensure Confirmation Modal sits on top of Detail Modal */
+#confirmation-modal {
+    z-index: 2200; /* Higher than generic .modal-overlay which is usually 2000 */
+}
+
 /* Log Container / Status Bar */
 #log-container {
     position: fixed;

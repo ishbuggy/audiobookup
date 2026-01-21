@@ -24,63 +24,137 @@ function closeDetailModal() {
 
 async function handleBookClick(event) {
     const card = event.target.closest(".book-card");
-    // Ignore clicks on the "Retry" button, those are handled by job-manager logic
-    if (card && !event.target.matches("button.retry-button")) {
-        const asin = card.dataset.asin;
-        if (!asin) return;
-        try {
-            const response = await fetch(`/api/book/${asin}`);
-            if (!response.ok) throw new Error("Failed to fetch book details.");
-            const book = await response.json();
+    if (!card) return; // Not a book card click
 
-            document.getElementById("modal-book-cover").src = book.cover_url_original || "";
-            document.getElementById("modal-book-title").textContent = book.title || "N/A";
-            document.getElementById("modal-book-author").textContent = book.author || "N/A";
-            document.getElementById("modal-book-narrator").textContent = book.narrator || "N/A";
-            document.getElementById("modal-book-series").textContent = book.series || "N/A";
-            document.getElementById("modal-book-runtime").textContent = book.runtime_min || "N/A";
-            document.getElementById("modal-book-release-date").textContent = book.release_date || "N/A";
-            document.getElementById("modal-book-asin").textContent = book.asin || "N/A";
-            document.getElementById("modal-book-status").textContent = book.status || "N/A";
-            document.getElementById("modal-book-publisher").textContent = book.publisher || "N/A";
-            
-            let formattedDateAdded = "N/A";
-            if (book.date_added && book.date_added !== "N/A") {
-                formattedDateAdded = book.date_added.split("T")[0];
-            }
-            document.getElementById("modal-book-date-added").textContent = formattedDateAdded;
-            document.getElementById("modal-book-language").textContent = book.language || "N/A";
-            document.getElementById("modal-book-summary").textContent = book.summary || "No summary available.";
-            
-            // File Info
-            document.getElementById("modal-file-path").textContent = book.filepath || "N/A";
-            document.getElementById("modal-file-type").textContent = book.file_type || "N/A";
-            document.getElementById("modal-file-size").textContent = book.file_size_hr || "N/A";
-            document.getElementById("modal-file-mtime").textContent = book.file_mtime_hr || "N/A";
+    const asin = card.dataset.asin;
+    if (!asin) return;
 
-            // Error Info
-            const errorDetailsDiv = document.getElementById("modal-error-details");
-            if (book.error_message && book.error_message.trim() !== "") {
-                document.getElementById("modal-book-error").textContent = book.error_message;
-                errorDetailsDiv.style.display = "block";
-            } else {
-                errorDetailsDiv.style.display = "none";
-            }
+    // --- CASE 1: RETRY BUTTON CLICKED ---
+    if (event.target.matches("button.retry-button")) {
+        console.log("Retry button clicked for", asin);
+        const libraryData = getLibraryData(); // Ensure this is imported from library-manager.js
+        const book = libraryData.find((b) => b.asin === asin);
+        
+        // Open panel and start job
+        openProcessingPanel([book]); 
+        startJob("DOWNLOAD", [asin]);
+        
+        // Visual Feedback: Scroll to the job panel
+        const panel = document.getElementById("processing-panel");
+        if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+        return; 
+    }
 
-            // Full Summary Button
-            if (book.is_summary_full === 0) {
-                fetchSummaryBtn.style.display = "inline-block";
-                fetchSummaryBtn.dataset.asin = asin;
-            } else {
-                fetchSummaryBtn.style.display = "none";
-            }
+    // --- CASE 2: CARD CLICKED (OPEN MODAL) ---
+    try {
+        const response = await fetch(`/api/book/${asin}`);
+        if (!response.ok) throw new Error("Failed to fetch book details.");
+        const book = await response.json();
 
-            document.body.classList.add("modal-open");
-            bookDetailModal.style.display = "flex";
-        } catch (error) {
-            console.error("Error fetching book details:", error);
-            window.showCustomAlert("Could not load book details.");
+        // --- Populate Basic Metadata ---
+        document.getElementById("modal-book-cover").src = book.cover_url_original || "";
+        document.getElementById("modal-book-title").textContent = book.title || "N/A";
+        document.getElementById("modal-book-author").textContent = book.author || "N/A";
+        document.getElementById("modal-book-narrator").textContent = book.narrator || "N/A";
+        document.getElementById("modal-book-series").textContent = book.series || "N/A";
+        document.getElementById("modal-book-runtime").textContent = book.runtime_min || "N/A";
+        document.getElementById("modal-book-release-date").textContent = book.release_date || "N/A";
+        document.getElementById("modal-book-asin").textContent = book.asin || "N/A";
+        document.getElementById("modal-book-status").textContent = book.status || "N/A";
+        document.getElementById("modal-book-publisher").textContent = book.publisher || "N/A";
+        
+        let formattedDateAdded = "N/A";
+        if (book.date_added && book.date_added !== "N/A") {
+            formattedDateAdded = book.date_added.split("T")[0];
         }
+        document.getElementById("modal-book-date-added").textContent = formattedDateAdded;
+        document.getElementById("modal-book-language").textContent = book.language || "N/A";
+        document.getElementById("modal-book-summary").textContent = book.summary || "No summary available.";
+        
+        // File Info
+        document.getElementById("modal-file-path").textContent = book.filepath || "N/A";
+        document.getElementById("modal-file-type").textContent = book.file_type || "N/A";
+        document.getElementById("modal-file-size").textContent = book.file_size_hr || "N/A";
+        document.getElementById("modal-file-mtime").textContent = book.file_mtime_hr || "N/A";
+
+        // Error Info
+        const errorDetailsDiv = document.getElementById("modal-error-details");
+        if (book.error_message && book.error_message.trim() !== "") {
+            document.getElementById("modal-book-error").textContent = book.error_message;
+            errorDetailsDiv.style.display = "block";
+        } else {
+            errorDetailsDiv.style.display = "none";
+        }
+
+        // Full Summary Button
+        const fetchSummaryBtn = document.getElementById("fetch-full-summary-btn");
+        if (book.is_summary_full === 0) {
+            fetchSummaryBtn.style.display = "inline-block";
+            fetchSummaryBtn.dataset.asin = asin;
+        } else {
+            fetchSummaryBtn.style.display = "none";
+        }
+
+        // --- Context-Aware Download Button Logic ---
+        const downloadBtn = document.getElementById("modal-download-btn");
+        
+        // Remove old event listeners by cloning
+        const newBtn = downloadBtn.cloneNode(true);
+        downloadBtn.parentNode.replaceChild(newBtn, downloadBtn);
+        
+        const configureButton = (text, className, isConfirm) => {
+            newBtn.textContent = text;
+            newBtn.className = `action-button ${className}`; 
+            newBtn.style.display = "inline-block";
+            
+            newBtn.onclick = () => {
+                const runDownload = () => {
+                    closeDetailModal();
+                    openProcessingPanel([book]); 
+                    startJob("DOWNLOAD", [asin]);
+                    // Visual Feedback: Scroll to panel
+                    setTimeout(() => {
+                        const panel = document.getElementById("processing-panel");
+                        if(panel) panel.scrollIntoView({ behavior: "smooth", block: "center" });
+                    }, 300); // Small delay to allow modal to close/panel to open
+                };
+
+                if (isConfirm) {
+                    if (window.showConfirmationModal) {
+                        window.showConfirmationModal(
+                            '<i class="fas fa-exclamation-triangle"></i> Force Re-download?',
+                            `Are you sure you want to re-download "<strong>${book.title}</strong>"?<br>This will overwrite the existing file.`,
+                            runDownload
+                        );
+                    } else {
+                        if (confirm(`Re-download "${book.title}"?`)) runDownload();
+                    }
+                } else {
+                    runDownload();
+                }
+            };
+        };
+
+        // Status Logic
+        if (book.status === "DOWNLOADED") {
+            configureButton("Force Re-download", "is-warning", true);
+            newBtn.style.backgroundColor = "#ffc107";
+            newBtn.style.color = "#212529";
+            newBtn.style.border = "1px solid #e0a800";
+        } else if (book.status === "NEW" || book.status === "MISSING" || book.status === "ERROR") {
+            configureButton("Download Now", "blue", false);
+            newBtn.style.backgroundColor = ""; 
+            newBtn.style.color = "";
+            newBtn.style.border = "";
+        } else {
+            newBtn.style.display = "none";
+        }
+
+        document.body.classList.add("modal-open");
+        bookDetailModal.style.display = "flex";
+    } catch (error) {
+        console.error("Error fetching book details:", error);
+        if (window.showCustomAlert) window.showCustomAlert("Could not load book details.");
     }
 }
 

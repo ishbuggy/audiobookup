@@ -91,18 +91,58 @@ class BookProcessor:
         # --- 1. Fetch book details and determine final path ---
         try:
             settings = load_settings()
+            # Default template now supports more options, though we default to the standard one.
             template = settings.get("naming", {}).get("template", "{author}/{title}/{author} - {title}")
+
             with get_db_connection() as con:
+                # Fetch additional metadata columns for the expanded naming template
                 book_details = con.execute(
-                    "SELECT author, title FROM audiobooks WHERE asin = ?", (self.asin,)
+                    "SELECT author, title, narrator, publisher FROM audiobooks WHERE asin = ?", (self.asin,)
                 ).fetchone()
+
             if not book_details:
                 raise ValueError(f"Could not find ASIN {self.asin} in the database.")
 
-            safe_author = _sanitize_filename(book_details["author"])
-            safe_title = _sanitize_filename(book_details["title"])
-            final_relative_path = template.replace("{author}", safe_author).replace("{title}", safe_title)
+            # Sanitize all potential filename components
+            safe_author = _sanitize_filename(book_details["author"] or "Unknown Author")
+            safe_title = _sanitize_filename(book_details["title"] or "Unknown Title")
+            safe_narrator = _sanitize_filename(book_details["narrator"] or "Unknown Narrator")
+            safe_publisher = _sanitize_filename(book_details["publisher"] or "Unknown Publisher")
+            safe_asin = _sanitize_filename(self.asin)
+
+            # Apply expanded template replacements
+            final_relative_path = (
+                template.replace("{author}", safe_author)
+                .replace("{title}", safe_title)
+                .replace("{narrator}", safe_narrator)
+                .replace("{publisher}", safe_publisher)
+                .replace("{asin}", safe_asin)
+            )
+
             self.final_output_path = os.path.join("/data", f"{final_relative_path}.m4b")
+
+            # Collision Detection Logic ("The Dracula Problem")
+            if os.path.exists(self.final_output_path):
+                # Check if the existing file belongs to a different ASIN
+                with get_db_connection() as con:
+                    existing_entry = con.execute(
+                        "SELECT asin FROM audiobooks WHERE filepath = ?", (self.final_output_path,)
+                    ).fetchone()
+
+                # If the file is tracked in the DB and belongs to a different book, or if it exists
+                # but isn't tracked (safety precaution), we modify the filename.
+                if existing_entry and existing_entry["asin"] != self.asin:
+                    log.info(
+                        f"TASK-PREPARE ({self.asin}): Filename collision detected with ASIN {existing_entry['asin']}. Appending unique ID."
+                    )
+                    # Inject the ASIN into the filename: "Title.m4b" -> "Title_B00XYZ.m4b"
+                    root, ext = os.path.splitext(self.final_output_path)
+                    self.final_output_path = f"{root}_{safe_asin}{ext}"
+                else:
+                    log.info(
+                        f"TASK-PREPARE ({self.asin}): File exists but belongs to this ASIN (or is untracked). Overwriting."
+                    )
+
             os.makedirs(os.path.dirname(self.final_output_path), exist_ok=True)
         except Exception as e:
             log.error(f"TASK-PREPARE ({self.asin}): Failed to get details or create path: {e}")

@@ -29,11 +29,15 @@ This entire system runs as a single Docker container, providing a seamless user 
     - **Timezone Support:** A dedicated setting allows you to select your local timezone, ensuring all scheduled jobs run at the correct local time. _Ensure the timezone is properly set in your docker compose file for this feature to work properly._
 - **Intelligent Parallel Processing:** The application uses a sophisticated, priority-based task runner to process multiple books and chapters in parallel. It intelligently allocates all available CPU cores to the highest-priority tasks, ensuring maximum efficiency and the fastest possible completion time for each book based on the resources allocated to the container.
     - **Smart Auto-Chunking:** Automatically detects books consisting of a single massive chapter (longer than 30 minutes) and splits them into 15-minute segments for easier playback navigation.
-- **Robust Job Cancellation:** The "Cancel Job" button now performs a hard stop on background processes, terminating downloads and encodings instantly.
+- **Rich Metadata Tagging:** Files are now tagged with extended metadata (Genre, Album, Album Artist, Publisher, Audible ASIN) for perfect integration with players like Plex, Audiobookshelf, and Apple Books.
+- **Smart File Management:**
+    - **Collision Protection:** Automatically detects and renames files to prevent overwriting different editions of the same book (e.g., different narrators).
+    - **Expanded Naming Templates:** Organize your library your way using placeholders like `{author}`, `{title}`, `{narrator}`, `{series}`, `{publisher}`, and `{asin}`.
+- **Context-Aware Downloads:** The UI intelligently offers to "Download" new books or "Force Re-download" existing ones to fix corruption or update tags.
 - **Maintenance Tools:** Built-in tools to **Clear Image Cache** and **Reset Audible Connection** directly from the Settings UI, removing the need for manual file system operations.
 - **Job History with Filtering & Search:** View a complete history of all past jobs on a dedicated `/history` page. The page includes controls to **filter** by job type and status, and to **search** for jobs containing specific books by title or author.
 - **Detailed Book View:** Click on any book to see a detailed modal with high-resolution art and full metadata. By default, summaries of each item are truncated, but a full summary of the book can be grabbed with a single button.
-- **Settings Configuration:** Configure features from a dedicated `/settings` page. This includes custom folder/file naming templates, audio quality, and a simplified "Job Settings" UI that allows for auto-detection of CPU cores in Normal Mode, or manual control over `Total Processing Cores` and `Max Parallel Downloads` in Advanced Mode.
+- **Settings Configuration:** Configure features from a dedicated `/settings` page. This includes custom folder/file naming templates (supporting Narrator, Publisher, etc.), audio quality, and a simplified "Job Settings" UI that allows for auto-detection of CPU cores in Normal Mode, or manual control over `Total Processing Cores` and `Max Parallel Downloads` in Advanced Mode.
 - **Audible Connection Health Check:** The app automatically checks if its connection to Audible is still valid on a periodic basis and displays a prominent warning banner if re-authentication is needed.
 - **DRM-Free Conversion:** Converts your audiobooks into standard `.m4b` files with chapters and metadata intact.
 - **Simple Docker Deployment:** Runs as a single, easy-to-manage Docker container with a clean, separated data structure.
@@ -239,9 +243,10 @@ Once setup is complete, the application will always start in **Normal Mode**, ta
 
 ### Core Actions
 
--   **Sync Library:** Triggers a manual **Deep Sync** (API fetch + full disk scan). This ensures your database matches your files perfectly.
--   **Process Downloads:** Opens a selection modal to batch download books marked as `NEW`, `MISSING`, or `ERROR`.
--   **Retry:** Appears on individual book cards if a previous download failed. Clicking it re-queues just that book.
+- **Sync Library:** Triggers a manual **Deep Sync** (API fetch + full disk scan). This ensures your database matches your files perfectly.
+- **Process Downloads:** Opens a selection modal to batch download books marked as `NEW`, `MISSING`, or `ERROR`.
+- **Force Re-download:** Opened via the Book Detail modal, this allows you to re-download a specific book (overwriting the existing file) to fix glitches or update metadata.
+- **Retry:** Appears on individual book cards if a previous download failed. Clicking it instantly re-queues that specific book.
 
 ---
 

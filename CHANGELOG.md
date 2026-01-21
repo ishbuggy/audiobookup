@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-01-21
+
+This release focuses on **Library Curation & File Management**. It introduces safety checks to prevent data loss, expanded tools for organizing your library, and significantly richer metadata tagging for better compatibility with media players.
+
+### Added
+- **Smart Collision Protection:** The download engine now checks if a file already exists at the target destination.
+    - If the existing file belongs to a *different* book (e.g., a different edition of *Dracula* with the same Title/Author), the new file is automatically renamed with a unique ID (`Title_B00XYZ.m4b`) to prevent overwriting the existing one.
+    - If the file belongs to the *same* book, it is treated as a valid re-download and overwritten.
+- **Extended Naming Templates:** The "Folder/File Naming" setting now supports new placeholders: `{narrator}`, `{publisher}`, and `{asin}`. This allows for organization schemes like `{author}/{title} ({narrator})/{title}`.
+- **Context-Aware Download Button:** Added a dynamic button to the Book Detail modal:
+    - **"Download Now":** Appears for New, Missing, or Error status books.
+    - **"Force Re-download":** Appears for Downloaded books. This allows you to easily fix corrupted files or update metadata without manually deleting files from the filesystem.
+- **Metadata Enrichment:** The conversion engine now injects industry-standard metadata tags into the `.m4b` file to match tools like Libation.
+    - Added: `Album`, `Album Artist`, `Genre` (extracted from Audible categories), `Publisher`, `Language`, and `Audible ASIN`.
+    - This ensures better sorting and display in players like Plex, Audiobookshelf, and Apple Books.
+
 ## [0.16.0] - 2026-01-03
 
 ### Added
