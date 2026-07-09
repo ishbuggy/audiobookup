@@ -75,3 +75,9 @@ docker-compose.dev.yml
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# LLM
+ref-docs/
+REVIEW.md
+PLAN.md
+PROMPT.md
