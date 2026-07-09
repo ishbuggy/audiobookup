@@ -43,11 +43,31 @@ DB_SCHEMA["is_summary_full"]="is_summary_full INTEGER DEFAULT 0"
 DB_SCHEMA["date_added"]="date_added TEXT"
 DB_SCHEMA["retry_count"]="retry_count INTEGER DEFAULT 0"
 
+# Bash associative arrays have no defined iteration order, so CREATE TABLE
+# and the rebuild migration below use this explicit column order.
+DB_COLUMN_ORDER=(asin author title status series narrator runtime_min release_date filepath error_message publisher language purchase_date summary is_summary_full date_added retry_count)
+
+# Build the full column-definition list plus the column/select lists used
+# by the rebuild migration. Columns with a DEFAULT get a COALESCE so rows
+# from a defective (default-less) table are backfilled during the copy.
+schema_defs=""
+copy_cols=""
+copy_selects=""
+for col_name in "${DB_COLUMN_ORDER[@]}"; do
+    schema_defs+="${DB_SCHEMA[$col_name]}, "
+    copy_cols+="$col_name, "
+    case "$col_name" in
+        is_summary_full | retry_count) copy_selects+="COALESCE($col_name, 0), " ;;
+        *) copy_selects+="$col_name, " ;;
+    esac
+done
+schema_defs="${schema_defs%, }"
+copy_cols="${copy_cols%, }"
+copy_selects="${copy_selects%, }"
+
 if [ ! -f "$DB_FILE" ]; then
     echo "Database file not found. Creating a new one in $DATABASE_DIR..."
-    IFS=,
-    create_statement="${!DB_SCHEMA[*]}"
-    sqlite3 "$DB_FILE" "CREATE TABLE audiobooks (${create_statement// / });"
+    sqlite3 "$DB_FILE" "CREATE TABLE audiobooks ($schema_defs);"
     echo "Database created successfully."
 else
     echo "Database found. Verifying schema..."
@@ -60,6 +80,43 @@ else
             echo " -> Column '$col_name' added."
         fi
     done
+
+    # --- Repair migration for databases created by the old fresh-install path ---
+    # Versions <= 0.17.0 created fresh tables from column NAMES only: no types,
+    # no PRIMARY KEY on asin, no DEFAULT values. Detect the missing primary key
+    # and rebuild the table with the correct schema, preserving all data.
+    # This runs AFTER the column-add loop above so the old table is guaranteed
+    # to have every column the copy expects.
+    asin_pk=$(sqlite3 "$DB_FILE" "SELECT pk FROM pragma_table_info('audiobooks') WHERE name='asin';")
+    if [ "$asin_pk" != "1" ]; then
+        echo "Detected defective 'audiobooks' schema (asin is not PRIMARY KEY). Rebuilding table..."
+        BACKUP_FILE="$DB_FILE.pre-schema-fix.bak"
+        # Keep the FIRST backup if a previous rebuild attempt already made one.
+        if [ ! -f "$BACKUP_FILE" ]; then
+            cp "$DB_FILE" "$BACKUP_FILE"
+            echo " -> Backed up database to $BACKUP_FILE"
+        fi
+        row_count_before=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM audiobooks;")
+        # INSERT OR IGNORE: a defective table could hold duplicate ASINs that
+        # the new PRIMARY KEY rejects; keep the first row rather than abort.
+        if sqlite3 "$DB_FILE" "BEGIN TRANSACTION;
+CREATE TABLE audiobooks_new ($schema_defs);
+INSERT OR IGNORE INTO audiobooks_new ($copy_cols) SELECT $copy_selects FROM audiobooks;
+DROP TABLE audiobooks;
+ALTER TABLE audiobooks_new RENAME TO audiobooks;
+COMMIT;"; then
+            row_count_after=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM audiobooks;")
+            echo " -> Rebuild complete: $row_count_after of $row_count_before row(s) migrated."
+            if [ "$row_count_after" != "$row_count_before" ]; then
+                echo " -> WARNING: $((row_count_before - row_count_after)) duplicate-ASIN row(s) dropped. Originals preserved in $BACKUP_FILE."
+            fi
+        else
+            # Don't brick the container on a failed rebuild: restore the backup
+            # and continue running on the old (defective but functional) schema.
+            echo " -> ERROR: Schema rebuild failed. Restoring backup and continuing with the old schema."
+            cp "$BACKUP_FILE" "$DB_FILE"
+        fi
+    fi
     echo "Schema verification complete."
 fi
 
