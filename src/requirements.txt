@@ -1,8 +1,15 @@
-APScheduler
-Flask
-audible-cli
-flask-socketio
-pexpect
-ptyprocess
-requests
-Werkzeug
+# Direct dependencies, pinned to the exact versions from the known-good
+# v0.17.0 image (built 2026-01-21). Upgrades are deliberate changes:
+# bump a pin on purpose, rebuild, and test — never let a rebuild float.
+#
+# Note: audible-cli is especially version-sensitive — the app parses its
+# CLI output (download progress, activation-bytes) and drives its
+# `quickstart` prompts via pexpect (setup_pty.py).
+APScheduler==3.11.2
+Flask==3.1.2
+audible-cli==0.3.3
+Flask-SocketIO==5.6.0
+pexpect==4.9.0
+ptyprocess==0.7.0
+requests==2.32.5
+Werkzeug==3.1.5
