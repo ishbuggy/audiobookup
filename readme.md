@@ -102,6 +102,11 @@ This method uses the pre-built Docker image from GitHub Packages.
                 # Recommended for macOS users or libraries with 1000+ books to speed up boot time.
                 # - SKIP_DATA_PERMS=true
 
+                # OPTIONAL: File-permission mask for files the app creates. The default (0002)
+                # produces group-writable files (664) and directories (775). Set to 0000 for
+                # world-writable output (666/777), e.g. for some NAS/SMB share setups.
+                # - UMASK=0002
+
                 # --- TIMEZONE ---
                 # Set your local timezone to ensure scheduled tasks run correctly.
                 # A full list can be found here: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones

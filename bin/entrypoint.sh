@@ -1,8 +1,10 @@
 #!/bin/bash
 set -e
 
-# Set a sane umask for file permissions (drwxrwxr-x for dirs, -rw-rw-r-- for files)
-umask 0000
+# Set a sane umask for file permissions (drwxrwxr-x for dirs, -rw-rw-r-- for files).
+# Overridable via the UMASK env var, e.g. UMASK=0000 for world-writable output
+# (some NAS/share setups want this — it was the hardcoded behavior before v0.18.0).
+umask "${UMASK:-0002}"
 
 # --- Generate secret key on first run ---
 SECRET_FILE="/config/secret.key"

@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Dead Legacy Script Endpoints:** The `/run_action` and `/run_single_action` routes (and their shell-script streaming helper) have been deleted. They streamed output from shell scripts (`sync.sh`, `download.sh`, `process_book.sh`) that no longer exist, and nothing in the UI has called them since the Python job system replaced that pipeline.
 
 ### Changed
+- **Default File Permissions (`UMASK`):** Files created by the app were world-writable (777 directories / 666 files) because the container hardcoded `umask 0000`, despite its comment claiming otherwise. The default is now `0002`, producing group-writable 775/664 as the comment always intended, and the mask is configurable via a new `UMASK` environment variable. **If you relied on world-writable output** (e.g. certain NAS/SMB share setups), set `UMASK=0000` in your compose file to restore the old behavior. Existing files are untouched; only newly created files are affected.
 - **Pinned Dependencies:** All Python dependencies in `requirements.txt` are now pinned to the exact versions from the known-good v0.17.0 image. This makes Docker image builds reproducible — a rebuild on a new machine or at a later date can no longer silently pick up incompatible library versions.
 
 ## [0.17.0] - 2026-01-21
