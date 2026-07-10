@@ -153,7 +153,9 @@ def connect():
 
 @socketio.on("start_audible_setup")
 def start_audible_setup(data):
-    log.info(f"PTY_SETUP: Received start signal with data: {data}")
+    # Redact the auth-file password before logging; app.log is user-downloadable.
+    redacted = {**data, "auth_file_password": "***"} if "auth_file_password" in data else data
+    log.info(f"PTY_SETUP: Received start signal with data: {redacted}")
     socketio.start_background_task(target=pty_lifecycle_thread, setup_data=data)
 
 
