@@ -123,6 +123,7 @@ def sync_worker(job_id, app_context, stop_event, job_params=None):
 def verify_worker(job_id, app_context, stop_event):
     """Runs the library verification logic."""
     with app_context:
+        final_status = "FAILED"
         try:
             with get_db_connection() as con:
                 con.execute("UPDATE jobs SET status = 'RUNNING' WHERE job_id = ?", (job_id,))
@@ -130,6 +131,7 @@ def verify_worker(job_id, app_context, stop_event):
 
             # Run the logic
             run_verification_logic(job_id)
+            final_status = "COMPLETED"
 
             end_time_iso = datetime.utcnow().isoformat()
             with get_db_connection() as con:
@@ -140,16 +142,20 @@ def verify_worker(job_id, app_context, stop_event):
 
         except Exception as e:
             log.error(f"WORKER: Verify job {job_id} failed: {e}", exc_info=True)
+            end_time_iso = datetime.utcnow().isoformat()
             with get_db_connection() as con:
-                con.execute("UPDATE jobs SET status = 'FAILED' WHERE job_id = ?", (job_id,))
+                con.execute("UPDATE jobs SET status = 'FAILED', end_time = ? WHERE job_id = ?", (end_time_iso, job_id))
                 con.commit()
         finally:
-            # Send standard finish event so UI resets
-            payload = {"job_id": job_id, "status": "COMPLETED", "job_type": "VERIFY"}
+            # Send standard finish event so UI resets — with the real outcome,
+            # not an unconditional COMPLETED.
+            payload = {"job_id": job_id, "status": final_status, "job_type": "VERIFY"}
             announcer.announce(f"event: job_finished\ndata: {json.dumps(payload)}\n\n")
             with job_lock:
                 if active_job["job_id"] == job_id:
                     active_job["job_id"] = None
+                    active_job["thread"] = None
+                    active_job["stop_event"] = None
 
 
 ## The worker now announces events to the SSE stream, and responds to cancellation signal
