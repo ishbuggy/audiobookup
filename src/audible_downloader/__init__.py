@@ -10,9 +10,12 @@ from flask_socketio import SocketIO  # type: ignore
 # --- Basic App Setup ---
 # This is the central place where the Flask app and its extensions are initialized.
 
-# Define the config directory, which is crucial for the app's operation
-CONFIG_DIR = "/config"
-DATABASE_DIR = "/database"
+# Define the config directory, which is crucial for the app's operation.
+# The environment overrides exist so the package can be imported outside the
+# container (e.g. for tests on the host); inside the container the variables
+# are unset, so the defaults apply and behavior is unchanged.
+CONFIG_DIR = os.environ.get("CONFIG_DIR", "/config")
+DATABASE_DIR = os.environ.get("DATABASE_DIR", "/database")
 
 # Create a global threading event that will be used to signal the scheduler
 # that it needs to reload its configuration.

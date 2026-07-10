@@ -28,17 +28,23 @@ def setup_logging():
     console_handler.setFormatter(formatter)
     console_handler.setLevel(logging.INFO)
 
-    # --- File Handler ---
-    # This handler writes logs to the specified log file
-    file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    file_handler.setLevel(logging.DEBUG)
-
-    # Add both handlers to the root logger
+    # Add the handlers to the root logger
     # Check if handlers are already present to avoid duplication on reloads
     if not logger.handlers:
         logger.addHandler(console_handler)
-        logger.addHandler(file_handler)
+
+        # --- File Handler ---
+        # This handler writes logs to the specified log file. If the log file
+        # can't be opened (e.g. running outside the container, or a read-only
+        # /config mount), fall back to console-only logging instead of crashing
+        # at import time.
+        try:
+            file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+            file_handler.setFormatter(formatter)
+            file_handler.setLevel(logging.DEBUG)
+            logger.addHandler(file_handler)
+        except OSError as e:
+            logger.warning(f"Could not open log file {LOG_FILE} ({e}). Continuing with console logging only.")
 
     return logger
 
