@@ -106,3 +106,20 @@ class TestAuthenticatedAccess:
         response = client.get("/")
         assert response.status_code == 302
         assert response.headers["Location"].startswith("/login")
+
+
+class TestCoverAuthentication:
+    """L2 regression: cover art must not be served to anonymous clients."""
+
+    def test_anonymous_cover_request_is_redirected_to_login(self, client, completed_setup):
+        response = client.get("/covers/B00XYZ_thumb.jpg")
+        assert response.status_code == 302
+        assert response.headers["Location"].startswith("/login")
+
+    def test_logged_in_cover_request_reaches_the_file_handler(self, client, completed_setup):
+        with client.session_transaction() as session:
+            session["username"] = "admin"
+        # The cover doesn't exist in the temp COVERS_DIR, so a 404 (rather
+        # than a login redirect) proves the request passed authentication.
+        response = client.get("/covers/B00XYZ_thumb.jpg")
+        assert response.status_code == 404

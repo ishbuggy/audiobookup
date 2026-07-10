@@ -638,7 +638,11 @@ def shutdown():
 
 
 @app.route("/covers/<path:filename>")
+@login_required
 def serve_cover(filename):
+    # Lazy-loaded <img> requests send the session cookie, so authenticated
+    # pages keep working; an expired session just shows broken thumbnails
+    # until re-login instead of leaking library contents.
     return send_from_directory(COVERS_DIR, filename)
 
 
