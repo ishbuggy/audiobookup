@@ -1,3 +1,17 @@
+// --- Global HTML Escaping Helper ---
+// Book metadata (titles, authors, narrators) comes from the Audible API and is
+// interpolated into innerHTML template literals across the UI. Escape it so a
+// crafted title can't inject markup or scripts. Defined outside the
+// DOMContentLoaded handler so ES modules can use it as soon as ui.js runs.
+window.escapeHtml = function (value) {
+    return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+};
+
 // This ensures that the script does not run until the entire HTML document has been loaded and parsed.
 document.addEventListener('DOMContentLoaded', () => {
 

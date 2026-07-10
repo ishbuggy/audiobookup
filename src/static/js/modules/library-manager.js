@@ -62,16 +62,18 @@ function updateLibraryTable(books) {
         const card = document.createElement("div");
         card.className = "book-card";
         card.setAttribute("data-asin", book.asin);
+        // Escape all book-derived strings before interpolating them into HTML.
+        const esc = window.escapeHtml;
         let actionButtonHTML =
             book.status === "ERROR" || book.status === "MISSING"
-                ? `<button class="retry-button" data-asin="${book.asin}">Retry</button>`
+                ? `<button class="retry-button" data-asin="${esc(book.asin)}">Retry</button>`
                 : "";
         card.innerHTML = `
-        <img class="book-card-cover lazy-load" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" data-src="${book.cover_url || ""}" alt="Cover for ${book.title}">
+        <img class="book-card-cover lazy-load" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" data-src="${esc(book.cover_url || "")}" alt="Cover for ${esc(book.title)}">
         <div class="book-card-info">
-            <p class="book-card-title">${book.title}</p>
-            <p class="book-card-author">${book.author}</p>
-            <span class="book-card-status status-${book.status}">${book.status}</span>
+            <p class="book-card-title">${esc(book.title)}</p>
+            <p class="book-card-author">${esc(book.author)}</p>
+            <span class="book-card-status status-${esc(book.status)}">${esc(book.status)}</span>
             <div class="book-card-actions">${actionButtonHTML}</div>
         </div>`;
         libraryGrid.appendChild(card);

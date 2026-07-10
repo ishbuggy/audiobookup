@@ -172,15 +172,17 @@ async function fetchAndRenderHistory() {
                 detailsContent =
                     '<p style="padding: 10px 0; margin: 0; font-style: italic; color: #6c757d;">This was a library synchronization task.</p>';
             } else if (job.items && job.items.length > 0) {
+                // Escape book-derived strings before interpolating them into HTML.
+                const esc = window.escapeHtml;
                 detailsContent = `
             <ul class="history-book-list">
                 ${job.items
                     .map(
                         (item) => `
                     <li class="history-book-list-item">
-                        <img class="history-book-thumb" src="/covers/${item.asin}_thumb.jpg" alt="Cover for ${item.asin}">
+                        <img class="history-book-thumb" src="/covers/${esc(item.asin)}_thumb.jpg" alt="Cover for ${esc(item.asin)}">
                         <div class="history-book-info">
-                            <strong>${item.status}:</strong> ${item.title}
+                            <strong>${esc(item.status)}:</strong> ${esc(item.title)}
                         </div>
                     </li>
                 `,

@@ -123,7 +123,7 @@ async function handleBookClick(event) {
                     if (window.showConfirmationModal) {
                         window.showConfirmationModal(
                             '<i class="fas fa-exclamation-triangle"></i> Force Re-download?',
-                            `Are you sure you want to re-download "<strong>${book.title}</strong>"?<br>This will overwrite the existing file.`,
+                            `Are you sure you want to re-download "<strong>${window.escapeHtml(book.title)}</strong>"?<br>This will overwrite the existing file.`,
                             runDownload
                         );
                     } else {
@@ -214,12 +214,14 @@ export async function openDownloadSelectionModal() {
         books.forEach((book) => {
             const div = document.createElement("div");
             div.className = "selection-book-item";
+            // Escape book-derived strings before interpolating them into HTML.
+            const esc = window.escapeHtml;
             div.innerHTML = `
-                <img class="selection-book-thumb lazy-load" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" data-src="/covers/${book.asin}_thumb.jpg" alt="Cover">
-                <input type="checkbox" id="asin-${book.asin}" value="${book.asin}">
-                <label for="asin-${book.asin}" class="selection-book-info">
-                    <span class="title">${book.title}</span>
-                    <span class="author">by ${book.author}</span>
+                <img class="selection-book-thumb lazy-load" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" data-src="/covers/${esc(book.asin)}_thumb.jpg" alt="Cover">
+                <input type="checkbox" id="asin-${esc(book.asin)}" value="${esc(book.asin)}">
+                <label for="asin-${esc(book.asin)}" class="selection-book-info">
+                    <span class="title">${esc(book.title)}</span>
+                    <span class="author">by ${esc(book.author)}</span>
                 </label>
             `;
             container.appendChild(div);

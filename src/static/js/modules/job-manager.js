@@ -356,11 +356,13 @@ function rebuildProcessingPanel(jobData) {
             }
             if (itemClass) item.classList.add(itemClass);
 
+            // Escape book-derived strings before interpolating them into HTML.
+            const esc = window.escapeHtml;
             item.innerHTML = `
-            <img class="processing-item-thumb" src="${book.cover_url}" alt="Cover">
+            <img class="processing-item-thumb" src="${esc(book.cover_url)}" alt="Cover">
             <div class="processing-item-info">
-                <p class="processing-item-title">${book.title}</p>
-                <p class="processing-item-author">${book.author}</p>
+                <p class="processing-item-title">${esc(book.title)}</p>
+                <p class="processing-item-author">${esc(book.author)}</p>
             </div>
             <div class="processing-item-status">
                 <p class="status-text">${statusText}</p>
@@ -438,11 +440,13 @@ export function openProcessingPanel(selectedBooks) {
             const item = document.createElement("div");
             item.className = "processing-item";
             item.setAttribute("data-asin", book.asin);
+            // Escape book-derived strings before interpolating them into HTML.
+            const esc = window.escapeHtml;
             item.innerHTML = `
-            <img class="processing-item-thumb" src="${book.cover_url}" alt="Cover">
+            <img class="processing-item-thumb" src="${esc(book.cover_url)}" alt="Cover">
             <div class="processing-item-info">
-                <p class="processing-item-title">${book.title}</p>
-                <p class="processing-item-author">${book.author}</p>
+                <p class="processing-item-title">${esc(book.title)}</p>
+                <p class="processing-item-author">${esc(book.author)}</p>
             </div>
             <div class="processing-item-status">
                 <p class="status-text">Queued...</p>
