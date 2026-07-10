@@ -24,7 +24,7 @@ from .chunked_conversion_logic import (
     prepare_book_assets,
 )
 from .db import get_db_connection
-from .eta_estimator import record_conversion_time
+from .eta_estimator import estimate_conversion_time, record_conversion_time
 from .logger import log
 from .process_registry import process_registry
 from .settings import load_settings
@@ -47,10 +47,15 @@ class BookProcessor:
     This acts as the "General Contractor" for one book.
     """
 
-    def __init__(self, asin, job_id, download_complete_event=None):
+    def __init__(self, asin, job_id, download_complete_event=None, stop_event=None):
         self.asin = asin
         self.job_id = job_id
         self.download_complete_event = download_complete_event
+        # The job's cancellation signal. The process_registry kills subprocesses
+        # that are already running, but tasks still sitting in the queue would
+        # otherwise start fresh work after a cancel — each task checks this
+        # event before doing anything.
+        self.stop_event = stop_event
         self.temp_dir = None
         self.final_output_path = None
         self.context = {}
@@ -59,6 +64,18 @@ class BookProcessor:
         self.encoded_chunk_paths = []
         self._lock = Lock()
         self._completion_event = Event()
+
+    def _cancelled(self):
+        """
+        Returns True (and unblocks `run`) if the job has been cancelled.
+        Task functions call this on entry so queued tasks become no-ops after a
+        cancel instead of working against a soon-deleted temp dir.
+        """
+        if self.stop_event is not None and self.stop_event.is_set():
+            log.info(f"PROCESSOR ({self.asin}): Job cancelled. Skipping remaining work.")
+            self._completion_event.set()
+            return True
+        return False
 
     def _probe_file_asin(self, filepath):
         """
@@ -112,8 +129,18 @@ class BookProcessor:
                 task_runner.submit_task(prepare_task)
 
                 # Block and wait for the final MERGE task to signal completion.
-                # Set a generous timeout (e.g., 2 hours) to prevent it from waiting forever.
-                completed = self._completion_event.wait(timeout=7200)
+                # The timeout only exists to prevent waiting forever: at least
+                # 2 hours, scaled up (4x the historical ETA) so very long books
+                # on slow hardware don't get killed mid-conversion.
+                timeout = 7200
+                with get_db_connection() as con:
+                    runtime_row = con.execute(
+                        "SELECT runtime_min FROM audiobooks WHERE asin = ?", (self.asin,)
+                    ).fetchone()
+                if runtime_row:
+                    timeout = max(timeout, 4 * estimate_conversion_time(runtime_row["runtime_min"]))
+
+                completed = self._completion_event.wait(timeout=timeout)
                 if not completed:
                     raise RuntimeError("Processing timed out.")
         except Exception as e:
@@ -124,6 +151,12 @@ class BookProcessor:
 
     def _prepare_and_spawn_encode_tasks(self):
         """The actual function for the PREPARE_BOOK task."""
+        if self._cancelled():
+            # Unblock the worker's download slot too, or the head-start
+            # pipeline in job_manager would keep waiting on it.
+            if self.download_complete_event:
+                self.download_complete_event.set()
+            return
         log.info(f"TASK-PREPARE ({self.asin}): Starting.")
         # --- 1. Fetch book details and determine final path ---
         try:
@@ -253,6 +286,8 @@ class BookProcessor:
 
     def _encode_and_track_chunk(self, chunk_info):
         """The actual function for the ENCODE_CHAPTER task."""
+        if self._cancelled():
+            return
         encoded_path = encode_chapter_chunk(self.asin, self.job_id, self.temp_dir, chunk_info, self.context)
 
         with self._lock:
@@ -282,6 +317,8 @@ class BookProcessor:
 
     def _merge_and_finalize(self):
         """The actual function for the MERGE_BOOK task."""
+        if self._cancelled():
+            return
         log.info(f"TASK-MERGE ({self.asin}): Starting.")
         conversion_start_time = time.time()
 
@@ -321,11 +358,13 @@ class BookProcessor:
         _yield_progress(self.asin, "Failed!", 100, self.job_id)
 
 
-def run_book_processing_logic(asin, job_id, download_complete_event=None):
+def run_book_processing_logic(asin, job_id, download_complete_event=None, stop_event=None):
     """
     Main entry point called by the download_worker.
     Creates a BookProcessor instance and runs it.
     """
-    # Pass the event down to the BookProcessor instance.
-    processor = BookProcessor(asin=asin, job_id=job_id, download_complete_event=download_complete_event)
+    # Pass the events down to the BookProcessor instance.
+    processor = BookProcessor(
+        asin=asin, job_id=job_id, download_complete_event=download_complete_event, stop_event=stop_event
+    )
     processor.run()

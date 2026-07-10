@@ -1,5 +1,6 @@
 # tests/test_processing_logic.py
 
+from threading import Event
 from unittest import mock
 
 import pytest
@@ -122,3 +123,41 @@ class TestCollisionHandling:
     def test_untracked_file_without_embedded_asin_gets_suffix(self):
         path = _resolve_output_path(path_exists=True, tracked_row=None, embedded_asin=None)
         assert path == "/data/Bram Stoker/Dracula/Bram Stoker - Dracula_B0OURS.m4b"
+
+
+class TestCancellation:
+    """M4 regression: once the job's stop_event is set, queued tasks must
+    become no-ops that unblock the processor instead of starting fresh work."""
+
+    def _cancelled_processor(self):
+        stop_event = Event()
+        stop_event.set()
+        return BookProcessor(asin="B0OURS", job_id=1, stop_event=stop_event)
+
+    def test_prepare_task_skips_work_and_unblocks(self):
+        processor = self._cancelled_processor()
+        processor.download_complete_event = Event()
+        with mock.patch.object(processing_logic, "load_settings") as load_settings:
+            processor._prepare_and_spawn_encode_tasks()
+        load_settings.assert_not_called()
+        assert processor._completion_event.is_set()
+        assert processor.download_complete_event.is_set()
+
+    def test_encode_task_skips_work_and_unblocks(self):
+        processor = self._cancelled_processor()
+        with mock.patch.object(processing_logic, "encode_chapter_chunk") as encode:
+            processor._encode_and_track_chunk({"index": 0})
+        encode.assert_not_called()
+        assert processor._completion_event.is_set()
+
+    def test_merge_task_skips_work_and_unblocks(self):
+        processor = self._cancelled_processor()
+        with mock.patch.object(processing_logic, "merge_book_chunks") as merge:
+            processor._merge_and_finalize()
+        merge.assert_not_called()
+        assert processor._completion_event.is_set()
+
+    def test_no_stop_event_means_never_cancelled(self):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        assert processor._cancelled() is False
+        assert not processor._completion_event.is_set()

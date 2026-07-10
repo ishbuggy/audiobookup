@@ -205,8 +205,9 @@ def download_worker(job_id, app_context, stop_event):
                     )
 
                 try:
-                    # Create the processor and store it.
-                    processor = BookProcessor(asin=asin, job_id=job_id)
+                    # Create the processor and store it. The stop_event lets
+                    # queued tasks bail out cleanly after a cancellation.
+                    processor = BookProcessor(asin=asin, job_id=job_id, stop_event=stop_event)
                     processors[asin] = processor
 
                     # This is the key change: processor.run() is a blocking call that
@@ -223,9 +224,14 @@ def download_worker(job_id, app_context, stop_event):
                         ).fetchone()
 
                         # Determine the correct job_items status based on the true outcome.
-                        final_item_status = (
-                            "COMPLETED" if book_status_row and book_status_row["status"] == "DOWNLOADED" else "FAILED"
-                        )
+                        # A book that didn't finish because the job was cancelled is
+                        # CANCELLED, not FAILED.
+                        if book_status_row and book_status_row["status"] == "DOWNLOADED":
+                            final_item_status = "COMPLETED"
+                        elif stop_event.is_set():
+                            final_item_status = "CANCELLED"
+                        else:
+                            final_item_status = "FAILED"
 
                         # Update the job_items table so the final job status check works correctly.
                         con.execute(
