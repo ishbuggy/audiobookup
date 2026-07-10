@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Chained Auto-Download Stability:** The download job that "Process new books on sync" chains after a sync re-entered the finished sync worker's Flask context object from a separate thread, which could intermittently break the hand-off. It now gets its own fresh app context.
 - **Verify Job Failure Reporting:** When a Verify Library job crashed, the UI was still told it COMPLETED (history showed FAILED, with no end time). The finish event now carries the real outcome, the end time is recorded on failure, and the job tracker is fully cleared so the state can't leak into the next job.
 - **Log File Rotation:** `app.log` now actually rotates (10 MB per file, 3 backups kept) as its documentation always claimed, instead of growing without bound on the `/config` volume.
 - **Cover Download Timeout:** Cover-art downloads during a sync had no network timeout, so a stalled connection to Audible's image CDN could hang the entire sync job indefinitely. Cover requests now time out (5s to connect, 30s per read) and fall through to the existing "could not process cover" handling, letting the sync continue.

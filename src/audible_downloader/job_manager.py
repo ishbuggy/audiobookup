@@ -83,7 +83,10 @@ def sync_worker(job_id, app_context, stop_event, job_params=None):
                         # Wait a few seconds for this sync job to fully release its lock.
                         time.sleep(5)
                         log.info("CHAINED_JOB: Attempting to start automatic download job post-sync.")
-                        with app_context:
+                        # Push a *fresh* context here: re-entering the sync worker's
+                        # app_context object from this detached thread races with the
+                        # worker popping it as it finishes.
+                        with app.app_context():
                             # Start a new job, passing `asins=None`. The job manager will now
                             # automatically find which books to download based on settings.
                             start_new_job("DOWNLOAD", asins=None)
