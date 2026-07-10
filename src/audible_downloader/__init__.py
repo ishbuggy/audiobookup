@@ -52,9 +52,8 @@ MAX_LOG_LINES = 500  # This is a configuration value, not a path, but fits well 
 DB_FILE = os.path.join(DATABASE_DIR, "library.db")
 SETUP_FLAG_FILE = os.path.join(DATABASE_DIR, ".setup_complete")
 
-# These hidden caches are also critical to performance and user data
-ETA_CACHE_FILE = os.path.join(DATABASE_DIR, ".eta_cache.json")
-FILE_SCAN_CACHE = os.path.join(DATABASE_DIR, ".file_scan_cache")
+# Note: the regenerable hidden caches (.eta_cache.json, .file_scan_cache) live in
+# /config and are pathed where they are used (eta_estimator.py, sync_logic.py).
 
 
 # --- START: ADD MessageAnnouncer Class and Instance ---

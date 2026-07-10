@@ -7,7 +7,7 @@ import subprocess
 
 import requests  # type: ignore
 
-from . import DATABASE_DIR
+from . import CONFIG_DIR, DATABASE_DIR
 
 # Import necessary components from our other modules
 from .db import get_db_connection
@@ -89,7 +89,6 @@ def _fetch_and_update_from_audible(job_id, sync_mode="DEEP"):
 
     total_books = len(all_items)
     log.info(f"SYNC-LOGIC ({job_id}): Processing {total_books} total books from library.")
-    CONFIG_DIR = "/config"
     COVERS_DIR = os.path.join(CONFIG_DIR, "covers")
     os.makedirs(COVERS_DIR, exist_ok=True)
 
@@ -224,7 +223,6 @@ def _scan_local_filesystem(job_id):
     mapping ASINs to file paths.
     """
     yield from _yield_progress("Scanning local files...", 50, stage_text="Phase 2/3: Scanning Filesystem")
-    CONFIG_DIR = "/config"
     AUDIOBOOK_LIBRARY_PATH = "/data"
     CACHE_FILE = os.path.join(CONFIG_DIR, ".file_scan_cache")
     cache = {}
