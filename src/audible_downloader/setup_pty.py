@@ -162,5 +162,5 @@ def start_audible_setup(data):
 @socketio.on("pty_input")
 def pty_input(data):
     log.info("PTY_SETUP: Received final URL from user via socket.")
-    # The .strip() is important to remove the newline the JS adds
+    # Defensive: trim any stray whitespace from the pasted URL.
     url_queue.put(data["input"].strip())

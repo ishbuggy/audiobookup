@@ -62,18 +62,11 @@ document.addEventListener("DOMContentLoaded", () => {
         openAudibleBtn.disabled = false;
     });
 
-    // Listen for the final output from the PTY process
+    // Listen for the final output from the PTY process.
+    // (Success is signalled by the dedicated "audible_setup_successful" event
+    // below, not by scraping the PTY output — only failures are detected here.)
     socket.on("pty_output", (data) => {
-        // Check for success or failure keywords in the final output
-        if (data.output.includes("SUCCESS! Authentication is valid")) {
-            step2.style.display = "none";
-            step3.innerHTML = `
-                <h1 style="color: #155724;"><i class="fas fa-check-circle"></i> Success!</h1>
-                <p>Authentication complete. You will be redirected to the dashboard automatically.</p>
-            `;
-            step3.style.display = "block";
-            setTimeout(() => (window.location.href = "/"), 3000);
-        } else if (data.output.includes("FAILED")) {
+        if (data.output.includes("FAILED")) {
             step2.style.display = "none";
             step3.innerHTML = `
                 <h1 style="color: #721c24;"><i class="fas fa-times-circle"></i> Failed</h1>
@@ -122,31 +115,25 @@ document.addEventListener("DOMContentLoaded", () => {
     submitUrlBtn.addEventListener("click", () => {
         const url = pasteUrlInput.value;
         if (url) {
-            // Add a newline to simulate pressing Enter in the terminal
-            socket.emit("pty_input", { input: url + "\\n" });
+            // The backend relays this via pexpect's sendline(), which appends
+            // the newline ("Enter") itself — send the URL exactly as pasted.
+            socket.emit("pty_input", { input: url });
             submitUrlBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Submitting...';
             submitUrlBtn.disabled = true;
             pasteUrlInput.disabled = true;
         }
     });
-});
 
-document.addEventListener("DOMContentLoaded", () => {
-    const step2Div = document.getElementById("setup-step-2");
-    const step3Div = document.getElementById("setup-step-3");
+    // --- Post-Authentication: Concurrency Setting (Step 3) ---
     const saveBtn = document.getElementById("setup-save-settings-btn");
-    const socket = io({ path: "/setup/socket.io" });
 
     // 1. Setup the auto-detect functionality and get a reference to the handler
-    const triggerAutoDetect = setupAutoConcurrencyDetector(
-        "setup-auto-concurrency-btn",
-        "setup-total-cores-input",
-    );
+    const triggerAutoDetect = setupAutoConcurrencyDetector("setup-auto-concurrency-btn", "setup-total-cores-input");
 
     // 2. Listen for the success event from the backend
     socket.on("audible_setup_successful", () => {
-        step2Div.style.display = "none";
-        step3Div.style.display = "block";
+        step2.style.display = "none";
+        step3.style.display = "block";
         // 3. The user can trigger the autodetect, or continue with the default number of threads
     });
 
