@@ -250,6 +250,15 @@ Once setup is complete, the application will always start in **Normal Mode**, ta
 
 ---
 
+## Deployment Notes
+
+AudioBookup is designed as a **single-user, self-hosted** application. It runs on Flask's built-in threaded server (plus a threading-mode Socket.IO server for the setup wizard), which is a deliberate choice for its purpose: one user, a handful of browser tabs, on a private network. Two practical consequences:
+
+- Each open dashboard tab holds a long-lived server thread for its real-time updates (Server-Sent Events). A few tabs are fine; exposing the app to many concurrent users is not what it's built for.
+- If you put a reverse proxy in front of the app, it must forward the `Host` header (the standard configuration in nginx, Caddy, Traefik, etc.). The built-in CSRF protection compares each write request's `Origin` against that host and rejects mismatches.
+
+---
+
 ## Maintenance and Troubleshooting
 
 ## Updating the Application

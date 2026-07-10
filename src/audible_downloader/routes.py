@@ -257,10 +257,15 @@ def job_stream():
     def stream_events():
         # Each client gets its own queue to listen on.
         q = announcer.listen()
-        while True:
-            # Block until a message is available.
-            msg = q.get()
-            yield msg
+        try:
+            while True:
+                # Block until a message is available.
+                msg = q.get()
+                yield msg
+        finally:
+            # Runs when the client disconnects (Werkzeug closes the generator),
+            # unsubscribing the dead queue right away.
+            announcer.remove(q)
 
     return Response(stream_events(), mimetype="text/event-stream")
 

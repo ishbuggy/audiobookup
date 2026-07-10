@@ -69,6 +69,15 @@ class MessageAnnouncer:
         self.listeners.append(q)
         return q
 
+    def remove(self, q):
+        """Removes a listener when its client disconnects, so the queue (and
+        the request thread serving it) is freed immediately instead of only
+        after 10 undelivered messages back up in `announce`."""
+        try:
+            self.listeners.remove(q)
+        except ValueError:
+            pass  # Already dropped by announce() when its queue filled up.
+
     def announce(self, msg):
         """Pushes a message to all active listeners."""
         for i in reversed(range(len(self.listeners))):
