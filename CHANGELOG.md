@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Settings Defaults Corruption:** `load_settings()` returned a shallow copy of the built-in defaults, so the nested dictionaries (job, naming, conversion, tasks) were shared with `DEFAULT_SETTINGS`. Saving settings merged your changes into those shared dictionaries, silently corrupting the in-memory defaults until the next restart — which could make a broken or deleted `settings.json` "fall back" to your last-saved values instead of the real defaults. Settings are now deep-copied on every load.
 - **SECURITY: Auth-File Password No Longer Logged:** Starting the setup wizard logged the full setup payload — including the auth-file encryption password in plain text — to the console and `app.log` (which is downloadable from the UI). The password is now redacted from that log line. If you have completed setup before, consider clearing your log from the Settings page.
 - **CRITICAL: Fresh-Install Database Schema:** Databases created by a fresh install were built with typeless columns, no PRIMARY KEY on `asin`, and no DEFAULT values (upgraded databases were unaffected). New installs now get the correct schema, and existing databases with the defect are automatically detected and rebuilt on startup — a backup copy (`library.db.pre-schema-fix.bak`) is saved first, and duplicate-ASIN rows (possible only under the old schema) are reported if dropped.
 

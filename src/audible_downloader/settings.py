@@ -1,5 +1,6 @@
 # audible_downloader/settings.py
 
+import copy
 import json
 import os
 from threading import Lock
@@ -67,20 +68,24 @@ def deep_update(source, overrides):
 
 def load_settings():
     """Securely loads settings from settings.json, falling back to defaults."""
+    # Always hand out a deep copy: callers mutate the returned dict (e.g. the
+    # settings API merges request data into it), and a shallow .copy() shares
+    # the nested dicts with DEFAULT_SETTINGS, letting those edits corrupt the
+    # defaults for the rest of the process lifetime.
     if not os.path.exists(SETTINGS_FILE):
-        return DEFAULT_SETTINGS.copy()
+        return copy.deepcopy(DEFAULT_SETTINGS)
     with settings_lock:
         try:
             with open(SETTINGS_FILE) as f:
                 loaded_settings = json.load(f)
             # Start with defaults and layer the loaded settings on top
             # to ensure all keys are present.
-            settings = DEFAULT_SETTINGS.copy()
+            settings = copy.deepcopy(DEFAULT_SETTINGS)
             deep_update(settings, loaded_settings)
             return settings
         except (OSError, json.JSONDecodeError) as e:
             print(f"Error loading settings.json: {e}. Using default settings.")
-            return DEFAULT_SETTINGS.copy()
+            return copy.deepcopy(DEFAULT_SETTINGS)
 
 
 def save_settings(settings_dict):
