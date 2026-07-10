@@ -59,5 +59,6 @@ if __name__ == "__main__":
     log.info("Starting Flask-SocketIO server...")
 
     # Start the Flask-SocketIO server.
-    # allow_unsafe_werkzeug is needed to support the shutdown endpoint for now.
+    # allow_unsafe_werkzeug lets Flask-SocketIO run on the Werkzeug server outside
+    # debug mode — a deliberate choice for this single-user, self-hosted app.
     socketio.run(app, host="0.0.0.0", port=13300, debug=False, allow_unsafe_werkzeug=True, use_reloader=False)

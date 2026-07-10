@@ -5,6 +5,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import threading
 from collections import deque
 from datetime import datetime
 
@@ -585,11 +586,18 @@ def reset_authentication():
 @app.route("/internal/shutdown", methods=["POST"])
 @login_required
 def shutdown():
-    func = request.environ.get("werkzeug.server.shutdown")
-    if func is None:
-        raise RuntimeError("Not running with the Werkzeug Server")
-    func()
-    return "Server shutting down..."
+    """
+    Terminates the application process so Docker's restart policy
+    (`restart: unless-stopped`) brings the container back up, where start.sh
+    re-evaluates Setup Mode vs Normal Mode (used by "Reset Audible Connection").
+
+    We send the response first, then exit after a short delay. os._exit skips
+    Python's cleanup handlers deliberately: atexit would wait on the task
+    runner's worker threads, which could stall the restart indefinitely.
+    """
+    log.warning("Shutdown requested via /internal/shutdown. Exiting in 1 second; Docker will restart the container.")
+    threading.Timer(1.0, os._exit, args=(0,)).start()
+    return jsonify(success=True, message="Server is restarting...")
 
 
 @app.route("/covers/<path:filename>")
