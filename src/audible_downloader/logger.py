@@ -2,6 +2,7 @@
 
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 
 # Import the centralized path for the log file
 from . import LOG_FILE
@@ -39,7 +40,9 @@ def setup_logging():
         # /config mount), fall back to console-only logging instead of crashing
         # at import time.
         try:
-            file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+            # Rotate at 10 MB, keeping 3 old files, so app.log can't grow unbounded
+            # (it lives on the user's /config volume and is downloadable from the UI).
+            file_handler = RotatingFileHandler(LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8")
             file_handler.setFormatter(formatter)
             file_handler.setLevel(logging.DEBUG)
             logger.addHandler(file_handler)
