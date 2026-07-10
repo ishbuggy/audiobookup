@@ -8,6 +8,7 @@ import subprocess
 import threading
 from collections import deque
 from datetime import datetime
+from urllib.parse import urlsplit
 
 from flask import (  # type: ignore
     Response,
@@ -57,6 +58,37 @@ from audible_downloader.settings import deep_update, load_settings, save_setting
 
 # Import the global task_runner instance
 from audible_downloader.task_runner import task_runner
+
+
+# --- CSRF Protection: Origin Validation ---
+# All modern browsers send an Origin header on cross-site state-changing
+# requests, so rejecting mismatched Origins blocks browser-based CSRF without
+# any token plumbing in the frontend. Requests without an Origin header
+# (curl, same-origin navigations in older browsers) are allowed through.
+# Only the hosts are compared — the scheme is deliberately ignored so an
+# HTTPS-terminating reverse proxy in front of the plain-HTTP container still
+# passes. Note for proxy users: the proxy must forward the Host header
+# (standard practice), or every write request will be rejected here.
+@app.before_request
+def reject_cross_origin_writes():
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return None
+
+    origin = request.headers.get("Origin")
+    if not origin:
+        return None
+
+    # An Origin of "null" (sandboxed iframes, some redirect chains) has no
+    # host and is treated as a mismatch.
+    origin_host = urlsplit(origin).netloc
+    if origin_host and origin_host.lower() == request.host.lower():
+        return None
+
+    log.warning(
+        f"SECURITY: Blocked cross-origin {request.method} to {request.path}: "
+        f"Origin host '{origin_host or origin}' does not match request host '{request.host}'."
+    )
+    return jsonify({"error": "Cross-origin request blocked."}), 403
 
 
 # --- Helper Functions ---

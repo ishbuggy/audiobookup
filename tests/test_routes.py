@@ -63,6 +63,38 @@ def completed_setup(settings_file):
     os.remove(SETUP_FLAG_FILE)
 
 
+class TestOriginValidation:
+    """M1 regression: cross-origin write requests must be rejected, while
+    same-origin and Origin-less (curl-style) requests pass through."""
+
+    def test_cross_origin_post_is_blocked(self, client, settings_file):
+        response = client.post("/login", headers={"Origin": "https://evil.example"})
+        assert response.status_code == 403
+
+    def test_null_origin_post_is_blocked(self, client, settings_file):
+        response = client.post("/login", headers={"Origin": "null"})
+        assert response.status_code == 403
+
+    def test_same_origin_post_is_allowed(self, client, settings_file):
+        # The test client's requests go to host "localhost"; a matching Origin
+        # must pass even when the scheme differs (HTTPS-terminating proxy).
+        response = client.post(
+            "/login",
+            data={"username": "admin", "password": "changeme"},
+            headers={"Origin": "https://localhost"},
+        )
+        assert response.status_code == 302
+
+    def test_origin_less_post_is_allowed(self, client, settings_file):
+        response = client.post("/login", data={"username": "admin", "password": "wrong"})
+        assert response.status_code == 200
+
+    def test_cross_origin_get_is_allowed(self, client, settings_file):
+        # Origin checks only apply to state-changing methods.
+        response = client.get("/login", headers={"Origin": "https://evil.example"})
+        assert response.status_code == 200
+
+
 class TestAuthenticatedAccess:
     def test_dashboard_renders_for_logged_in_user(self, client, completed_setup):
         with client.session_transaction() as session:
