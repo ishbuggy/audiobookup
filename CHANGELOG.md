@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SECURITY: Auth-File Password No Longer Logged:** Starting the setup wizard logged the full setup payload — including the auth-file encryption password in plain text — to the console and `app.log` (which is downloadable from the UI). The password is now redacted from that log line. If you have completed setup before, consider clearing your log from the Settings page.
 - **CRITICAL: Fresh-Install Database Schema:** Databases created by a fresh install were built with typeless columns, no PRIMARY KEY on `asin`, and no DEFAULT values (upgraded databases were unaffected). New installs now get the correct schema, and existing databases with the defect are automatically detected and rebuilt on startup — a backup copy (`library.db.pre-schema-fix.bak`) is saved first, and duplicate-ASIN rows (possible only under the old schema) are reported if dropped.
 
+### Added
+- **Automated Test Suite:** A pytest-based regression suite (`tests/`, development-only, not shipped in the Docker image) now locks in the recent security and correctness fixes: settings merge/deep-copy behavior, filename sanitization and download collision handling, login redirect validation, and the download-selection database queries.
+
 ### Changed
 - **Pinned Dependencies:** All Python dependencies in `requirements.txt` are now pinned to the exact versions from the known-good v0.17.0 image. This makes Docker image builds reproducible — a rebuild on a new machine or at a later date can no longer silently pick up incompatible library versions.
 

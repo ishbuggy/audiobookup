@@ -48,7 +48,7 @@ Internal and third-party docs live in `ref-docs/` — **gitignored, local-only, 
 
 - **Python:** Ruff (lint + format), config in `pyproject.toml` (line length 120, rules E/W/F/I/UP). Run `ruff check src/` and `ruff format --check src/` before considering a Python change complete.
 - **JS/HTML/CSS:** Prettier, config in `.prettierrc.json` (4-space indent, print width 110).
-- **Tests:** none exist yet. When a test harness is added (pytest), run it before completing any task; until then, verification is manual via the dev container.
+- **Tests:** pytest suite in `tests/`, run on the host (`pip install -r requirements-dev.txt`, then `pytest`; config in `pyproject.toml` sets `pythonpath = ["src"]`, and `tests/conftest.py` redirects `CONFIG_DIR`/`DATABASE_DIR` to temp dirs). Run `pytest` before considering any task complete, and add regression tests when fixing bugs in testable logic. Runtime behavior is still verified manually via the dev container.
 - **Changelog:** maintained in `CHANGELOG.md` (Keep a Changelog format). Add an entry under an `[Unreleased]` heading when completing a feature or fix; entries get folded into a version heading at release time.
 - **Licensing:** `LICENSE.txt` carries attributions (audible-convert.sh, Immich). If code is adapted from another project, add the attribution comment in-file and update `LICENSE.txt`.
 

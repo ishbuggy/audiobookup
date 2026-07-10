@@ -1,0 +1,4 @@
+# Development-only dependencies for running the test suite on the host.
+# NOT installed into the Docker image (the image only installs src/requirements.txt).
+-r src/requirements.txt
+pytest==9.1.1

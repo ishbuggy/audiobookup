@@ -13,6 +13,12 @@ line-length = 120
 # UP: pyupgrade (upgrades syntax to modern Python versions)
 select = ["E", "W", "F", "I", "UP"]
 
+[tool.pytest.ini_options]
+# Make `import audible_downloader` resolve from the repo root without installing
+# the package; tests/conftest.py handles the CONFIG_DIR/DATABASE_DIR overrides.
+pythonpath = ["src"]
+testpaths = ["tests"]
+
 [tool.ruff.format]
 # Define the formatting style to be similar to the `black` code formatter.
 # Use double quotes for strings where possible.
