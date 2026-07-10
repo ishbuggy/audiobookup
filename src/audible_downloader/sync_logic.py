@@ -116,7 +116,8 @@ def _fetch_and_update_from_audible(job_id, sync_mode="DEEP"):
             thumb_cover_path = os.path.join(COVERS_DIR, f"{asin}_thumb.jpg")
             if not os.path.exists(thumb_cover_path) and cover_url:
                 try:
-                    response = requests.get(cover_url, stream=True)
+                    # (connect, read) timeout so a stalled CDN can't hang the whole sync job.
+                    response = requests.get(cover_url, stream=True, timeout=(5, 30))
                     response.raise_for_status()
                     with open(original_cover_path, "wb") as f:
                         for chunk in response.iter_content(chunk_size=8192):
