@@ -9,6 +9,7 @@
 
 import os
 import re
+import subprocess
 import tempfile
 import time
 from threading import Event, Lock
@@ -25,6 +26,7 @@ from .chunked_conversion_logic import (
 from .db import get_db_connection
 from .eta_estimator import record_conversion_time
 from .logger import log
+from .process_registry import process_registry
 from .settings import load_settings
 
 # Import the task runner and task objects
@@ -57,6 +59,41 @@ class BookProcessor:
         self.encoded_chunk_paths = []
         self._lock = Lock()
         self._completion_event = Event()
+
+    def _probe_file_asin(self, filepath):
+        """
+        Reads the embedded ASIN tag from an audio file using the same ffprobe
+        invocation the deep filesystem scan uses. Returns the ASIN string, or
+        None if the tag is absent or the file can't be probed.
+        """
+        ffprobe_cmd = [
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-show_entries",
+            "format_tags=asin",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            filepath,
+        ]
+        try:
+            process = subprocess.Popen(ffprobe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            process_registry.register(self.job_id, process)
+            try:
+                stdout, stderr = process.communicate()
+            finally:
+                process_registry.unregister(self.job_id, process)
+
+            if process.returncode != 0:
+                # Exit code -15 (SIGTERM) means the job was cancelled — not a real failure.
+                if process.returncode != -15:
+                    log.warning(f"TASK-PREPARE ({self.asin}): ffprobe failed for '{filepath}': {stderr}")
+                return None
+
+            return stdout.strip() or None
+        except OSError as e:
+            log.warning(f"TASK-PREPARE ({self.asin}): Could not probe '{filepath}': {e}")
+            return None
 
     def run(self):
         """Starts the processing for this book and waits for it to complete."""
@@ -129,19 +166,41 @@ class BookProcessor:
                         "SELECT asin FROM audiobooks WHERE filepath = ?", (self.final_output_path,)
                     ).fetchone()
 
-                # If the file is tracked in the DB and belongs to a different book, or if it exists
-                # but isn't tracked (safety precaution), we modify the filename.
-                if existing_entry and existing_entry["asin"] != self.asin:
-                    log.info(
-                        f"TASK-PREPARE ({self.asin}): Filename collision detected with ASIN {existing_entry['asin']}. Appending unique ID."
-                    )
+                # Decide whether the existing file may be safely overwritten.
+                # Three cases:
+                #   1. Tracked in the DB under a different ASIN -> collision, rename ours.
+                #   2. Tracked under our own ASIN -> legitimate re-download, overwrite.
+                #   3. Not tracked at all -> probe the file's embedded ASIN tag. Only a
+                #      matching tag proves it's an old copy of this book; anything else
+                #      is a foreign file we must not destroy, so rename ours.
+                collision = False
+                if existing_entry:
+                    if existing_entry["asin"] != self.asin:
+                        log.info(
+                            f"TASK-PREPARE ({self.asin}): Filename collision with tracked ASIN "
+                            f"{existing_entry['asin']}. Appending unique ID."
+                        )
+                        collision = True
+                    else:
+                        log.info(f"TASK-PREPARE ({self.asin}): File exists and belongs to this ASIN. Overwriting.")
+                else:
+                    embedded_asin = self._probe_file_asin(self.final_output_path)
+                    if embedded_asin == self.asin:
+                        log.info(
+                            f"TASK-PREPARE ({self.asin}): Untracked file has this book's embedded ASIN tag. "
+                            f"Overwriting."
+                        )
+                    else:
+                        log.info(
+                            f"TASK-PREPARE ({self.asin}): Untracked file with foreign or missing ASIN tag "
+                            f"({embedded_asin or 'none'}) occupies the target path. Appending unique ID."
+                        )
+                        collision = True
+
+                if collision:
                     # Inject the ASIN into the filename: "Title.m4b" -> "Title_B00XYZ.m4b"
                     root, ext = os.path.splitext(self.final_output_path)
                     self.final_output_path = f"{root}_{safe_asin}{ext}"
-                else:
-                    log.info(
-                        f"TASK-PREPARE ({self.asin}): File exists but belongs to this ASIN (or is untracked). Overwriting."
-                    )
 
             os.makedirs(os.path.dirname(self.final_output_path), exist_ok=True)
         except Exception as e:
