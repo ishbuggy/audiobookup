@@ -185,6 +185,16 @@ h2 {
 .action-button.green:hover:not(:disabled) {
     background-color: #218838;
 }
+.action-button.is-warning {
+    background-color: #ffc107;
+    border-color: #e0a800;
+    color: #212529;
+}
+.action-button.is-warning:hover:not(:disabled) {
+    background-color: #e0a800;
+    border-color: #e0a800;
+    color: #212529;
+}
 
 /* Simple width utility */
 .w-100 {
@@ -1407,7 +1417,7 @@ body.advanced-mode .radio-group-item.advanced-setting {
     color: var(--color-text-muted);
     text-shadow: 0px 0px 3px rgba(255, 255, 255, 0.7);
 }
-body.dark-mode .action-button:not(.blue):not(.green) {
+body.dark-mode .action-button:not(.blue):not(.green):not(.is-warning) {
     background-color: var(--color-bg-button);
     border-color: var(--color-border);
     color: var(--color-text-primary);
@@ -1416,6 +1426,13 @@ body.dark-mode .action-button:not(.blue):not(.green) {
 body.dark-mode .action-button:hover:not(:disabled) {
     background-color: var(--color-bg-button-hover);
     border-color: var(--color-text-muted);
+}
+
+/* Keep the warning (Force Re-download) styling in dark mode too — the generic
+   dark-mode hover rule above would otherwise grey it out on hover. */
+body.dark-mode .action-button.is-warning:hover:not(:disabled) {
+    background-color: #e0a800;
+    border-color: #e0a800;
 }
 
 /* --- 5b. Keyframe Animations --- */

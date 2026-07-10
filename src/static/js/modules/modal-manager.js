@@ -135,17 +135,12 @@ async function handleBookClick(event) {
             };
         };
 
-        // Status Logic
+        // Status Logic (colors come from the .is-warning / .blue classes,
+        // which configureButton sets fresh on every open)
         if (book.status === "DOWNLOADED") {
             configureButton("Force Re-download", "is-warning", true);
-            newBtn.style.backgroundColor = "#ffc107";
-            newBtn.style.color = "#212529";
-            newBtn.style.border = "1px solid #e0a800";
         } else if (book.status === "NEW" || book.status === "MISSING" || book.status === "ERROR") {
             configureButton("Download Now", "blue", false);
-            newBtn.style.backgroundColor = ""; 
-            newBtn.style.color = "";
-            newBtn.style.border = "";
         } else {
             newBtn.style.display = "none";
         }

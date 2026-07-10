@@ -1,5 +1,7 @@
 // src/static/js/modules/library-manager.js
 
+import { addLogLine } from "./job-manager.js";
+
 // --- State ---
 let libraryData = [];
 
@@ -8,17 +10,6 @@ const searchBar = document.getElementById("search-bar");
 const sortBy = document.getElementById("sort-by");
 const filterByStatus = document.getElementById("filter-by-status");
 const libraryGrid = document.getElementById("library-grid");
-const logOutput = document.getElementById("log-output");
-const latestLogLine = document.getElementById("latest-log-line");
-
-// --- Helper: Add Log Line (Duplicate helper, could be in utils but fine here) ---
-function addLogLine(text) {
-    logOutput.textContent += text + "\n";
-    logOutput.scrollTop = logOutput.scrollHeight;
-    if (text.trim()) {
-        latestLogLine.textContent = text;
-    }
-}
 
 // --- Lazy Loading ---
 const lazyLoadObserver = new IntersectionObserver((entries, observer) => {

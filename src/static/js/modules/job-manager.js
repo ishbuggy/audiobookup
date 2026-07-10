@@ -18,7 +18,8 @@ const logOutput = document.getElementById("log-output");
 const latestLogLine = document.getElementById("latest-log-line");
 
 // --- Helper: Add Log Line ---
-function addLogLine(text) {
+// Exported so other modules (library-manager) share this one implementation.
+export function addLogLine(text) {
     const now = new Date();
     const timeString = now.toLocaleTimeString('en-US', { hour12: false });
     const line = `[${timeString}] ${text}`;
