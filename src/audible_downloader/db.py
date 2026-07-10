@@ -2,7 +2,7 @@
 
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Import the centralized path for the database file from the package initializer.
 # The '.' makes it a relative import from within the same package.
@@ -86,7 +86,7 @@ def cleanup_stale_jobs():
         stale_job_ids = [job["job_id"] for job in stale_jobs]
         log.info(f"Found stale jobs to clean up: {stale_job_ids}")
 
-        end_time_iso = datetime.utcnow().isoformat()
+        end_time_iso = datetime.now(timezone.utc).isoformat()
         placeholders = ",".join("?" for _ in stale_job_ids)
 
         con.execute(
@@ -104,6 +104,7 @@ def cleanup_stale_jobs():
         log.error(f"Database error during stale job cleanup: {e}")
     finally:
         con.close()
+
 
 def _get_books_by_status(statuses, include_errored_retries=False):
     """

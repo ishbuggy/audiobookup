@@ -4,7 +4,7 @@ import json
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import Event, Lock, Thread
 
 # Import necessary components from our other modules
@@ -95,7 +95,7 @@ def sync_worker(job_id, app_context, stop_event, job_params=None):
                     Thread(target=trigger_chained_job).start()
                 # --- END: NEW FEATURE LOGIC ---
 
-            end_time_iso = datetime.utcnow().isoformat()
+            end_time_iso = datetime.now(timezone.utc).isoformat()
             with get_db_connection() as con:
                 con.execute(
                     "UPDATE jobs SET status = ?, end_time = ? WHERE job_id = ?", (final_status, end_time_iso, job_id)
@@ -105,7 +105,7 @@ def sync_worker(job_id, app_context, stop_event, job_params=None):
 
         except Exception as e:
             log.error(f"WORKER: Unhandled exception in sync job {job_id}: {e}", exc_info=True)
-            end_time_iso = datetime.utcnow().isoformat()
+            end_time_iso = datetime.now(timezone.utc).isoformat()
             with get_db_connection() as con:
                 con.execute("UPDATE jobs SET status = 'FAILED', end_time = ? WHERE job_id = ?", (end_time_iso, job_id))
                 con.commit()
@@ -136,7 +136,7 @@ def verify_worker(job_id, app_context, stop_event):
             run_verification_logic(job_id)
             final_status = "COMPLETED"
 
-            end_time_iso = datetime.utcnow().isoformat()
+            end_time_iso = datetime.now(timezone.utc).isoformat()
             with get_db_connection() as con:
                 con.execute(
                     "UPDATE jobs SET status = 'COMPLETED', end_time = ? WHERE job_id = ?", (end_time_iso, job_id)
@@ -145,7 +145,7 @@ def verify_worker(job_id, app_context, stop_event):
 
         except Exception as e:
             log.error(f"WORKER: Verify job {job_id} failed: {e}", exc_info=True)
-            end_time_iso = datetime.utcnow().isoformat()
+            end_time_iso = datetime.now(timezone.utc).isoformat()
             with get_db_connection() as con:
                 con.execute("UPDATE jobs SET status = 'FAILED', end_time = ? WHERE job_id = ?", (end_time_iso, job_id))
                 con.commit()
@@ -268,7 +268,7 @@ def download_worker(job_id, app_context, stop_event):
             else:
                 final_status = "FAILED"
 
-            end_time_iso = datetime.utcnow().isoformat()
+            end_time_iso = datetime.now(timezone.utc).isoformat()
             with get_db_connection() as con:
                 if was_cancelled:
                     con.execute(
@@ -281,7 +281,7 @@ def download_worker(job_id, app_context, stop_event):
 
         except Exception as e:
             log.error(f"WORKER: Unhandled exception in job {job_id}: {e}", exc_info=True)
-            end_time_iso = datetime.utcnow().isoformat()
+            end_time_iso = datetime.now(timezone.utc).isoformat()
             with get_db_connection() as con:
                 con.execute("UPDATE jobs SET status = 'FAILED', end_time = ? WHERE job_id = ?", (end_time_iso, job_id))
         finally:
@@ -325,7 +325,7 @@ def start_new_job(job_type, asins=None, job_params=None):
         try:
             # Serialize the job_params dictionary to a JSON string for database storage.
             params_json = json.dumps(job_params) if job_params else None
-            start_time_iso = datetime.utcnow().isoformat()
+            start_time_iso = datetime.now(timezone.utc).isoformat()
             cur = con.cursor()
             cur.execute(
                 "INSERT INTO jobs (job_type, status, start_time, job_params) VALUES (?, ?, ?, ?)",
