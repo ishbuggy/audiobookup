@@ -762,8 +762,10 @@ def login():
             # This prevents "Open Redirect" vulnerabilities where an attacker could
             # craft a link that logs a user in and then redirects them to a malicious site.
             # A safe path must start with '/' and not with '//' or any protocol.
-            next_page = request.args.get("next")
-            return redirect(next_page or url_for("index"))
+            # Backslashes are rejected too, since browsers treat '/\' like '//'.
+            if not next_page or not next_page.startswith("/") or next_page.startswith("//") or "\\" in next_page:
+                next_page = url_for("index")
+            return redirect(next_page)
         else:
             error = "Invalid credentials. Please try again."
 
