@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Automated Test Suite:** A pytest-based regression suite (`tests/`, development-only, not shipped in the Docker image) now locks in the recent security and correctness fixes: settings merge/deep-copy behavior, filename sanitization and download collision handling, login redirect validation, and the download-selection database queries.
 
+### Removed
+- **Dead Legacy Script Endpoints:** The `/run_action` and `/run_single_action` routes (and their shell-script streaming helper) have been deleted. They streamed output from shell scripts (`sync.sh`, `download.sh`, `process_book.sh`) that no longer exist, and nothing in the UI has called them since the Python job system replaced that pipeline.
+
 ### Changed
 - **Pinned Dependencies:** All Python dependencies in `requirements.txt` are now pinned to the exact versions from the known-good v0.17.0 image. This makes Docker image builds reproducible — a rebuild on a new machine or at a later date can no longer silently pick up incompatible library versions.
 

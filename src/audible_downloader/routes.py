@@ -642,43 +642,6 @@ def serve_cover(filename):
     return send_from_directory(COVERS_DIR, filename)
 
 
-def stream_script_output(script_path, script_name, args=None):
-    if args is None:
-        args = []
-    command = [script_path] + args
-    separator = "\n=================================================="
-    log.info(separator)  # <-- Use logger
-    yield f"data: {separator}\n\n"
-    message = f"--- Starting script: {script_name} ---"
-    log.info(message)  # <-- Use logger
-    yield f"data: {message}\n\n"
-    process = subprocess.Popen(
-        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, encoding="utf-8"
-    )
-    for line in iter(process.stdout.readline, ""):
-        clean_line = line.strip()
-        if clean_line.startswith("EVENT_BOOK_PROCESSING_START:"):
-            asin = clean_line.split(":", 1)[1]
-            yield f"event: book_processing_start\ndata: {asin}\n\n"
-        elif clean_line.startswith("EVENT_BOOK_PROCESSING_END:"):
-            json_data = clean_line.split(":", 1)[1]
-            yield f"event: book_processing_end\ndata: {json_data}\n\n"
-        elif clean_line.startswith("EVENT_BOOK_UPDATE:"):
-            json_data = clean_line.split(":", 1)[1]
-            yield f"event: book_update\ndata: {json_data}\n\n"
-        else:
-            log.info(clean_line)  # <-- Use logger
-            yield f"data: {clean_line}\n\n"
-    process.stdout.close()
-    return_code = process.wait()
-    if return_code == 0:
-        final_message = "--- Script finished successfully. ---"
-    else:
-        final_message = f"--- SCRIPT FAILED with exit code {return_code}. ---"
-    log.info(final_message)  # <-- Use logger
-    yield f"event: end-of-stream\ndata: {final_message}\n\n"
-
-
 @app.route("/get_page_data")
 @login_required
 def get_page_data():
@@ -695,39 +658,6 @@ def api_get_downloadable_books():
     # This now returns a dictionary with categorized lists.
     categorized_books = get_books_for_download_modal()
     return jsonify(categorized_books)
-
-
-@app.route("/run_action")
-@login_required
-def run_action():
-    script_name = request.args.get("script")
-    allowed_scripts = {"sync": "/config/sync.sh", "download": "/config/download.sh"}
-    if script_name in allowed_scripts:
-        script_path = allowed_scripts[script_name]
-        args = []
-        if script_name == "download":
-            concurrency = request.args.get("concurrency", "1")
-            if concurrency.isdigit() and int(concurrency) > 0:
-                args.append(concurrency)
-            else:
-                args.append("1")
-            selected_asins = request.args.getlist("asins")
-            if selected_asins:
-                args.extend(selected_asins)
-        return Response(stream_script_output(script_path, script_name, args=args), mimetype="text/event-stream")
-    return Response(f"data: ERROR: Unknown script '{script_name}'\n\n", mimetype="text/event-stream")
-
-
-@app.route("/run_single_action")
-@login_required
-def run_single_action():
-    asin = request.args.get("asin")
-    if not asin:
-        return Response("data: ERROR: No ASIN provided.\n\n", mimetype="text/event-stream")
-    return Response(
-        stream_script_output("/config/process_book.sh", f"Process Book {asin}", args=[asin]),
-        mimetype="text/event-stream",
-    )
 
 
 @app.route("/clear_log", methods=["POST"])
