@@ -43,6 +43,14 @@ DEFAULT_SETTINGS = {
         # Download a companion PDF (booklet/supplementary material) alongside
         # the audiobook when Audible ships one, placed next to the .m4b.
         "download_supplementary_pdf": True,
+        # When true, strip DRM only and keep Audible's original audio: mux
+        # chapters/metadata/cover onto the decrypted AAC master with -c copy,
+        # skipping the per-chapter re-encode (much faster, no quality loss).
+        # Default off preserves the always-re-encode behavior. The `quality`
+        # setting above is ignored while this is on (no encode happens). If the
+        # fast AAC-copy decrypt fails and a title falls back to FLAC, that one
+        # book quietly re-encodes since FLAC can't be copied into an .m4b.
+        "no_reencode": False,
     },
     "import": {
         # Upper bound (in GB) on a single manual-import upload. Enforced as the

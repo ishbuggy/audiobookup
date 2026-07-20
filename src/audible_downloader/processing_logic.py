@@ -23,6 +23,7 @@ from .chunked_conversion_logic import (
     encode_chapter_chunk,
     merge_book_chunks,
     prepare_book_assets,
+    remux_book_lossless,
 )
 from .db import get_db_connection
 from .eta_estimator import estimate_conversion_time, record_conversion_time
@@ -425,7 +426,10 @@ class BookProcessor:
             return
 
         # --- 2. Call the asset preparation logic ---
-        self.context, prepare_error = prepare_book_assets(self.asin, self.job_id, self.temp_dir)
+        # In no-re-encode mode, tell PREPARE to skip the synthetic single-chapter
+        # auto-chunking (it only serves the re-encode we're about to skip).
+        no_reencode = settings.get("conversion", {}).get("no_reencode", False)
+        self.context, prepare_error = prepare_book_assets(self.asin, self.job_id, self.temp_dir, lossless=no_reencode)
 
         # Signal that the download/prepare phase is complete.
         # This will unblock the main worker in job_manager.py, allowing it
@@ -441,7 +445,28 @@ class BookProcessor:
             self._completion_event.set()
             return
 
-        # --- 3. Spawn all the ENCODE_CHAPTER tasks ---
+        # --- 3. Choose the conversion path ---
+        # Lossless (no-re-encode) requires the fast AAC-copy master (a ".m4b").
+        # If the decrypt fell back to FLAC, that codec can't be copied into an
+        # .m4b, so this one book quietly takes the normal re-encode path instead.
+        master_is_aac = str(self.context.get("audio_file", "")).lower().endswith(".m4b")
+        if no_reencode and master_is_aac:
+            log.info(f"TASK-PREPARE ({self.asin}): No-re-encode mode — skipping encode, submitting remux task.")
+            _yield_progress(self.asin, "Finalizing (lossless)...", 90, self.job_id)
+            remux_task = Task(
+                priority=TaskPriority.MERGE_BOOK,
+                job_id=self.job_id,
+                func=self._remux_and_finalize,
+            )
+            task_runner.submit_task(remux_task)
+            return
+        if no_reencode:
+            log.info(
+                f"TASK-PREPARE ({self.asin}): No-re-encode requested but the fast decrypt fell back to FLAC; "
+                f"re-encoding this title."
+            )
+
+        # --- Spawn all the ENCODE_CHAPTER tasks ---
         chapters = self.context.get("chapters", [])
         self.total_chunks = len(chapters)
 
@@ -545,8 +570,50 @@ class BookProcessor:
         except OSError as e:
             log.warning(f"PROCESSOR ({self.asin}): Could not save companion PDF: {e}")
 
+    def _finalize_success(self, conversion_start_time, record_eta=True):
+        """
+        Shared post-conversion handling for both the re-encode merge and the
+        lossless remux: verify the finished file, and on pass record the
+        DOWNLOADED row (plus companion PDF). A failed verification marks the book
+        ERROR instead. The caller owns the completion event.
+
+        `record_eta` feeds this run's duration into the conversion-time estimator.
+        The re-encode path sets it; the lossless remux does NOT, because a remux
+        takes seconds and its rate isn't comparable to a re-encode's — mixing the
+        two into the shared rolling average would skew the estimate (and the
+        timeout derived from it) for later re-encode jobs.
+        """
+        # Never trust the conversion's exit code alone: confirm the file is
+        # actually on disk and complete before declaring the book DOWNLOADED.
+        output_ok, reason = self._verify_output_file()
+        if not output_ok:
+            log.error(f"PROCESSOR ({self.asin}): Output verification failed: {reason}")
+            self._update_db_on_failure(reason)
+            return
+
+        if record_eta:
+            conversion_duration_sec = time.time() - conversion_start_time
+            with get_db_connection() as con:
+                runtime_row = con.execute("SELECT runtime_min FROM audiobooks WHERE asin = ?", (self.asin,)).fetchone()
+                if runtime_row:
+                    record_conversion_time(runtime_row["runtime_min"], conversion_duration_sec)
+
+        # On Success, update the database. is_duplicate records whether a
+        # same-author+title collision forced an ASIN suffix onto our name;
+        # it is written explicitly (0 when clean) so a later re-download
+        # that resolves without a collision clears a stale flag.
+        with get_db_connection() as con:
+            con.execute(
+                "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, "
+                "error_message = '', retry_count = 0, is_duplicate = ? WHERE asin = ?",
+                (self.final_output_path, int(self.is_duplicate), self.asin),
+            )
+        # Place any companion PDF before the temp dir is torn down.
+        self._place_supplementary_pdf()
+        _yield_progress(self.asin, "Complete!", 100, self.job_id)
+
     def _merge_and_finalize(self):
-        """The actual function for the MERGE_BOOK task."""
+        """The actual function for the MERGE_BOOK task (re-encode path)."""
         if self._cancelled():
             return
         log.info(f"TASK-MERGE ({self.asin}): Starting.")
@@ -559,38 +626,35 @@ class BookProcessor:
         if not success:
             self._update_db_on_failure("Final merge of chapter chunks failed.")
         else:
-            # Never trust the merge's exit code alone: confirm the file is
-            # actually on disk and complete before declaring the book DOWNLOADED.
-            output_ok, reason = self._verify_output_file()
-            if not output_ok:
-                log.error(f"PROCESSOR ({self.asin}): Output verification failed: {reason}")
-                self._update_db_on_failure(reason)
-            else:
-                conversion_duration_sec = time.time() - conversion_start_time
-                with get_db_connection() as con:
-                    runtime_row = con.execute(
-                        "SELECT runtime_min FROM audiobooks WHERE asin = ?", (self.asin,)
-                    ).fetchone()
-                    if runtime_row:
-                        record_conversion_time(runtime_row["runtime_min"], conversion_duration_sec)
-
-                # On Success, update the database. is_duplicate records whether a
-                # same-author+title collision forced an ASIN suffix onto our name;
-                # it is written explicitly (0 when clean) so a later re-download
-                # that resolves without a collision clears a stale flag.
-                with get_db_connection() as con:
-                    con.execute(
-                        "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, "
-                        "error_message = '', retry_count = 0, is_duplicate = ? WHERE asin = ?",
-                        (self.final_output_path, int(self.is_duplicate), self.asin),
-                    )
-                # Place any companion PDF before the temp dir is torn down.
-                self._place_supplementary_pdf()
-                _yield_progress(self.asin, "Complete!", 100, self.job_id)
+            self._finalize_success(conversion_start_time)
 
         # This is the final step, so we signal the main `run` method to unblock.
         self._completion_event.set()
         log.info(f"TASK-MERGE ({self.asin}): Finalization complete.")
+
+    def _remux_and_finalize(self):
+        """
+        MERGE_BOOK task for no-re-encode mode: mux chapters/metadata/cover onto
+        the decrypted AAC master with -c copy (no transcode), then run the same
+        output verification and success finalization as the re-encode path.
+        """
+        if self._cancelled():
+            return
+        log.info(f"TASK-REMUX ({self.asin}): Starting.")
+        conversion_start_time = time.time()
+
+        success = remux_book_lossless(self.asin, self.job_id, self.temp_dir, self.final_output_path, self.context)
+
+        if not success:
+            self._update_db_on_failure("Lossless remux failed.")
+        else:
+            # Don't feed the remux's (much faster) duration into the shared ETA
+            # model — see _finalize_success's record_eta note.
+            self._finalize_success(conversion_start_time, record_eta=False)
+
+        # This is the final step, so we signal the main `run` method to unblock.
+        self._completion_event.set()
+        log.info(f"TASK-REMUX ({self.asin}): Finalization complete.")
 
     def _update_db_on_failure(self, error_message):
         """Centralized method to update the database when any step fails."""

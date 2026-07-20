@@ -354,6 +354,146 @@ class TestDuplicateFlag:
         assert update_calls[0].args[1] == ("/data/A/Title/Title_B0BBBB.m4b", 1, "B0BBBB")
 
 
+class TestNoReencodePathSelection:
+    """Phase 8 (FR12): with conversion.no_reencode on, a book whose fast
+    AAC-copy decrypt succeeded (an .m4b master) skips the per-chapter encode and
+    goes straight to a single lossless remux task. Off, or when the decrypt fell
+    back to FLAC, the normal re-encode path runs unchanged."""
+
+    def _run(self, no_reencode, audio_file, chapters=None):
+        chapters = chapters if chapters is not None else [{"start_offset_ms": 0, "length_ms": 1000}]
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.download_complete_event = Event()
+
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = BOOK_ROW
+
+        context = {"audio_file": audio_file, "chapters": chapters}
+        submitted = []
+
+        with (
+            mock.patch.object(
+                processing_logic,
+                "load_settings",
+                return_value={"naming": {}, "conversion": {"no_reencode": no_reencode}},
+            ),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "prepare_book_assets", return_value=(context, None)) as prepare,
+            mock.patch("os.path.exists", return_value=False),
+            mock.patch("os.makedirs"),
+            mock.patch.object(processing_logic, "_yield_progress"),
+            mock.patch.object(processing_logic.task_runner, "submit_task", side_effect=submitted.append),
+        ):
+            processor._prepare_and_spawn_encode_tasks()
+
+        return processor, submitted, prepare
+
+    def test_lossless_with_aac_master_submits_single_remux_task(self):
+        processor, submitted, prepare = self._run(
+            no_reencode=True,
+            audio_file="/tmp/x/master_intermediate.m4b",
+            chapters=[{"start_offset_ms": 0, "length_ms": 1000}, {"start_offset_ms": 1000, "length_ms": 1000}],
+        )
+        assert len(submitted) == 1
+        assert submitted[0].func == processor._remux_and_finalize
+        # No per-chapter encode work was set up.
+        assert processor.total_chunks == 0
+
+    def test_lossless_passes_flag_into_prepare(self):
+        _, _, prepare = self._run(no_reencode=True, audio_file="/tmp/x/master_intermediate.m4b")
+        assert prepare.call_args.kwargs.get("lossless") is True
+
+    def test_lossless_with_flac_master_falls_back_to_encode(self):
+        processor, submitted, _ = self._run(
+            no_reencode=True,
+            audio_file="/tmp/x/master_intermediate.flac",
+            chapters=[{"start_offset_ms": 0, "length_ms": 1000}, {"start_offset_ms": 1000, "length_ms": 1000}],
+        )
+        assert processor.total_chunks == 2
+        assert all(t.func == processor._encode_and_track_chunk for t in submitted)
+
+    def test_disabled_uses_encode_path(self):
+        processor, submitted, prepare = self._run(
+            no_reencode=False,
+            audio_file="/tmp/x/master_intermediate.m4b",
+            chapters=[{"start_offset_ms": 0, "length_ms": 1000}],
+        )
+        assert prepare.call_args.kwargs.get("lossless") is False
+        assert processor.total_chunks == 1
+        assert all(t.func == processor._encode_and_track_chunk for t in submitted)
+
+
+class TestRemuxFinalize:
+    """The lossless remux task shares the same success finalization (verify +
+    DOWNLOADED + PDF) as the merge task, and reports a distinct failure."""
+
+    def _run(self, remux_success, verify_result=(True, None)):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = "/data/A/Title/Title.m4b"
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = {"runtime_min": 60}
+        with (
+            mock.patch.object(processing_logic, "remux_book_lossless", return_value=remux_success),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "record_conversion_time") as record_eta,
+            mock.patch.object(processing_logic, "_yield_progress"),
+            mock.patch.object(processor, "_verify_output_file", return_value=verify_result),
+            mock.patch.object(processor, "_place_supplementary_pdf") as pdf,
+            mock.patch.object(processor, "_update_db_on_failure") as fail,
+        ):
+            processor._remux_and_finalize()
+        downloaded = [c for c in con.execute.call_args_list if "status = 'DOWNLOADED'" in c.args[0]]
+        return downloaded, fail, pdf, record_eta, processor
+
+    def test_success_marks_downloaded(self):
+        downloaded, fail, pdf, _record_eta, processor = self._run(remux_success=True)
+        fail.assert_not_called()
+        assert len(downloaded) == 1
+        pdf.assert_called_once()
+        assert processor._completion_event.is_set()
+
+    def test_success_does_not_pollute_eta_history(self):
+        # L2: a remux is far faster than a re-encode; its duration must not be
+        # fed into the shared conversion-rate model (which would skew estimates
+        # and the timeout for later re-encode jobs).
+        _downloaded, _fail, _pdf, record_eta, _processor = self._run(remux_success=True)
+        record_eta.assert_not_called()
+
+    def test_remux_failure_reports_distinct_reason(self):
+        downloaded, fail, _pdf, _record_eta, processor = self._run(remux_success=False)
+        fail.assert_called_once_with("Lossless remux failed.")
+        assert downloaded == []
+        assert processor._completion_event.is_set()
+
+    def test_failed_verification_blocks_downloaded(self):
+        downloaded, fail, _pdf, _record_eta, _processor = self._run(
+            remux_success=True, verify_result=(False, "truncated")
+        )
+        fail.assert_called_once_with("truncated")
+        assert downloaded == []
+
+    def test_reencode_merge_still_records_eta(self):
+        # Contrast with the remux path: the re-encode merge SHOULD feed the ETA
+        # model, so the L2 fix didn't disable estimation for the default path.
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = "/data/A/Title/Title.m4b"
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = {"runtime_min": 60}
+        with (
+            mock.patch.object(processing_logic, "merge_book_chunks", return_value=True),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "record_conversion_time") as record_eta,
+            mock.patch.object(processing_logic, "_yield_progress"),
+            mock.patch.object(processor, "_verify_output_file", return_value=(True, None)),
+            mock.patch.object(processor, "_place_supplementary_pdf"),
+        ):
+            processor._merge_and_finalize()
+        record_eta.assert_called_once()
+
+
 class TestFailureReporting:
     """Bug 7: a failed download reports the real underlying cause instead of a
     generic 'Failed during asset download/preparation.'"""

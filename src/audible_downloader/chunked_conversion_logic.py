@@ -26,6 +26,30 @@ from .settings import load_settings
 # A lock to safely track progress across multiple threads, which will still be useful.
 progress_lock = Lock()
 
+# A single-chapter book longer than AUTO_CHUNK_TRIGGER_SEC is split into synthetic
+# AUTO_CHUNK_SIZE_SEC "Part N" chapters so the per-chapter re-encode has parallel
+# work (and the listener gets navigation points). Seconds.
+AUTO_CHUNK_TRIGGER_SEC = 1800
+AUTO_CHUNK_SIZE_SEC = 900
+
+
+def _should_auto_chunk(lossless, audio_file, chapters_list, total_duration_sec):
+    """
+    Decide whether to replace a chapterless/single-chapter book's chapters with
+    synthetic time-based "Part N" markers.
+
+    Skipped ONLY when this title will actually be remuxed losslessly — i.e.
+    no-re-encode mode is on AND the fast AAC-copy decrypt produced a ".m4b"
+    master. The gate deliberately checks the *real* master codec, not just the
+    requested `lossless` flag: if the decrypt fell back to FLAC, the orchestrator
+    routes that title to the normal re-encode path, which still needs the
+    chunking — so it must NOT be skipped for a FLAC master.
+    """
+    will_remux_lossless = lossless and audio_file.lower().endswith(".m4b")
+    if will_remux_lossless:
+        return False
+    return len(chapters_list) <= 1 and total_duration_sec > AUTO_CHUNK_TRIGGER_SEC
+
 
 def _summarize_subprocess_error(exc, fallback):
     """
@@ -83,7 +107,7 @@ def _yield_progress(asin, status_text, progress, job_id=None):
     announcer.announce(f"event: job_update\ndata: {json.dumps(payload)}\n\n")
 
 
-def prepare_book_assets(asin, job_id, temp_dir):
+def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
     """
     Handles Phase 1 of conversion: downloading all necessary files from Audible,
     fetching metadata, and preparing the chapter file for ffmpeg.
@@ -91,6 +115,16 @@ def prepare_book_assets(asin, job_id, temp_dir):
     Implements:
     1. Download Strategy: AAXC (Fast) -> AAX (Reliable)
     2. Decrypt Strategy: AAC Copy (Fast) -> FLAC (Safe)
+
+    `lossless` (no-re-encode mode) gates ONLY the synthetic single-chapter
+    auto-chunking below, and only when it actually applies: that chunking exists
+    to parallelize the per-chapter re-encode, which the lossless remux skips, so
+    a chapterless title keeps its native chapters instead of being cut into
+    "Part N" markers. It is still applied if the fast AAC-copy decrypt fell back
+    to FLAC, because that title takes the normal re-encode path and needs the
+    chunking (see the codec check at the auto-chunking site).
+    Everything else — download, decrypt, integrity checks, metadata — is
+    identical regardless of the flag.
 
     Returns a (context, error) tuple:
       - success:   (context_dict, None)
@@ -419,20 +453,17 @@ def prepare_book_assets(asin, job_id, temp_dir):
                     new_length = total_duration_ms - current_start
                 chapters_list[i]["length_ms"] = max(0, new_length)
 
-        # 2. Time-Based Auto-Chunking
-        TRIGGER_THRESHOLD = 1800
-        CHUNK_SIZE_SEC = 900
-
-        if len(chapters_list) <= 1 and total_duration_sec > TRIGGER_THRESHOLD:
+        # 2. Time-Based Auto-Chunking (see _should_auto_chunk for the gate).
+        if _should_auto_chunk(lossless, audio_file, chapters_list, total_duration_sec):
             log.info(f"PREPARE ({asin}): Single chapter detected. Applying auto-chunking (15m).")
             new_chapters = []
-            num_chunks = int(total_duration_sec // CHUNK_SIZE_SEC)
-            if total_duration_sec % CHUNK_SIZE_SEC > 0:
+            num_chunks = int(total_duration_sec // AUTO_CHUNK_SIZE_SEC)
+            if total_duration_sec % AUTO_CHUNK_SIZE_SEC > 0:
                 num_chunks += 1
 
             for i in range(num_chunks):
-                start_sec = i * CHUNK_SIZE_SEC
-                end_sec = min((i + 1) * CHUNK_SIZE_SEC, total_duration_sec)
+                start_sec = i * AUTO_CHUNK_SIZE_SEC
+                end_sec = min((i + 1) * AUTO_CHUNK_SIZE_SEC, total_duration_sec)
                 new_chapters.append(
                     {
                         "title": f"Part {i + 1}",
@@ -691,6 +722,70 @@ def merge_book_chunks(asin, job_id, temp_dir, final_output_path, context, encode
     finally:
         if process:
             process_registry.unregister(job_id, process)  # <--- UNREGISTER
+
+
+def remux_book_lossless(asin, job_id, temp_dir, final_output_path, context):
+    """
+    Lossless finalize for no-re-encode mode: mux chapters + metadata onto the
+    already-decrypted AAC master with `-c copy` (no transcode), then embed the
+    cover. Used only when conversion.no_reencode is on AND the fast AAC-copy
+    decrypt succeeded, so context["audio_file"] is the ".m4b" master.
+
+    This is deliberately a separate, additive path — merge_book_chunks with a
+    single "-i master" in place of the concat demuxer — so the load-bearing
+    re-encode merge stays untouched. Same metadata/cover/cancellation handling.
+
+    Returns True on success, False on failure.
+    """
+    log.info(f"REMUX ({asin}): Starting lossless remux (no re-encode)...")
+    _yield_progress(asin, "Finalizing (lossless)...", 95, job_id)
+
+    # Copy the audio straight through; only the chapters/metadata are (re)muxed.
+    # The cover is embedded afterward via AtomicParsley for the same reason as
+    # merge_book_chunks: +use_metadata_tags and an attached picture can't coexist
+    # in ffmpeg's mp4 muxer.
+    remux_command = (
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", context["audio_file"]]
+        + ["-i", context["chapter_file"]]
+        + ["-map", "0:a", "-map_metadata", "1", "-map_chapters", "1"]
+        + ["-c", "copy"]
+        + ["-id3v2_version", "3"]
+        + ["-movflags", "+faststart+use_metadata_tags", final_output_path]
+    )
+
+    process = None
+    try:
+        log.debug(f"REMUX ({asin}): Command: {' '.join(remux_command)}")
+        process = subprocess.Popen(
+            remux_command,
+            cwd=temp_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        process_registry.register(job_id, process)
+
+        _, stderr = process.communicate()
+
+        if process.returncode != 0:
+            # Handle Cancellation (SIGTERM is -15), matching the merge path.
+            if process.returncode == -15:
+                log.info(f"REMUX ({asin}): Remux process cancelled.")
+                return False
+            raise subprocess.CalledProcessError(process.returncode, remux_command, stderr=stderr)
+
+        log.info(f"REMUX ({asin}): Successfully remuxed lossless file at {final_output_path}")
+        _embed_cover_art(asin, job_id, final_output_path, context.get("cover_file"))
+        return True
+
+    except subprocess.CalledProcessError as e:
+        log.error(f"REMUX ({asin}): Lossless remux failed. Stderr:\n{e.stderr}")
+        return False
+    finally:
+        if process:
+            process_registry.unregister(job_id, process)
 
 
 def _embed_cover_art(asin, job_id, output_path, cover_file):

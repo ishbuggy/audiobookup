@@ -3,8 +3,15 @@
 import subprocess
 from unittest import mock
 
+import pytest
+
 from audible_downloader import chunked_conversion_logic as ccl
-from audible_downloader.chunked_conversion_logic import _embed_cover_art, _summarize_subprocess_error
+from audible_downloader.chunked_conversion_logic import (
+    _embed_cover_art,
+    _should_auto_chunk,
+    _summarize_subprocess_error,
+    remux_book_lossless,
+)
 
 
 class TestSummarizeSubprocessError:
@@ -90,3 +97,89 @@ class TestEmbedCoverArt:
             mock.patch.object(ccl.subprocess, "Popen", side_effect=OSError("no AtomicParsley")),
         ):
             _embed_cover_art("B0X", 1, "/data/out.m4b", "/tmp/cover.jpg")  # should not raise
+
+
+class TestRemuxLossless:
+    """Phase 8 (FR12): no-re-encode finalize copies the audio straight through
+    (-c copy) while muxing chapters/metadata, then embeds the cover — same
+    cancellation contract as the merge path."""
+
+    CONTEXT = {
+        "audio_file": "/tmp/x/master_intermediate.m4b",
+        "chapter_file": "/tmp/x/chapters.txt",
+        "cover_file": "/tmp/x/cover.jpg",
+    }
+
+    def _run_with_returncode(self, returncode):
+        proc = mock.MagicMock()
+        proc.returncode = returncode
+        proc.communicate.return_value = ("", "ffmpeg says no")
+        with (
+            mock.patch.object(ccl.subprocess, "Popen", return_value=proc) as popen,
+            mock.patch.object(ccl.process_registry, "register"),
+            mock.patch.object(ccl.process_registry, "unregister"),
+            mock.patch.object(ccl, "_embed_cover_art") as embed,
+            mock.patch.object(ccl, "_yield_progress"),
+        ):
+            result = remux_book_lossless("B0X", 1, "/tmp/x", "/data/out.m4b", self.CONTEXT)
+        return result, popen, embed
+
+    def test_success_copies_audio_and_embeds_cover(self):
+        result, popen, embed = self._run_with_returncode(0)
+        assert result is True
+        cmd = popen.call_args.args[0]
+        assert cmd[0] == "ffmpeg"
+        # Single master input (not a concat demuxer) copied straight through.
+        assert cmd.count("-i") == 2
+        assert self.CONTEXT["audio_file"] in cmd
+        assert "-c" in cmd and "copy" in cmd
+        assert "concat" not in cmd
+        embed.assert_called_once_with("B0X", 1, "/data/out.m4b", self.CONTEXT["cover_file"])
+
+    def test_cancellation_returns_false_without_cover(self):
+        result, _, embed = self._run_with_returncode(-15)
+        assert result is False
+        embed.assert_not_called()
+
+    def test_failure_returns_false_without_cover(self):
+        result, _, embed = self._run_with_returncode(1)
+        assert result is False
+        embed.assert_not_called()
+
+
+class TestShouldAutoChunk:
+    """Phase 8 (FR12): the single-chapter auto-chunking gate. It is suppressed
+    only when the title will truly be remuxed losslessly (no-re-encode on AND an
+    AAC ".m4b" master). A FLAC fallback still auto-chunks, because that title
+    takes the re-encode path and needs the parallel chunks / navigation markers."""
+
+    LONG = ccl.AUTO_CHUNK_TRIGGER_SEC + 1  # long enough to trigger chunking
+    SHORT = ccl.AUTO_CHUNK_TRIGGER_SEC - 1
+
+    def test_reencode_single_chapter_long_book_chunks(self):
+        assert _should_auto_chunk(False, "/t/master_intermediate.m4b", [{}], self.LONG) is True
+
+    def test_reencode_chapterless_long_book_chunks(self):
+        # 0 native chapters (the case that would otherwise fail "no chapter information").
+        assert _should_auto_chunk(False, "/t/master_intermediate.m4b", [], self.LONG) is True
+
+    def test_lossless_aac_master_never_chunks(self):
+        # True lossless path: keep the native (possibly empty) chapters as-is.
+        assert _should_auto_chunk(True, "/t/master_intermediate.m4b", [], self.LONG) is False
+        assert _should_auto_chunk(True, "/t/master_intermediate.M4B", [{}], self.LONG) is False
+
+    def test_lossless_requested_but_flac_master_still_chunks(self):
+        # M1 regression: a FLAC fallback takes the re-encode path, so the
+        # requested-but-unavailable lossless flag must NOT suppress chunking —
+        # otherwise a chapterless FLAC book would reach the encode path with 0
+        # chapters and fail. It must still chunk.
+        assert _should_auto_chunk(True, "/t/master_intermediate.flac", [], self.LONG) is True
+        assert _should_auto_chunk(True, "/t/master_intermediate.flac", [{}], self.LONG) is True
+
+    @pytest.mark.parametrize("lossless", [True, False])
+    def test_multi_chapter_book_is_never_chunked(self, lossless):
+        assert _should_auto_chunk(lossless, "/t/master_intermediate.m4b", [{}, {}], self.LONG) is False
+
+    def test_short_single_chapter_book_is_not_chunked(self):
+        # Below the duration trigger, even the re-encode path leaves it alone.
+        assert _should_auto_chunk(False, "/t/master_intermediate.m4b", [{}], self.SHORT) is False
