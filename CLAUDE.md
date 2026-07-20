@@ -2,7 +2,7 @@
 
 ## Project Context
 
-**AudioBookup** is a self-hosted, Dockerized web application for managing, downloading, and converting a personal Audible audiobook library into DRM-free `.m4b` files. Python 3.11 (Flask) backend, vanilla JavaScript (ES modules) frontend, SQLite storage, all shipped as a single multi-arch Docker container (`ghcr.io/ishbuggy/audiobookup`). Current version: **v0.17.0**.
+**AudioBookup** is a self-hosted, Dockerized web application for managing, downloading, and converting a personal Audible audiobook library into DRM-free `.m4b` files. Python 3.11 (Flask) backend, vanilla JavaScript (ES modules) frontend, SQLite storage, all shipped as a single multi-arch Docker container (`ghcr.io/ishbuggy/audiobookup`). Current version: **v0.18.0**.
 
 The project was developed incrementally with chat-based LLM assistance before agentic tooling. It is **stable and in use by real users** — "if it ain't broke, don't fix it" is the house philosophy. Prefer minimal, surgical changes; don't refactor working code without a concrete reason.
 

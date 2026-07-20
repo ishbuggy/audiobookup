@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.18.0] - 2026-07-20
+
+This is a **stability and security hardening** release with no new user-facing features. It resolves every finding from an end-to-end code and security review of the v0.17.0 codebase — fresh-install database integrity, several security fixes (login redaction, cover-art authentication, CSRF protection, metadata escaping, open-redirect validation), correct job cancellation and timeouts, and a range of reliability and housekeeping improvements. It also adds the project's first automated test suite and pins all dependencies for reproducible builds.
 
 ### Fixed
 - **Setup Wizard Cleanup:** The pasted Audible login URL was submitted with two literal junk characters (`\n` as text, not a newline) appended — audible-cli happened to tolerate it, but the URL is now sent exactly as pasted. Also removed a dead success-detection branch that could never fire (success is signalled by a dedicated event) and consolidated the wizard's two Socket.IO connections into one.
