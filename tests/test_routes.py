@@ -271,3 +271,24 @@ class TestUploadBookCover:
         self._mock_ffmpeg(monkeypatch, returncode=1)
         response = self._upload(client)
         assert response.status_code == 400
+
+    def test_ffmpeg_command_is_hardened_against_ssrf(self, client, completed_setup, book_db, monkeypatch):
+        # ffmpeg detects format by content, so the input must be pinned to the
+        # image demuxer with protocols restricted to local files, or a crafted
+        # upload could be read as a concat/hls playlist (SSRF / local file read).
+        _login_session(client)
+        calls = []
+
+        def fake_run(command, *args, **kwargs):
+            calls.append(command)
+            return mock.MagicMock(returncode=0, stderr="")
+
+        monkeypatch.setattr("audible_downloader.routes.subprocess.run", fake_run)
+        self._upload(client)
+        assert calls, "ffmpeg should have been invoked"
+        for command in calls:
+            assert "-nostdin" in command
+            assert command[command.index("-f") + 1] == "image2"
+            assert command[command.index("-protocol_whitelist") + 1] == "file"
+            # The whitelist/format flags must precede the input they guard.
+            assert command.index("-f") < command.index("-i")

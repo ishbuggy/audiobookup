@@ -764,7 +764,7 @@ def update_book_metadata(asin):
     )
 
 
-ALLOWED_COVER_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+ALLOWED_COVER_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 MAX_COVER_BYTES = 15 * 1024 * 1024
 
 
@@ -808,8 +808,13 @@ def upload_book_cover(asin):
         tmp_path = tmp.name
     try:
         # ffmpeg both validates the image (non-images fail) and normalizes to JPEG.
+        # Security: ffmpeg detects format by content, not our extension check, so
+        # force the single-image demuxer (-f image2) and restrict protocols to
+        # local files. Without this, a crafted upload could be parsed as a
+        # concat/hls playlist and made to read local files or reach the network
+        # (SSRF). -nostdin avoids any prompt hang.
         for out_path, vf in ((original_path, None), (thumb_path, "scale=200:200")):
-            command = ["ffmpeg", "-y", "-i", tmp_path]
+            command = ["ffmpeg", "-nostdin", "-y", "-protocol_whitelist", "file", "-f", "image2", "-i", tmp_path]
             if vf:
                 command += ["-vf", vf]
             command.append(out_path)
