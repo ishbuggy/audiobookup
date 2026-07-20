@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Optional Subtitle Trimming in Filenames:** A new `truncate_subtitle` naming setting (off by default) drops a long "Main Title: Subtitle" subtitle from the title used in file and folder names (e.g. "999: The Extraordinary Young Women..." becomes "999"). It splits on the first colon-space, so ratios/times like "12:00" are left alone; the embedded metadata keeps the full title, and titles without a subtitle are unaffected.
 - **Companion PDF Downloads:** Audiobooks that ship with a supplementary PDF (booklets, maps, reference material) now have that PDF downloaded and saved next to the `.m4b`, sharing its name. Enabled by default; the new `download_supplementary_pdf` conversion setting turns it off. Titles without a PDF are unaffected.
 
 ### Fixed

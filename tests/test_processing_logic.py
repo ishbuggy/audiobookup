@@ -51,6 +51,7 @@ def _resolve_output_path(
     path_exists=False,
     tracked_row=None,
     embedded_asin=None,
+    truncate_subtitle=False,
 ):
     """
     Drives BookProcessor._prepare_and_spawn_encode_tasks just far enough to
@@ -75,7 +76,11 @@ def _resolve_output_path(
     con.execute.side_effect = execute
 
     with (
-        mock.patch.object(processing_logic, "load_settings", return_value={"naming": {"template": template}}),
+        mock.patch.object(
+            processing_logic,
+            "load_settings",
+            return_value={"naming": {"template": template, "truncate_subtitle": truncate_subtitle}},
+        ),
         mock.patch.object(processing_logic, "get_db_connection", return_value=con),
         mock.patch.object(processing_logic, "prepare_book_assets", return_value=(None, None)),
         mock.patch("os.path.exists", return_value=path_exists),
@@ -105,6 +110,37 @@ class TestNamingTemplate:
         row = {"author": None, "title": None, "narrator": None, "publisher": None}
         path = _resolve_output_path(template="{author}/{title}", book_row=row)
         assert path == "/data/Unknown Author/Unknown Title.m4b"
+
+
+class TestSubtitleTruncation:
+    """FR6: optional stripping of a "Main Title: Subtitle" subtitle from the
+    filename title. Pure helper plus its wiring into the naming path."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("999: The Extraordinary Young Women of the First Transport", "999"),
+            ("Star Wars: The Force Awakens", "Star Wars"),
+            ("Dracula", "Dracula"),  # no subtitle
+            ("12:00 High Noon", "12:00 High Noon"),  # colon without space is left alone
+            (": Subtitle only", ": Subtitle only"),  # would be empty -> original kept
+            ("A: B: C", "A"),  # splits on the first colon-space only
+            ("", ""),
+            (None, None),
+        ],
+    )
+    def test_strip_subtitle(self, raw, expected):
+        assert processing_logic._strip_subtitle(raw) == expected
+
+    def test_naming_truncates_when_enabled(self):
+        row = dict(BOOK_ROW, title="999: The Extraordinary Young Women")
+        path = _resolve_output_path(template="{title}", book_row=row, truncate_subtitle=True)
+        assert path == "/data/999.m4b"
+
+    def test_naming_keeps_full_title_when_disabled(self):
+        row = dict(BOOK_ROW, title="999: The Extraordinary Young Women")
+        path = _resolve_output_path(template="{title}", book_row=row, truncate_subtitle=False)
+        assert path == "/data/999_ The Extraordinary Young Women.m4b"
 
 
 class TestCollisionHandling:

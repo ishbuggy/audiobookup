@@ -25,7 +25,13 @@ DEFAULT_SETTINGS = {
             "total_processing_cores": 2,
         }
     },
-    "naming": {"template": "{author}/{title}/{author} - {title}"},
+    "naming": {
+        "template": "{author}/{title}/{author} - {title}",
+        # When true, drop a trailing "Main Title: Subtitle" subtitle from the
+        # {title} used in filenames (e.g. "999: The Extraordinary..." -> "999").
+        # Affects filenames only; embedded metadata keeps the full title.
+        "truncate_subtitle": False,
+    },
     "conversion": {
         "quality": "High",
         "is_chunked_conversion_enabled": False,

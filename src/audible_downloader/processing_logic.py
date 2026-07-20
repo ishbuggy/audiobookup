@@ -80,6 +80,20 @@ def _sanitize_filename(name):
     return name
 
 
+def _strip_subtitle(title):
+    """
+    Drop a trailing "Main Title: Subtitle" subtitle for cleaner filenames, e.g.
+    "999: The Extraordinary Young Women..." -> "999". Splits on the first
+    colon-space, so ratios/times like "12:00" are left intact. Returns the
+    original title unchanged when there's no subtitle or when stripping would
+    leave nothing. Must run BEFORE _sanitize_filename, which rewrites ':' to '_'.
+    """
+    if not title:
+        return title
+    main = title.split(": ", 1)[0].strip()
+    return main or title
+
+
 class BookProcessor:
     """
     Manages the state and task submission for a single book's conversion process.
@@ -288,9 +302,16 @@ class BookProcessor:
             if not book_details:
                 raise ValueError(f"Could not find ASIN {self.asin} in the database.")
 
+            # Optionally trim a long subtitle from the title used in filenames
+            # (opt-in; embedded metadata keeps the full title). Runs before
+            # sanitization because that step rewrites the ':' separator.
+            raw_title = book_details["title"] or "Unknown Title"
+            if settings.get("naming", {}).get("truncate_subtitle", False):
+                raw_title = _strip_subtitle(raw_title)
+
             # Sanitize all potential filename components
             safe_author = _sanitize_filename(book_details["author"] or "Unknown Author")
-            safe_title = _sanitize_filename(book_details["title"] or "Unknown Title")
+            safe_title = _sanitize_filename(raw_title)
             safe_narrator = _sanitize_filename(book_details["narrator"] or "Unknown Narrator")
             safe_publisher = _sanitize_filename(book_details["publisher"] or "Unknown Publisher")
             safe_asin = _sanitize_filename(self.asin)
