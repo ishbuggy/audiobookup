@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Bulk Duplicate Downloads No Longer Overwrite Each Other:** Downloading two different books that share the same author and title in a single job (common with public-domain classics — multiple recordings of *Dracula*, *Pride and Prejudice*, etc.) could silently overwrite the first file with the second. Both books chose their output path before either had written its file, so the existing on-disk collision check couldn't see the conflict. Colliding books now reserve their target path in-process, so the second and later copies get a guaranteed-unique ASIN-suffixed name (`Title_B00XYZ.m4b`) and are flagged as duplicates in the database (surfacing in the UI is planned for a later release).
+
 ## [0.18.0] - 2026-07-20
 
 This is a **stability and security hardening** release with no new user-facing features. It resolves every finding from an end-to-end code and security review of the v0.17.0 codebase — fresh-install database integrity, several security fixes (login redaction, cover-art authentication, CSRF protection, metadata escaping, open-redirect validation), correct job cancellation and timeouts, and a range of reliability and housekeeping improvements. It also adds the project's first automated test suite and pins all dependencies for reproducible builds.

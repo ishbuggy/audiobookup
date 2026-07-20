@@ -162,6 +162,47 @@ class TestConcurrentDuplicateHandling:
         assert path_next == "/data/Bram Stoker/Dracula/Bram Stoker - Dracula.m4b"
 
 
+class TestDuplicateFlag:
+    """A book whose name had to be ASIN-suffixed is marked is_duplicate, and
+    that flag is persisted (as an int, clean=0) by the success UPDATE."""
+
+    def test_clean_path_is_not_flagged(self):
+        processor = BookProcessor(asin="B0AAAA", job_id=1)
+        with mock.patch("os.path.exists", return_value=False):
+            processor._reserve_output_path("/data/A/Title/Title.m4b", "B0AAAA")
+        assert processor.is_duplicate is False
+
+    def test_in_flight_collision_sets_flag(self):
+        first = BookProcessor(asin="B0AAAA", job_id=1)
+        second = BookProcessor(asin="B0BBBB", job_id=1)
+        with mock.patch("os.path.exists", return_value=False):
+            first._reserve_output_path("/data/A/Title/Title.m4b", "B0AAAA")
+            second._reserve_output_path("/data/A/Title/Title.m4b", "B0BBBB")
+        assert first.is_duplicate is False
+        assert second.is_duplicate is True
+
+    def test_success_update_persists_flag_as_int(self):
+        processor = BookProcessor(asin="B0BBBB", job_id=1)
+        processor.is_duplicate = True
+        processor.final_output_path = "/data/A/Title/Title_B0BBBB.m4b"
+
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = None  # no runtime row
+
+        with (
+            mock.patch.object(processing_logic, "merge_book_chunks", return_value=True),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "record_conversion_time"),
+            mock.patch.object(processing_logic, "_yield_progress"),
+        ):
+            processor._merge_and_finalize()
+
+        update_calls = [call for call in con.execute.call_args_list if "status = 'DOWNLOADED'" in call.args[0]]
+        assert len(update_calls) == 1
+        assert update_calls[0].args[1] == ("/data/A/Title/Title_B0BBBB.m4b", 1, "B0BBBB")
+
+
 class TestCancellation:
     """M4 regression: once the job's stop_event is set, queued tasks must
     become no-ops that unblock the processor instead of starting fresh work."""

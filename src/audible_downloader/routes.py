@@ -228,6 +228,8 @@ def get_book_details(asin):
     book_dict = dict(book_from_db)
     if book_dict.get("is_summary_full") is None:
         book_dict["is_summary_full"] = 0
+    if book_dict.get("is_duplicate") is None:
+        book_dict["is_duplicate"] = 0
     original_cover_path = f"/covers/{book_dict['asin']}_original.jpg"
     thumb_cover_path = f"/covers/{book_dict['asin']}_thumb.jpg"
     if os.path.exists(os.path.join(COVERS_DIR, f"{book_dict['asin']}_original.jpg")):

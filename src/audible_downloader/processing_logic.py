@@ -378,12 +378,15 @@ class BookProcessor:
                 if runtime_row:
                     record_conversion_time(runtime_row["runtime_min"], conversion_duration_sec)
 
-            # On Success, update the database
+            # On Success, update the database. is_duplicate records whether a
+            # same-author+title collision forced an ASIN suffix onto our name;
+            # it is written explicitly (0 when clean) so a later re-download
+            # that resolves without a collision clears a stale flag.
             with get_db_connection() as con:
                 con.execute(
                     "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, "
-                    "error_message = '', retry_count = 0 WHERE asin = ?",
-                    (self.final_output_path, self.asin),
+                    "error_message = '', retry_count = 0, is_duplicate = ? WHERE asin = ?",
+                    (self.final_output_path, int(self.is_duplicate), self.asin),
                 )
             _yield_progress(self.asin, "Complete!", 100, self.job_id)
         else:
