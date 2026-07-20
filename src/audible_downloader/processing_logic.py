@@ -32,6 +32,15 @@ from .settings import load_settings
 # Import the task runner and task objects
 from .task_runner import Task, TaskPriority, task_runner
 
+# Output paths claimed by in-flight books, guarded by a lock. The on-disk/DB
+# collision check only sees files that already exist; in a bulk job two
+# different books with the same author+title both run PREPARE before either
+# has written its file, so without this the loser's merge would silently
+# overwrite the winner. Each book reserves its chosen path here for the
+# duration of its run and releases it when finished.
+_reserved_output_paths: set[str] = set()
+_reservation_lock = Lock()
+
 
 def _sanitize_filename(name):
     """Sanitizes a string to be used as a valid filename."""
@@ -58,6 +67,9 @@ class BookProcessor:
         self.stop_event = stop_event
         self.temp_dir = None
         self.final_output_path = None
+        # Set True when a same-author+title collision forced an ASIN suffix onto
+        # our filename; persisted to the DB on success so the UI can flag it.
+        self.is_duplicate = False
         self.context = {}
         self.total_chunks = 0
         self.completed_chunks = 0
@@ -112,6 +124,74 @@ class BookProcessor:
             log.warning(f"TASK-PREPARE ({self.asin}): Could not probe '{filepath}': {e}")
             return None
 
+    def _reserve_output_path(self, base_output_path, safe_asin):
+        """
+        Choose this book's final output path and reserve it in-process so two
+        books with the same author+title can't both claim it.
+
+        Collision cases, in order:
+          1. Another in-flight book has already reserved this path -> rename ours.
+          2. A file already exists at the path -> keep it only if it verifiably
+             belongs to this same book (see _existing_file_is_foreign).
+        On collision we inject the ASIN ("Title.m4b" -> "Title_B00XYZ.m4b"),
+        which is unique per book, and mark this book as a duplicate.
+        """
+        with _reservation_lock:
+            collision = False
+            if base_output_path in _reserved_output_paths:
+                log.info(
+                    f"TASK-PREPARE ({self.asin}): Target path is already claimed by another "
+                    f"in-flight book. Appending unique ID."
+                )
+                collision = True
+            elif os.path.exists(base_output_path):
+                collision = self._existing_file_is_foreign(base_output_path)
+
+            if collision:
+                root, ext = os.path.splitext(base_output_path)
+                final_path = f"{root}_{safe_asin}{ext}"
+            else:
+                final_path = base_output_path
+
+            _reserved_output_paths.add(final_path)
+
+        self.is_duplicate = collision
+        return final_path
+
+    def _existing_file_is_foreign(self, filepath):
+        """
+        A file already exists at `filepath`. Return True if it belongs to a
+        different book (so we must not overwrite it), False if it's safe to
+        overwrite as this book's own prior download.
+
+          1. Tracked in the DB under a different ASIN -> foreign.
+          2. Tracked under our own ASIN -> ours, overwrite.
+          3. Untracked -> probe the embedded ASIN tag; only a matching tag
+             proves it's an old copy of this book.
+        """
+        with get_db_connection() as con:
+            existing_entry = con.execute("SELECT asin FROM audiobooks WHERE filepath = ?", (filepath,)).fetchone()
+
+        if existing_entry:
+            if existing_entry["asin"] != self.asin:
+                log.info(
+                    f"TASK-PREPARE ({self.asin}): Filename collision with tracked ASIN "
+                    f"{existing_entry['asin']}. Appending unique ID."
+                )
+                return True
+            log.info(f"TASK-PREPARE ({self.asin}): File exists and belongs to this ASIN. Overwriting.")
+            return False
+
+        embedded_asin = self._probe_file_asin(filepath)
+        if embedded_asin == self.asin:
+            log.info(f"TASK-PREPARE ({self.asin}): Untracked file has this book's embedded ASIN tag. Overwriting.")
+            return False
+        log.info(
+            f"TASK-PREPARE ({self.asin}): Untracked file with foreign or missing ASIN tag "
+            f"({embedded_asin or 'none'}) occupies the target path. Appending unique ID."
+        )
+        return True
+
     def run(self):
         """Starts the processing for this book and waits for it to complete."""
         try:
@@ -147,6 +227,11 @@ class BookProcessor:
             log.error(f"PROCESSOR ({self.asin}): A critical error occurred in the processor run: {e}", exc_info=True)
             self._update_db_on_failure(f"A critical error occurred: {e}")
         finally:
+            # Release our claimed output path so the name is available again
+            # (e.g. for a later re-download of this same book).
+            if self.final_output_path:
+                with _reservation_lock:
+                    _reserved_output_paths.discard(self.final_output_path)
             log.info(f"PROCESSOR ({self.asin}): Finished run method.")
 
     def _prepare_and_spawn_encode_tasks(self):
@@ -189,51 +274,11 @@ class BookProcessor:
                 .replace("{asin}", safe_asin)
             )
 
-            self.final_output_path = os.path.join("/data", f"{final_relative_path}.m4b")
-
-            # Collision Detection Logic ("The Dracula Problem")
-            if os.path.exists(self.final_output_path):
-                # Check if the existing file belongs to a different ASIN
-                with get_db_connection() as con:
-                    existing_entry = con.execute(
-                        "SELECT asin FROM audiobooks WHERE filepath = ?", (self.final_output_path,)
-                    ).fetchone()
-
-                # Decide whether the existing file may be safely overwritten.
-                # Three cases:
-                #   1. Tracked in the DB under a different ASIN -> collision, rename ours.
-                #   2. Tracked under our own ASIN -> legitimate re-download, overwrite.
-                #   3. Not tracked at all -> probe the file's embedded ASIN tag. Only a
-                #      matching tag proves it's an old copy of this book; anything else
-                #      is a foreign file we must not destroy, so rename ours.
-                collision = False
-                if existing_entry:
-                    if existing_entry["asin"] != self.asin:
-                        log.info(
-                            f"TASK-PREPARE ({self.asin}): Filename collision with tracked ASIN "
-                            f"{existing_entry['asin']}. Appending unique ID."
-                        )
-                        collision = True
-                    else:
-                        log.info(f"TASK-PREPARE ({self.asin}): File exists and belongs to this ASIN. Overwriting.")
-                else:
-                    embedded_asin = self._probe_file_asin(self.final_output_path)
-                    if embedded_asin == self.asin:
-                        log.info(
-                            f"TASK-PREPARE ({self.asin}): Untracked file has this book's embedded ASIN tag. "
-                            f"Overwriting."
-                        )
-                    else:
-                        log.info(
-                            f"TASK-PREPARE ({self.asin}): Untracked file with foreign or missing ASIN tag "
-                            f"({embedded_asin or 'none'}) occupies the target path. Appending unique ID."
-                        )
-                        collision = True
-
-                if collision:
-                    # Inject the ASIN into the filename: "Title.m4b" -> "Title_B00XYZ.m4b"
-                    root, ext = os.path.splitext(self.final_output_path)
-                    self.final_output_path = f"{root}_{safe_asin}{ext}"
+            # Collision Detection Logic ("The Dracula Problem"). Reserve a
+            # unique output path, guarding against both files already on disk
+            # and other in-flight books racing for the same name.
+            base_output_path = os.path.join("/data", f"{final_relative_path}.m4b")
+            self.final_output_path = self._reserve_output_path(base_output_path, safe_asin)
 
             os.makedirs(os.path.dirname(self.final_output_path), exist_ok=True)
         except Exception as e:

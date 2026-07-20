@@ -9,6 +9,16 @@ from audible_downloader import processing_logic
 from audible_downloader.processing_logic import BookProcessor, _sanitize_filename
 
 
+@pytest.fixture(autouse=True)
+def _clear_output_reservations():
+    """The output-path reservation set is module-level state shared across
+    BookProcessor instances; clear it around every test so reservations from
+    one test can't leak into the next."""
+    processing_logic._reserved_output_paths.clear()
+    yield
+    processing_logic._reserved_output_paths.clear()
+
+
 class TestSanitizeFilename:
     @pytest.mark.parametrize(
         ("raw", "expected"),
@@ -123,6 +133,33 @@ class TestCollisionHandling:
     def test_untracked_file_without_embedded_asin_gets_suffix(self):
         path = _resolve_output_path(path_exists=True, tracked_row=None, embedded_asin=None)
         assert path == "/data/Bram Stoker/Dracula/Bram Stoker - Dracula_B0OURS.m4b"
+
+
+class TestConcurrentDuplicateHandling:
+    """Bug 1 (bulk ingestion): two different books with the same author+title
+    processed in the same job must not both claim the same output path. In a
+    bulk job both run PREPARE before either has written its file, so the
+    on-disk check can't see the conflict — the in-process reservation must."""
+
+    def test_second_in_flight_duplicate_gets_asin_suffix(self):
+        # Book A claims the base path first; nothing is on disk yet.
+        path_a = _resolve_output_path(asin="B0AAAA")
+        # Book B (same author+title) prepares before A has written its file.
+        path_b = _resolve_output_path(asin="B0BBBB")
+        assert path_a == "/data/Bram Stoker/Dracula/Bram Stoker - Dracula.m4b"
+        assert path_b == "/data/Bram Stoker/Dracula/Bram Stoker - Dracula_B0BBBB.m4b"
+
+    def test_third_in_flight_duplicate_also_stays_unique(self):
+        paths = [_resolve_output_path(asin=a) for a in ("B0AAAA", "B0BBBB", "B0CCCC")]
+        assert len(set(paths)) == 3
+
+    def test_released_reservation_frees_the_plain_name(self):
+        # After the first book finishes (reservation released), a later book
+        # reclaims the plain name instead of being suffixed.
+        path_first = _resolve_output_path(asin="B0AAAA")
+        processing_logic._reserved_output_paths.discard(path_first)
+        path_next = _resolve_output_path(asin="B0BBBB")
+        assert path_next == "/data/Bram Stoker/Dracula/Bram Stoker - Dracula.m4b"
 
 
 class TestCancellation:
