@@ -44,6 +44,12 @@ DEFAULT_SETTINGS = {
         # the audiobook when Audible ships one, placed next to the .m4b.
         "download_supplementary_pdf": True,
     },
+    "import": {
+        # Upper bound (in GB) on a single manual-import upload. Enforced as the
+        # request body streams to disk, so an oversize upload is rejected without
+        # buffering it in memory.
+        "max_upload_gb": 2,
+    },
     "tasks": {
         "timezone": "UTC",
         "audible_auth_check_interval_hours": 6,

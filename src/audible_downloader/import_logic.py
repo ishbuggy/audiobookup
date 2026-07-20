@@ -1,0 +1,319 @@
+# audible_downloader/import_logic.py
+#
+# Phase 6 (FR2): manual "add existing file" import.
+#
+# This module holds the *shared adoption core* that both import entry points
+# funnel through — the scan-in-place job (adopt files already under /data) and
+# the streaming upload endpoint (write into /data, then adopt). Given a path to
+# an audio file it probes the file, decides whether it is a known Audible book
+# or a genuine import, writes/updates the DB row, and best-effort extracts a
+# cover. It never re-encodes: imported files are adopted as-is.
+#
+# See ref-docs/phase6-import-design.md for the full design and the identity
+# rules encoded below.
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import uuid
+from datetime import datetime, timezone
+
+from . import COVERS_DIR
+from .db import get_db_connection
+from .logger import log
+
+# An Audible ASIN is exactly 10 uppercase alphanumerics. The embedded `asin`
+# tag is read from *file content* (fully attacker-controlled on upload), and the
+# key derived from it is used to build filesystem paths (cover files) and the DB
+# primary key — so a tag like "../../config/x" must never be trusted as an ASIN.
+# Anything that doesn't match this pattern is treated as "no ASIN" and the file
+# gets a safe synthetic IMPORT-<hex> key instead.
+_ASIN_RE = re.compile(r"[A-Z0-9]{10}")
+# Keys we allow to touch the covers path: our own IMPORT-<hex> and real ASINs.
+_SAFE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+# Root of the final library. A module constant (not a hard-coded literal spread
+# through the file) so tests can point it at a temp directory.
+DATA_DIR = "/data"
+
+# Containers we adopt as-is. Apple audiobook containers only for v0.19; other
+# formats (e.g. .mp3) are deferred (see the design note).
+IMPORTABLE_EXTS = (".m4b", ".m4a")
+
+# Uploaded files are streamed here (under DATA_DIR, so the final placement is a
+# same-filesystem rename rather than a cross-volume copy) before adoption.
+IMPORT_STAGING_DIRNAME = ".import_staging"
+
+
+def import_staging_dir():
+    """Absolute path to the upload staging directory (created on demand)."""
+    return os.path.join(DATA_DIR, IMPORT_STAGING_DIRNAME)
+
+
+def _run_ffprobe_json(filepath):
+    """
+    Return the parsed `ffprobe -show_format` JSON for `filepath`, or an empty
+    dict if the file can't be probed. Used to pull the embedded metadata tags
+    and duration in a single call.
+    """
+    cmd = [
+        "ffprobe",
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_format",
+        filepath,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError as e:
+        log.warning(f"IMPORT: ffprobe could not run on '{filepath}': {e}")
+        return {}
+    if result.returncode != 0:
+        log.warning(f"IMPORT: ffprobe failed for '{filepath}': {result.stderr.strip()}")
+        return {}
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {}
+
+
+def _probe_metadata(filepath):
+    """
+    Extract the fields we persist for an imported book from `filepath`.
+
+    Tag lookups are case-insensitive (ffmpeg's tag casing varies by container).
+    Returns a dict with keys: embedded_asin, title, author, release_date,
+    runtime_min. Missing values are returned as None / 0 for the caller to
+    apply its own fallbacks.
+    """
+    fmt = _run_ffprobe_json(filepath).get("format", {})
+    tags = {str(k).lower(): v for k, v in fmt.get("tags", {}).items()}
+
+    runtime_min = 0
+    try:
+        runtime_min = int(round(float(fmt.get("duration", 0)) / 60))
+    except (TypeError, ValueError):
+        runtime_min = 0
+
+    # Only accept a well-formed ASIN; a malformed/hostile tag is dropped so the
+    # caller falls back to a synthetic key (prevents path traversal via the key).
+    embedded_asin = (tags.get("asin") or "").strip() or None
+    if embedded_asin and not _ASIN_RE.fullmatch(embedded_asin):
+        log.warning(f"IMPORT: ignoring malformed embedded asin tag {embedded_asin!r} in '{filepath}'.")
+        embedded_asin = None
+
+    return {
+        "embedded_asin": embedded_asin,
+        "title": (tags.get("title") or "").strip() or None,
+        # `artist` is the author in Audible/Apple audiobook tags; album_artist is a fallback.
+        "author": (tags.get("artist") or tags.get("album_artist") or "").strip() or None,
+        "release_date": (tags.get("date") or "").strip() or None,
+        "runtime_min": runtime_min,
+    }
+
+
+def _extract_cover(filepath, key):
+    """
+    Best-effort: pull an embedded cover image out of `filepath` into the same
+    covers/<key>_original.jpg + _thumb.jpg layout the sync and upload paths use.
+    A file with no attached picture (or any ffmpeg error) is left without a
+    cover — the grid falls back to its placeholder. Never raises.
+    """
+    # Defense in depth: the key becomes a filename here, so reject anything that
+    # isn't a plain token (no path separators, no "..") before touching the disk.
+    if not _SAFE_KEY_RE.fullmatch(key):
+        log.warning(f"IMPORT: refusing to write cover for unsafe key {key!r}.")
+        return
+
+    os.makedirs(COVERS_DIR, exist_ok=True)
+    covers_root = os.path.realpath(COVERS_DIR)
+    original_path = os.path.join(COVERS_DIR, f"{key}_original.jpg")
+    thumb_path = os.path.join(COVERS_DIR, f"{key}_thumb.jpg")
+    # Belt-and-suspenders: confirm both targets resolve inside COVERS_DIR.
+    for target in (original_path, thumb_path):
+        if os.path.realpath(target) != os.path.join(covers_root, os.path.basename(target)):
+            log.warning(f"IMPORT: cover path for key {key!r} escaped the covers dir; skipping.")
+            return
+
+    # Grab the first attached picture as a single JPEG frame. -nostdin avoids any
+    # prompt hang; failure (no video stream) is expected and swallowed.
+    extract = [
+        "ffmpeg",
+        "-nostdin",
+        "-y",
+        "-i",
+        filepath,
+        "-map",
+        "0:v:0",
+        "-frames:v",
+        "1",
+        "-update",
+        "1",
+        original_path,
+    ]
+    try:
+        result = subprocess.run(extract, capture_output=True, text=True)
+    except OSError as e:
+        log.debug(f"IMPORT: cover extract could not run for '{key}': {e}")
+        return
+    if result.returncode != 0 or not os.path.exists(original_path):
+        log.debug(f"IMPORT: no embedded cover in '{filepath}' for {key}.")
+        return
+
+    scale = ["ffmpeg", "-nostdin", "-y", "-i", original_path, "-vf", "scale=200:200", thumb_path]
+    try:
+        subprocess.run(scale, capture_output=True, text=True)
+    except OSError as e:
+        log.debug(f"IMPORT: thumbnail generation failed for {key}: {e}")
+
+
+def adopt_file(filepath, *, allow_reconcile=True, key=None):
+    """
+    Adopt a single on-disk audio file into the library.
+
+    Identity resolution (see the design note):
+      1. Embedded `asin` tag that matches an existing DB row -> reconcile that
+         Audible book in place (set filepath, mark DOWNLOADED). action="reconciled".
+      2. Same absolute path already tracked -> action="skipped" (idempotent
+         re-scan; no duplicate row).
+      3. Otherwise a genuine import: the key is `key` (when the caller pre-chose
+         one, e.g. the upload path so the on-disk name and the row agree), else
+         the embedded ASIN (present but unknown), else a synthetic "IMPORT-<uuid>".
+         Metadata from the file's tags, then its filename. source='imported'.
+         action="imported".
+
+    `allow_reconcile=False` forces the file to be treated as an import even if it
+    carries a known ASIN tag (not used by the current callers, but keeps the core
+    honest for tests).
+
+    Returns a small result dict: {"action", "key", "title"?, "author"?, "reason"?}.
+    Best-effort on covers; raises only on a genuine DB error.
+    """
+    filepath = os.path.abspath(filepath)
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext not in IMPORTABLE_EXTS:
+        return {"action": "skipped", "reason": "unsupported-type", "key": None}
+    if not os.path.isfile(filepath):
+        return {"action": "skipped", "reason": "not-found", "key": None}
+
+    meta = _probe_metadata(filepath)
+    embedded_asin = meta["embedded_asin"]
+
+    with get_db_connection() as con:
+        # (1) Known Audible book by embedded ASIN -> reconcile in place.
+        if embedded_asin and allow_reconcile:
+            known = con.execute("SELECT asin FROM audiobooks WHERE asin = ?", (embedded_asin,)).fetchone()
+            if known is not None:
+                con.execute(
+                    "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ? WHERE asin = ?",
+                    (filepath, embedded_asin),
+                )
+                con.commit()
+                log.info(f"IMPORT: Reconciled known ASIN {embedded_asin} to '{filepath}'.")
+                return {"action": "reconciled", "key": embedded_asin}
+
+        # (2) Idempotency: this exact path is already adopted.
+        tracked = con.execute("SELECT asin FROM audiobooks WHERE filepath = ?", (filepath,)).fetchone()
+        if tracked is not None:
+            return {"action": "skipped", "reason": "already-tracked", "key": tracked["asin"]}
+
+    # (3) Genuine import. Choose a stable key and build the metadata.
+    key = key or embedded_asin or f"IMPORT-{uuid.uuid4().hex[:12]}"
+    title = meta["title"] or os.path.splitext(os.path.basename(filepath))[0]
+    author = meta["author"] or "Unknown Author"
+    release_date = meta["release_date"] or "N/A"
+    date_added = datetime.now(timezone.utc).isoformat()
+
+    with get_db_connection() as con:
+        exists = con.execute("SELECT asin FROM audiobooks WHERE asin = ?", (key,)).fetchone()
+        if exists is not None:
+            # Re-adopting a previously imported book (embedded-ASIN key) at a new
+            # path: refresh its location without spawning a duplicate row.
+            con.execute(
+                "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, source = 'imported' WHERE asin = ?",
+                (filepath, key),
+            )
+            action = "reconciled"
+        else:
+            con.execute(
+                (
+                    "INSERT INTO audiobooks "
+                    "(asin, author, title, status, series, narrator, runtime_min, release_date, "
+                    "filepath, publisher, language, purchase_date, summary, date_added, source) "
+                    "VALUES (?, ?, ?, 'DOWNLOADED', 'N/A', 'N/A', ?, ?, ?, 'N/A', 'N/A', 'N/A', 'N/A', ?, 'imported')"
+                ),
+                (key, author, title, meta["runtime_min"], release_date, filepath, date_added),
+            )
+            action = "imported"
+        con.commit()
+
+    _extract_cover(filepath, key)
+    log.info(f"IMPORT: {action} '{title}' as {key} from '{filepath}'.")
+    return {"action": action, "key": key, "title": title, "author": author}
+
+
+def adopt_upload(staging_path, original_filename, settings):
+    """
+    Place an already-staged upload into the managed library structure and adopt
+    it. The final name comes from the naming template + the file's probed
+    metadata (the same template downloads use); a name that collides with an
+    existing book gets a key suffix rather than overwriting it. The key chosen
+    here is passed through to adopt_file so the on-disk name and the DB row agree.
+
+    Returns the adopt_file result dict with a "filepath" key added. On success the
+    staging file has been moved into /data; on failure it is left for the caller
+    to clean up.
+    """
+    # Imported here (not at module top) to avoid an import cycle: processing_logic
+    # imports nothing from us, but keeping this local mirrors the codebase's other
+    # lazy cross-module imports and is cheap.
+    from .processing_logic import _sanitize_filename, build_base_output_path
+
+    meta = _probe_metadata(staging_path)
+    key = meta["embedded_asin"] or f"IMPORT-{uuid.uuid4().hex[:12]}"
+    title = meta["title"] or os.path.splitext(os.path.basename(original_filename))[0] or "Unknown Title"
+    author = meta["author"] or "Unknown Author"
+
+    final_path = build_base_output_path(settings, key, author, title, "N/A", "N/A")
+    # Collision-safe: never overwrite an existing file (which may belong to
+    # another book) — suffix the key, matching the download/rename convention.
+    if os.path.exists(final_path):
+        root, ext = os.path.splitext(final_path)
+        final_path = f"{root}_{_sanitize_filename(key)}{ext}"
+
+    os.makedirs(os.path.dirname(final_path), exist_ok=True)
+    shutil.move(staging_path, final_path)
+
+    result = adopt_file(final_path, key=key)
+    result["filepath"] = final_path
+    return result
+
+
+def scan_data_dir_for_untracked():
+    """
+    Walk DATA_DIR and return the list of importable file paths that are NOT
+    already tracked by a DB row's `filepath`. The staging directory is skipped.
+    Cheap (no probing) — the scan job probes each returned path via adopt_file.
+    """
+    with get_db_connection() as con:
+        tracked = {
+            os.path.abspath(row["filepath"])
+            for row in con.execute("SELECT filepath FROM audiobooks WHERE filepath IS NOT NULL AND filepath != ''")
+            if row["filepath"]
+        }
+
+    staging = import_staging_dir()
+    untracked = []
+    for root, _dirs, files in os.walk(DATA_DIR):
+        if os.path.abspath(root).startswith(os.path.abspath(staging)):
+            continue
+        for name in files:
+            if name.lower().endswith(IMPORTABLE_EXTS):
+                path = os.path.abspath(os.path.join(root, name))
+                if path not in tracked:
+                    untracked.append(path)
+    return untracked

@@ -46,10 +46,13 @@ DB_SCHEMA["is_duplicate"]="is_duplicate INTEGER DEFAULT 0"
 DB_SCHEMA["custom_title"]="custom_title TEXT"
 DB_SCHEMA["custom_author"]="custom_author TEXT"
 DB_SCHEMA["custom_cover"]="custom_cover INTEGER DEFAULT 0"
+# Provenance marker: 'audible' for sync/purchased books (the default keeps every
+# existing row correct), 'imported' for files adopted via the manual-import feature.
+DB_SCHEMA["source"]="source TEXT DEFAULT 'audible'"
 
 # Bash associative arrays have no defined iteration order, so CREATE TABLE
 # and the rebuild migration below use this explicit column order.
-DB_COLUMN_ORDER=(asin author title status series narrator runtime_min release_date filepath error_message publisher language purchase_date summary is_summary_full date_added retry_count is_duplicate custom_title custom_author custom_cover)
+DB_COLUMN_ORDER=(asin author title status series narrator runtime_min release_date filepath error_message publisher language purchase_date summary is_summary_full date_added retry_count is_duplicate custom_title custom_author custom_cover source)
 
 # Build the full column-definition list plus the column/select lists used
 # by the rebuild migration. Columns with a DEFAULT get a COALESCE so rows
@@ -62,6 +65,7 @@ for col_name in "${DB_COLUMN_ORDER[@]}"; do
     copy_cols+="$col_name, "
     case "$col_name" in
         is_summary_full | retry_count | is_duplicate | custom_cover) copy_selects+="COALESCE($col_name, 0), " ;;
+        source) copy_selects+="COALESCE($col_name, 'audible'), " ;;
         *) copy_selects+="$col_name, " ;;
     esac
 done
