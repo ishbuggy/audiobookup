@@ -5,6 +5,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 import threading
 from collections import deque
 from datetime import datetime
@@ -760,6 +761,79 @@ def update_book_metadata(asin):
         native_author=book["native_author"],
         custom_title=book.get("custom_title"),
         custom_author=book.get("custom_author"),
+    )
+
+
+ALLOWED_COVER_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+MAX_COVER_BYTES = 15 * 1024 * 1024
+
+
+@app.route("/api/book/<string:asin>/cover", methods=["POST"])
+@login_required
+def upload_book_cover(asin):
+    """
+    Replace a book's cover with an uploaded image. The upload is normalized to
+    JPEG for both the full cover and the 200x200 thumbnail (same layout the sync
+    uses), and custom_cover is set so the sync won't re-fetch the Audible cover.
+    """
+    con = get_db_connection()
+    try:
+        book_exists = con.execute("SELECT asin FROM audiobooks WHERE asin = ?", (asin,)).fetchone() is not None
+    finally:
+        con.close()
+    if not book_exists:
+        return jsonify(error="Book not found."), 404
+
+    upload = request.files.get("cover")
+    if upload is None or not upload.filename:
+        return jsonify(error="No cover file uploaded."), 400
+
+    ext = os.path.splitext(upload.filename)[1].lower()
+    if ext not in ALLOWED_COVER_EXTS:
+        return jsonify(error="Unsupported image type."), 400
+
+    # Read with a hard size cap (reading one extra byte detects an oversize file).
+    data = upload.read(MAX_COVER_BYTES + 1)
+    if len(data) > MAX_COVER_BYTES:
+        return jsonify(error="Cover image is too large (max 15 MB)."), 413
+    if not data:
+        return jsonify(error="Uploaded cover is empty."), 400
+
+    os.makedirs(COVERS_DIR, exist_ok=True)
+    original_path = os.path.join(COVERS_DIR, f"{asin}_original.jpg")
+    thumb_path = os.path.join(COVERS_DIR, f"{asin}_thumb.jpg")
+
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+    try:
+        # ffmpeg both validates the image (non-images fail) and normalizes to JPEG.
+        for out_path, vf in ((original_path, None), (thumb_path, "scale=200:200")):
+            command = ["ffmpeg", "-y", "-i", tmp_path]
+            if vf:
+                command += ["-vf", vf]
+            command.append(out_path)
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode != 0:
+                log.warning(f"Cover conversion failed for {asin}: {result.stderr}")
+                return jsonify(error="Could not process the uploaded image."), 400
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+    con = get_db_connection()
+    try:
+        con.execute("UPDATE audiobooks SET custom_cover = 1 WHERE asin = ?", (asin,))
+        con.commit()
+    finally:
+        con.close()
+
+    return jsonify(
+        success=True,
+        cover_url_original=f"/covers/{asin}_original.jpg",
+        cover_url_thumb=f"/covers/{asin}_thumb.jpg",
     )
 
 

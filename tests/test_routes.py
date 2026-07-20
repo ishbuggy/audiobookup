@@ -3,6 +3,8 @@
 import json
 import os
 import sqlite3
+from io import BytesIO
+from unittest import mock
 from urllib.parse import quote
 
 import pytest
@@ -136,7 +138,7 @@ def book_db(tmp_path, monkeypatch):
     con.execute(
         "CREATE TABLE audiobooks ("
         "asin TEXT PRIMARY KEY, title TEXT, author TEXT, status TEXT, "
-        "custom_title TEXT, custom_author TEXT, "
+        "custom_title TEXT, custom_author TEXT, custom_cover INTEGER DEFAULT 0, "
         "is_summary_full INTEGER DEFAULT 0, is_duplicate INTEGER DEFAULT 0)"
     )
     con.execute(
@@ -209,4 +211,63 @@ class TestUpdateBookMetadata:
     def test_no_editable_fields_returns_400(self, client, completed_setup, book_db):
         _login_session(client)
         response = client.post("/api/book/B001/update", json={"foo": "bar"})
+        assert response.status_code == 400
+
+
+class TestUploadBookCover:
+    """Phase 5.4: POST /api/book/<asin>/cover replaces the cover, login- and
+    Origin-gated, normalizing the upload to JPEG and marking custom_cover."""
+
+    def _upload(self, client, asin="B001", filename="cover.jpg", content=b"\xff\xd8fakejpeg", **kwargs):
+        return client.post(
+            f"/api/book/{asin}/cover",
+            data={"cover": (BytesIO(content), filename)},
+            content_type="multipart/form-data",
+            **kwargs,
+        )
+
+    def _mock_ffmpeg(self, monkeypatch, returncode):
+        result = mock.MagicMock(returncode=returncode, stderr="err")
+        monkeypatch.setattr("audible_downloader.routes.subprocess.run", lambda *a, **k: result)
+
+    def test_requires_login(self, client, completed_setup, book_db):
+        response = self._upload(client)
+        assert response.status_code == 302
+
+    def test_unknown_book_returns_404(self, client, completed_setup, book_db):
+        _login_session(client)
+        response = self._upload(client, asin="NOPE")
+        assert response.status_code == 404
+
+    def test_missing_file_returns_400(self, client, completed_setup, book_db):
+        _login_session(client)
+        response = client.post("/api/book/B001/cover", data={}, content_type="multipart/form-data")
+        assert response.status_code == 400
+
+    def test_unsupported_extension_returns_400(self, client, completed_setup, book_db):
+        _login_session(client)
+        response = self._upload(client, filename="cover.txt")
+        assert response.status_code == 400
+
+    def test_oversize_returns_413(self, client, completed_setup, book_db, monkeypatch):
+        _login_session(client)
+        monkeypatch.setattr("audible_downloader.routes.MAX_COVER_BYTES", 10)
+        response = self._upload(client, content=b"x" * 50)
+        assert response.status_code == 413
+
+    def test_successful_upload_sets_custom_cover(self, client, completed_setup, book_db, monkeypatch):
+        _login_session(client)
+        self._mock_ffmpeg(monkeypatch, returncode=0)
+        response = self._upload(client)
+        assert response.status_code == 200
+        assert response.get_json()["cover_url_thumb"] == "/covers/B001_thumb.jpg"
+        con = sqlite3.connect(str(book_db))
+        flag = con.execute("SELECT custom_cover FROM audiobooks WHERE asin = 'B001'").fetchone()[0]
+        con.close()
+        assert flag == 1
+
+    def test_ffmpeg_failure_returns_400(self, client, completed_setup, book_db, monkeypatch):
+        _login_session(client)
+        self._mock_ffmpeg(monkeypatch, returncode=1)
+        response = self._upload(client)
         assert response.status_code == 400
