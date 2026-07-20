@@ -10,6 +10,7 @@ from threading import Event, Lock, Thread
 # Import necessary components from our other modules
 from . import announcer, app  # Needed for the app_context
 from .db import get_books_for_auto_job, get_db_connection
+from .import_logic import adopt_file, scan_data_dir_for_untracked
 from .logger import log
 from .process_registry import process_registry
 from .processing_logic import BookProcessor
@@ -153,6 +154,83 @@ def verify_worker(job_id, app_context, stop_event):
             # Send standard finish event so UI resets — with the real outcome,
             # not an unconditional COMPLETED.
             payload = {"job_id": job_id, "status": final_status, "job_type": "VERIFY"}
+            announcer.announce(f"event: job_finished\ndata: {json.dumps(payload)}\n\n")
+            with job_lock:
+                if active_job["job_id"] == job_id:
+                    active_job["job_id"] = None
+                    active_job["thread"] = None
+                    active_job["stop_event"] = None
+
+
+def import_worker(job_id, app_context, stop_event):
+    """
+    Scan-in-place import (Phase 6): walk /data for importable files the library
+    doesn't yet track and adopt each via the shared adoption core. Progress flows
+    over SSE using the same 'import-job' pseudo-ASIN the UI tracks; the job checks
+    the cancellation event between files so a cancel stops promptly.
+    """
+    with app_context:
+        final_status = "FAILED"
+        try:
+            with get_db_connection() as con:
+                con.execute("UPDATE jobs SET status = 'RUNNING' WHERE job_id = ?", (job_id,))
+                con.commit()
+
+            def announce(status_text, progress):
+                payload = {"asin": "import-job", "status_text": status_text, "progress": progress}
+                announcer.announce(f"event: job_update\ndata: {json.dumps(payload)}\n\n")
+
+            announce("Scanning /data for untracked files...", 5)
+            candidates = scan_data_dir_for_untracked()
+            total = len(candidates)
+            log.info(f"WORKER ({job_id}): IMPORT scan found {total} untracked file(s).")
+
+            imported, reconciled, skipped = 0, 0, 0
+            cancelled = False
+            for index, path in enumerate(candidates, start=1):
+                if stop_event.is_set():
+                    log.info(f"WORKER ({job_id}): IMPORT job cancelled.")
+                    cancelled = True
+                    break
+                progress = 5 + int((index / total) * 90) if total else 100
+                announce(f"Importing {index}/{total}...", progress)
+                try:
+                    result = adopt_file(path)
+                    action = result.get("action")
+                    if action == "imported":
+                        imported += 1
+                    elif action == "reconciled":
+                        reconciled += 1
+                    else:
+                        skipped += 1
+                except Exception as e:
+                    log.error(f"WORKER ({job_id}): Failed to adopt '{path}': {e}", exc_info=True)
+                    skipped += 1
+
+            final_status = "CANCELLED" if cancelled else "COMPLETED"
+            announce(
+                f"Done: {imported} imported, {reconciled} reconciled, {skipped} skipped.",
+                100,
+            )
+            log.info(
+                f"WORKER ({job_id}): IMPORT complete. imported={imported} reconciled={reconciled} skipped={skipped}."
+            )
+
+            end_time_iso = datetime.now(timezone.utc).isoformat()
+            with get_db_connection() as con:
+                con.execute(
+                    "UPDATE jobs SET status = ?, end_time = ? WHERE job_id = ?", (final_status, end_time_iso, job_id)
+                )
+                con.commit()
+
+        except Exception as e:
+            log.error(f"WORKER: Import job {job_id} failed: {e}", exc_info=True)
+            end_time_iso = datetime.now(timezone.utc).isoformat()
+            with get_db_connection() as con:
+                con.execute("UPDATE jobs SET status = 'FAILED', end_time = ? WHERE job_id = ?", (end_time_iso, job_id))
+                con.commit()
+        finally:
+            payload = {"job_id": job_id, "status": final_status, "job_type": "IMPORT"}
             announcer.announce(f"event: job_finished\ndata: {json.dumps(payload)}\n\n")
             with job_lock:
                 if active_job["job_id"] == job_id:
@@ -318,7 +396,7 @@ def start_new_job(job_type, asins=None, job_params=None):
             return False, {"error": f"A job (ID: {active_job['job_id']}) is already in progress."}
 
         # Validate job type
-        if job_type not in ["DOWNLOAD", "SYNC", "VERIFY"]:
+        if job_type not in ["DOWNLOAD", "SYNC", "VERIFY", "IMPORT"]:
             return False, {"error": f"Invalid job type specified: {job_type}"}
 
         con = get_db_connection()
@@ -381,6 +459,11 @@ def start_new_job(job_type, asins=None, job_params=None):
             elif job_type == "VERIFY":
                 worker_target = verify_worker
                 worker_args = (job_id, app.app_context(), stop_event)
+
+            elif job_type == "IMPORT":
+                worker_target = import_worker
+                worker_args = (job_id, app.app_context(), stop_event)
+                # No job_items: the scan discovers its own file list at runtime.
 
             con.commit()
 
