@@ -41,6 +41,8 @@ BOOK_ROW = {
     "title": "Dracula",
     "narrator": "Simon Vance",
     "publisher": "Audible Studios",
+    "custom_title": None,
+    "custom_author": None,
 }
 
 
@@ -52,6 +54,7 @@ def _resolve_output_path(
     tracked_row=None,
     embedded_asin=None,
     truncate_subtitle=False,
+    apply_custom_to_filenames=False,
 ):
     """
     Drives BookProcessor._prepare_and_spawn_encode_tasks just far enough to
@@ -79,7 +82,13 @@ def _resolve_output_path(
         mock.patch.object(
             processing_logic,
             "load_settings",
-            return_value={"naming": {"template": template, "truncate_subtitle": truncate_subtitle}},
+            return_value={
+                "naming": {
+                    "template": template,
+                    "truncate_subtitle": truncate_subtitle,
+                    "apply_custom_to_filenames": apply_custom_to_filenames,
+                }
+            },
         ),
         mock.patch.object(processing_logic, "get_db_connection", return_value=con),
         mock.patch.object(processing_logic, "prepare_book_assets", return_value=(None, None)),
@@ -143,7 +152,112 @@ class TestSubtitleTruncation:
         assert path == "/data/999_ The Extraordinary Young Women.m4b"
 
 
-class TestCollisionHandling:
+class TestApplyCustomToFilenames:
+    """Phase 5.5: custom title/author drive the filename only when opted in."""
+
+    def test_custom_used_when_enabled(self):
+        row = dict(BOOK_ROW, custom_title="Dracula (Curry)", custom_author="B. Stoker")
+        path = _resolve_output_path(template="{author}/{title}", book_row=row, apply_custom_to_filenames=True)
+        assert path == "/data/B. Stoker/Dracula (Curry).m4b"
+
+    def test_native_used_when_disabled(self):
+        row = dict(BOOK_ROW, custom_title="Dracula (Curry)", custom_author="B. Stoker")
+        path = _resolve_output_path(template="{author}/{title}", book_row=row, apply_custom_to_filenames=False)
+        assert path == "/data/Bram Stoker/Dracula.m4b"
+
+    def test_partial_custom_falls_back_per_field(self):
+        row = dict(BOOK_ROW, custom_title=None, custom_author="B. Stoker")
+        path = _resolve_output_path(template="{author}/{title}", book_row=row, apply_custom_to_filenames=True)
+        assert path == "/data/B. Stoker/Dracula.m4b"
+
+
+class TestRenameToMatchMetadata:
+    """Phase 5.5: an edit renames the on-disk file only when opted in, and never
+    overwrites another book."""
+
+    CURRENT = "/data/Bram Stoker/Dracula/Bram Stoker - Dracula.m4b"
+
+    def _row(self, **over):
+        row = {
+            "author": "Bram Stoker",
+            "title": "Dracula",
+            "narrator": "N",
+            "publisher": "P",
+            "custom_title": None,
+            "custom_author": None,
+            "filepath": self.CURRENT,
+            "status": "DOWNLOADED",
+        }
+        row.update(over)
+        return row
+
+    def _run(self, *, apply=True, row=None, target="/data/New/New.m4b", target_exists=False, target_owner=None):
+        row = row if row is not None else self._row()
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+
+        def execute(query, params=None):
+            cursor = mock.MagicMock()
+            if "WHERE filepath" in query:
+                cursor.fetchone.return_value = {"asin": target_owner} if target_owner else None
+            else:
+                cursor.fetchone.return_value = row
+            return cursor
+
+        con.execute.side_effect = execute
+
+        def exists(path):
+            if path == self.CURRENT:
+                return True
+            if path == target:
+                return target_exists
+            return False
+
+        with (
+            mock.patch.object(
+                processing_logic, "load_settings", return_value={"naming": {"apply_custom_to_filenames": apply}}
+            ),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "build_base_output_path", return_value=target),
+            mock.patch("os.path.exists", side_effect=exists),
+            mock.patch("os.makedirs"),
+            mock.patch.object(processing_logic.shutil, "move") as move,
+            mock.patch.object(processing_logic, "_cleanup_empty_dirs"),
+        ):
+            result = processing_logic.rename_book_to_match_metadata("B0OURS")
+        return result, move
+
+    def test_disabled_setting_is_noop(self):
+        result, move = self._run(apply=False)
+        assert result is None
+        move.assert_not_called()
+
+    def test_not_downloaded_is_noop(self):
+        result, move = self._run(row=self._row(status="NEW"))
+        assert result is None
+        move.assert_not_called()
+
+    def test_missing_filepath_is_noop(self):
+        result, move = self._run(row=self._row(filepath=None))
+        assert result is None
+        move.assert_not_called()
+
+    def test_unchanged_name_is_noop(self):
+        # build_base_output_path returns the current path -> nothing to do.
+        result, move = self._run(target=self.CURRENT)
+        assert result is None
+        move.assert_not_called()
+
+    def test_happy_path_moves_and_returns_target(self):
+        result, move = self._run(target="/data/New/New.m4b")
+        assert result == "/data/New/New.m4b"
+        move.assert_any_call(self.CURRENT, "/data/New/New.m4b")
+
+    def test_collision_with_other_book_appends_asin(self):
+        result, move = self._run(target="/data/New/New.m4b", target_exists=True, target_owner="B0OTHER")
+        assert result == "/data/New/New_B0OURS.m4b"
+        move.assert_any_call(self.CURRENT, "/data/New/New_B0OURS.m4b")
+
     """H5 regression: an existing file at the target path must only be
     overwritten when it verifiably belongs to the same book."""
 

@@ -31,6 +31,11 @@ DEFAULT_SETTINGS = {
         # {title} used in filenames (e.g. "999: The Extraordinary..." -> "999").
         # Affects filenames only; embedded metadata keeps the full title.
         "truncate_subtitle": False,
+        # When true, custom title/author overrides also drive the on-disk
+        # file/folder names: new downloads are named from them, and editing a
+        # book's metadata renames its existing file. Default off (overrides
+        # affect only displayed metadata and embedded tags).
+        "apply_custom_to_filenames": False,
     },
     "conversion": {
         "quality": "High",

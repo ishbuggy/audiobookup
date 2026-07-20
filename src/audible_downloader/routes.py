@@ -752,6 +752,13 @@ def update_book_metadata(asin):
     finally:
         con.close()
 
+    # When the user has opted in, propagate the edit to the on-disk filename.
+    # Imported lazily to avoid a module-load import cycle. Best-effort: it
+    # returns the new path or None and never raises.
+    from audible_downloader.processing_logic import rename_book_to_match_metadata
+
+    renamed_to = rename_book_to_match_metadata(asin)
+
     book = apply_metadata_overrides(dict(row))
     return jsonify(
         success=True,
@@ -761,6 +768,7 @@ def update_book_metadata(asin):
         native_author=book["native_author"],
         custom_title=book.get("custom_title"),
         custom_author=book.get("custom_author"),
+        renamed_to=renamed_to,
     )
 
 

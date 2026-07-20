@@ -94,6 +94,104 @@ def _strip_subtitle(title):
     return main or title
 
 
+def build_base_output_path(settings, asin, author, title, narrator, publisher):
+    """
+    Compute the base output path (`/data/.../Name.m4b`) for a book from the
+    naming template and settings, applying optional subtitle trimming and
+    filename sanitization. Collision handling is layered on top by the caller.
+    The author/title passed in are already the effective values (native or the
+    custom override) — this function does not decide which to use.
+    """
+    template = settings.get("naming", {}).get("template", "{author}/{title}/{author} - {title}")
+
+    # Trim a long subtitle before sanitization (which rewrites the ':' separator).
+    raw_title = title or "Unknown Title"
+    if settings.get("naming", {}).get("truncate_subtitle", False):
+        raw_title = _strip_subtitle(raw_title)
+
+    relative_path = (
+        template.replace("{author}", _sanitize_filename(author or "Unknown Author"))
+        .replace("{title}", _sanitize_filename(raw_title))
+        .replace("{narrator}", _sanitize_filename(narrator or "Unknown Narrator"))
+        .replace("{publisher}", _sanitize_filename(publisher or "Unknown Publisher"))
+        .replace("{asin}", _sanitize_filename(asin))
+    )
+    return os.path.join("/data", f"{relative_path}.m4b")
+
+
+def _cleanup_empty_dirs(directory):
+    """Remove `directory` and any now-empty parents up to (not including)
+    /data. Best-effort: stops at the first non-empty or unremovable dir."""
+    data_root = os.path.abspath("/data")
+    directory = os.path.abspath(directory)
+    while directory.startswith(data_root + os.sep) and directory != data_root:
+        try:
+            os.rmdir(directory)  # only succeeds when empty
+        except OSError:
+            break
+        directory = os.path.dirname(directory)
+
+
+def rename_book_to_match_metadata(asin):
+    """
+    When the apply_custom_to_filenames setting is on, rename a downloaded book's
+    file (and its companion PDF) to match its current effective metadata.
+
+    Returns the new path if a rename happened, else None. Collision-safe (never
+    overwrites a different book — it appends the ASIN instead), and best-effort:
+    any problem is logged rather than raised, so the metadata edit still stands.
+    """
+    settings = load_settings()
+    if not settings.get("naming", {}).get("apply_custom_to_filenames", False):
+        return None
+
+    with get_db_connection() as con:
+        row = con.execute(
+            "SELECT author, title, narrator, publisher, custom_title, custom_author, filepath, status "
+            "FROM audiobooks WHERE asin = ?",
+            (asin,),
+        ).fetchone()
+    if not row or row["status"] != "DOWNLOADED" or not row["filepath"]:
+        return None
+
+    current_path = row["filepath"]
+    if not os.path.exists(current_path):
+        log.warning(f"RENAME ({asin}): Tracked file '{current_path}' is missing; skipping rename.")
+        return None
+
+    author = row["custom_author"] or row["author"] or "Unknown Author"
+    title = row["custom_title"] or row["title"] or "Unknown Title"
+    target = build_base_output_path(settings, asin, author, title, row["narrator"], row["publisher"])
+
+    if os.path.abspath(target) == os.path.abspath(current_path):
+        return None  # Name already matches.
+
+    # Collision-safe: if the target is taken by a different book, suffix the ASIN.
+    if os.path.exists(target):
+        with get_db_connection() as con:
+            other = con.execute("SELECT asin FROM audiobooks WHERE filepath = ?", (target,)).fetchone()
+        if not other or other["asin"] != asin:
+            root, ext = os.path.splitext(target)
+            target = f"{root}_{_sanitize_filename(asin)}{ext}"
+
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.move(current_path, target)
+        # Move a companion PDF alongside the audiobook, if present.
+        old_pdf = f"{os.path.splitext(current_path)[0]}.pdf"
+        if os.path.exists(old_pdf):
+            shutil.move(old_pdf, f"{os.path.splitext(target)[0]}.pdf")
+        with get_db_connection() as con:
+            con.execute("UPDATE audiobooks SET filepath = ? WHERE asin = ?", (target, asin))
+            con.commit()
+        log.info(f"RENAME ({asin}): Moved file to '{target}'.")
+        _cleanup_empty_dirs(os.path.dirname(current_path))
+        return target
+    except OSError as e:
+        log.warning(f"RENAME ({asin}): Could not rename file(s): {e}")
+        return None
+
+
 class BookProcessor:
     """
     Manages the state and task submission for a single book's conversion process.
@@ -290,46 +388,34 @@ class BookProcessor:
         # --- 1. Fetch book details and determine final path ---
         try:
             settings = load_settings()
-            # Default template now supports more options, though we default to the standard one.
-            template = settings.get("naming", {}).get("template", "{author}/{title}/{author} - {title}")
 
             with get_db_connection() as con:
-                # Fetch additional metadata columns for the expanded naming template
+                # Fetch metadata columns for the naming template plus the custom overrides.
                 book_details = con.execute(
-                    "SELECT author, title, narrator, publisher FROM audiobooks WHERE asin = ?", (self.asin,)
+                    "SELECT author, title, narrator, publisher, custom_title, custom_author "
+                    "FROM audiobooks WHERE asin = ?",
+                    (self.asin,),
                 ).fetchone()
 
             if not book_details:
                 raise ValueError(f"Could not find ASIN {self.asin} in the database.")
 
-            # Optionally trim a long subtitle from the title used in filenames
-            # (opt-in; embedded metadata keeps the full title). Runs before
-            # sanitization because that step rewrites the ':' separator.
-            raw_title = book_details["title"] or "Unknown Title"
-            if settings.get("naming", {}).get("truncate_subtitle", False):
-                raw_title = _strip_subtitle(raw_title)
+            # The custom title/author drive the filename only when the user has
+            # opted in; otherwise names come from the native Audible values.
+            author = book_details["author"] or "Unknown Author"
+            title = book_details["title"] or "Unknown Title"
+            if settings.get("naming", {}).get("apply_custom_to_filenames", False):
+                author = book_details["custom_author"] or author
+                title = book_details["custom_title"] or title
 
-            # Sanitize all potential filename components
-            safe_author = _sanitize_filename(book_details["author"] or "Unknown Author")
-            safe_title = _sanitize_filename(raw_title)
-            safe_narrator = _sanitize_filename(book_details["narrator"] or "Unknown Narrator")
-            safe_publisher = _sanitize_filename(book_details["publisher"] or "Unknown Publisher")
-            safe_asin = _sanitize_filename(self.asin)
-
-            # Apply expanded template replacements
-            final_relative_path = (
-                template.replace("{author}", safe_author)
-                .replace("{title}", safe_title)
-                .replace("{narrator}", safe_narrator)
-                .replace("{publisher}", safe_publisher)
-                .replace("{asin}", safe_asin)
+            base_output_path = build_base_output_path(
+                settings, self.asin, author, title, book_details["narrator"], book_details["publisher"]
             )
 
             # Collision Detection Logic ("The Dracula Problem"). Reserve a
             # unique output path, guarding against both files already on disk
             # and other in-flight books racing for the same name.
-            base_output_path = os.path.join("/data", f"{final_relative_path}.m4b")
-            self.final_output_path = self._reserve_output_path(base_output_path, safe_asin)
+            self.final_output_path = self._reserve_output_path(base_output_path, _sanitize_filename(self.asin))
 
             os.makedirs(os.path.dirname(self.final_output_path), exist_ok=True)
         except Exception as e:
