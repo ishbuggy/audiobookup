@@ -28,21 +28,36 @@ progress_lock = Lock()
 
 def _summarize_subprocess_error(exc, fallback):
     """
-    Build a concise, human-readable reason from a failed subprocess. audible-cli
-    and ffmpeg put the useful message on the last line(s) of stderr, but the bare
-    CalledProcessError string only says "returned non-zero exit status N" — which
-    is all the user would otherwise see (e.g. for a title that is no longer
-    available). Returns the last few non-empty stderr lines when available, else
-    `fallback`.
+    Build a concise, human-readable reason from a failed subprocess. The bare
+    CalledProcessError string only says "returned non-zero exit status N" — all
+    the user would otherwise see. The useful message lives in the output streams,
+    but *which* stream varies: audible-cli prints user-facing errors
+    ("error: Asin ... not found in library.") to stdout, while ffmpeg writes to
+    stderr. So collect candidate lines from both, drop tqdm progress bars and the
+    generic "Aborted!" noise, prefer an explicit error line, and otherwise return
+    the last few lines. Falls back to `fallback` when nothing usable is found.
     """
-    stderr = getattr(exc, "stderr", None)
-    if isinstance(stderr, bytes):
-        stderr = stderr.decode("utf-8", errors="replace")
-    if stderr:
-        lines = [line.strip() for line in stderr.splitlines() if line.strip()]
-        if lines:
-            return " | ".join(lines[-3:])
-    return fallback
+    candidates = []
+    for stream in (getattr(exc, "output", None), getattr(exc, "stderr", None)):
+        if isinstance(stream, bytes):
+            stream = stream.decode("utf-8", errors="replace")
+        if not stream:
+            continue
+        # tqdm redraws progress with carriage returns; split those out so the
+        # bar fragments can be filtered instead of masking the real message.
+        for line in stream.replace("\r", "\n").splitlines():
+            line = line.strip()
+            if not line or "%|" in line or line == "Aborted!":
+                continue
+            candidates.append(line)
+
+    if not candidates:
+        return fallback
+    for line in candidates:
+        lowered = line.lower()
+        if lowered.startswith("error") or "not found" in lowered or "not available" in lowered:
+            return line
+    return " | ".join(candidates[-3:])
 
 
 def _yield_progress(asin, status_text, progress, job_id=None):
@@ -144,7 +159,13 @@ def prepare_book_assets(asin, job_id, temp_dir):
                 if process.returncode == -15:
                     log.info(f"PREPARE ({asin}): Download cancelled.")
                     return None, None
-                raise subprocess.CalledProcessError(process.returncode, download_command, stderr="".join(stderr_tail))
+                # audible-cli writes its user-facing error to stdout (e.g.
+                # "error: Asin ... not found in library."), which we never read
+                # for progress — grab it now so the failure can be explained.
+                stdout_text = process.stdout.read() if process.stdout else ""
+                raise subprocess.CalledProcessError(
+                    process.returncode, download_command, output=stdout_text, stderr="".join(stderr_tail)
+                )
 
             process_registry.unregister(job_id, process)
             log.info(f"PREPARE ({asin}): Download finished.")
