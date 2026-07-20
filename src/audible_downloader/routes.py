@@ -9,7 +9,7 @@ import tempfile
 import threading
 import uuid
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 from flask import (  # type: ignore
@@ -582,6 +582,67 @@ def cancel_job():
         return jsonify(result)
     else:
         return jsonify(result), 404
+
+
+# Finished job states — the only rows /api/jobs/clear may delete. RUNNING and
+# QUEUED (an active or pending job) are deliberately absent, so the active job
+# can never be removed out from under the worker.
+_CLEARABLE_JOB_STATUSES = ("COMPLETED", "FAILED", "CANCELLED")
+
+
+@app.route("/api/jobs/clear", methods=["POST"])
+@login_required
+def clear_jobs():
+    """
+    Delete finished jobs (and their job_items) from history (FR10 backend).
+
+    Login + Origin gated. Only COMPLETED/FAILED/CANCELLED jobs are eligible — a
+    RUNNING or QUEUED job is never touched. Modes:
+      {"mode": "all"}                      -> every finished job (default)
+      {"mode": "older_than", "days": N}    -> finished jobs whose end_time
+                                              (or start_time, if unset) is older
+                                              than N days.
+    """
+    data = request.get_json(silent=True) or {}
+    mode = data.get("mode", "all")
+    status_placeholders = ",".join("?" for _ in _CLEARABLE_JOB_STATUSES)
+
+    if mode == "all":
+        where = f"status IN ({status_placeholders})"
+        params = list(_CLEARABLE_JOB_STATUSES)
+    elif mode == "older_than":
+        days = data.get("days")
+        if not isinstance(days, int) or isinstance(days, bool) or days <= 0:
+            return jsonify(error="'days' must be a positive integer for older_than mode."), 400
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        # COALESCE so a finished job that somehow lacks an end_time still gets
+        # aged out by its start_time rather than being immortal.
+        where = f"status IN ({status_placeholders}) AND COALESCE(end_time, start_time) < ?"
+        params = [*_CLEARABLE_JOB_STATUSES, cutoff]
+    else:
+        return jsonify(error="Invalid mode. Use 'all' or 'older_than'."), 400
+
+    con = get_db_connection()
+    try:
+        cur = con.cursor()
+        job_ids = [row["job_id"] for row in cur.execute(f"SELECT job_id FROM jobs WHERE {where}", params).fetchall()]
+        if not job_ids:
+            return jsonify(success=True, deleted_jobs=0, deleted_items=0)
+
+        id_placeholders = ",".join("?" for _ in job_ids)
+        # Remove child job_items first so no orphan rows are left behind.
+        deleted_items = cur.execute(f"DELETE FROM job_items WHERE job_id IN ({id_placeholders})", job_ids).rowcount
+        deleted_jobs = cur.execute(f"DELETE FROM jobs WHERE job_id IN ({id_placeholders})", job_ids).rowcount
+        con.commit()
+    except sqlite3.Error as e:
+        con.rollback()
+        log.error(f"Database error clearing jobs: {e}", exc_info=True)
+        return jsonify(error="Failed to clear jobs."), 500
+    finally:
+        con.close()
+
+    log.info(f"JOBS: Cleared {deleted_jobs} job(s) and {deleted_items} item(s) (mode={mode}).")
+    return jsonify(success=True, deleted_jobs=deleted_jobs, deleted_items=deleted_items)
 
 
 @app.route("/api/clear_image_cache", methods=["POST"])

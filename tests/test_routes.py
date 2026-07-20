@@ -391,3 +391,124 @@ class TestImportUpload:
         staging = import_env / ".import_staging"
         leftovers = list(staging.iterdir()) if staging.exists() else []
         assert leftovers == []
+
+
+@pytest.fixture
+def jobs_db(tmp_path, monkeypatch):
+    """A temp library.db with jobs/job_items rows spanning active and finished
+    states at known ages, for exercising POST /api/jobs/clear."""
+    from datetime import datetime, timedelta, timezone
+
+    from audible_downloader import db as db_module
+
+    def ago(days):
+        return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    db_path = tmp_path / "library.db"
+    con = sqlite3.connect(db_path)
+    con.execute(
+        "CREATE TABLE jobs (job_id INTEGER PRIMARY KEY AUTOINCREMENT, job_type TEXT, status TEXT, "
+        "start_time TEXT, end_time TEXT, job_params TEXT)"
+    )
+    con.execute(
+        "CREATE TABLE job_items (item_id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER, asin TEXT, "
+        "status TEXT, log TEXT)"
+    )
+    rows = [
+        (1, "DOWNLOAD", "RUNNING", ago(0), None),  # active
+        (2, "SYNC", "QUEUED", ago(0), None),  # active/pending
+        (3, "DOWNLOAD", "COMPLETED", ago(61), ago(60)),  # old finished
+        (4, "DOWNLOAD", "FAILED", ago(2), ago(1)),  # recent finished
+        (5, "VERIFY", "CANCELLED", ago(101), ago(100)),  # old finished
+    ]
+    con.executemany("INSERT INTO jobs (job_id, job_type, status, start_time, end_time) VALUES (?, ?, ?, ?, ?)", rows)
+    # Items attached to the active job (1) and two finished jobs (3, 4).
+    con.executemany(
+        "INSERT INTO job_items (job_id, asin, status) VALUES (?, ?, ?)",
+        [(1, "B001", "PROCESSING"), (3, "B003", "COMPLETED"), (4, "B004", "FAILED")],
+    )
+    con.commit()
+    con.close()
+    monkeypatch.setattr(db_module, "DB_FILE", str(db_path))
+    return db_path
+
+
+def _job_ids(db):
+    con = sqlite3.connect(db)
+    ids = {r[0] for r in con.execute("SELECT job_id FROM jobs")}
+    con.close()
+    return ids
+
+
+def _item_job_ids(db):
+    con = sqlite3.connect(db)
+    ids = {r[0] for r in con.execute("SELECT job_id FROM job_items")}
+    con.close()
+    return ids
+
+
+class TestClearJobs:
+    """Phase 7 (FR10): POST /api/jobs/clear removes finished jobs and their
+    items, login- and Origin-gated, never touching an active job."""
+
+    def test_requires_login(self, client, completed_setup, jobs_db):
+        response = client.post("/api/jobs/clear", json={"mode": "all"})
+        assert response.status_code == 302
+
+    def test_cross_origin_is_blocked(self, client, completed_setup, jobs_db):
+        _login_session(client)
+        response = client.post("/api/jobs/clear", json={"mode": "all"}, headers={"Origin": "https://evil.example"})
+        assert response.status_code == 403
+
+    def test_mode_all_deletes_finished_keeps_active(self, client, completed_setup, jobs_db):
+        _login_session(client)
+        response = client.post("/api/jobs/clear", json={"mode": "all"})
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["deleted_jobs"] == 3  # jobs 3, 4, 5
+        assert data["deleted_items"] == 2  # items on jobs 3, 4 (not the active job 1)
+        assert _job_ids(jobs_db) == {1, 2}  # only the active/queued jobs survive
+        assert _item_job_ids(jobs_db) == {1}  # active job's item is untouched
+
+    def test_default_mode_is_all(self, client, completed_setup, jobs_db):
+        _login_session(client)
+        response = client.post("/api/jobs/clear", json={})
+        assert response.status_code == 200
+        assert _job_ids(jobs_db) == {1, 2}
+
+    def test_older_than_deletes_only_aged_finished(self, client, completed_setup, jobs_db):
+        _login_session(client)
+        response = client.post("/api/jobs/clear", json={"mode": "older_than", "days": 30})
+        assert response.status_code == 200
+        assert response.get_json()["deleted_jobs"] == 2  # jobs 3 (60d) and 5 (100d)
+        # Recent finished job 4 (1d) and both active jobs remain.
+        assert _job_ids(jobs_db) == {1, 2, 4}
+        assert _item_job_ids(jobs_db) == {1, 4}
+
+    def test_never_deletes_running_or_queued(self, client, completed_setup, jobs_db):
+        _login_session(client)
+        # Even with an aggressive age, active jobs must survive.
+        client.post("/api/jobs/clear", json={"mode": "older_than", "days": 1})
+        surviving = _job_ids(jobs_db)
+        assert 1 in surviving and 2 in surviving
+
+    def test_invalid_mode_returns_400(self, client, completed_setup, jobs_db):
+        _login_session(client)
+        response = client.post("/api/jobs/clear", json={"mode": "everything"})
+        assert response.status_code == 400
+        assert _job_ids(jobs_db) == {1, 2, 3, 4, 5}  # nothing deleted
+
+    @pytest.mark.parametrize("days", [0, -5, "30", 1.5, True, None])
+    def test_older_than_requires_positive_int_days(self, client, completed_setup, jobs_db, days):
+        _login_session(client)
+        response = client.post("/api/jobs/clear", json={"mode": "older_than", "days": days})
+        assert response.status_code == 400
+        assert _job_ids(jobs_db) == {1, 2, 3, 4, 5}  # nothing deleted
+
+    def test_clearing_when_nothing_finished_returns_zero(self, client, completed_setup, jobs_db):
+        _login_session(client)
+        client.post("/api/jobs/clear", json={"mode": "all"})  # clear the finished jobs
+        response = client.post("/api/jobs/clear", json={"mode": "all"})  # now none remain
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data == {"success": True, "deleted_jobs": 0, "deleted_items": 0}
