@@ -11,6 +11,7 @@ import json
 import os
 import re
 import subprocess
+from collections import deque
 from threading import Lock
 
 from . import (
@@ -23,6 +24,25 @@ from .settings import load_settings
 
 # A lock to safely track progress across multiple threads, which will still be useful.
 progress_lock = Lock()
+
+
+def _summarize_subprocess_error(exc, fallback):
+    """
+    Build a concise, human-readable reason from a failed subprocess. audible-cli
+    and ffmpeg put the useful message on the last line(s) of stderr, but the bare
+    CalledProcessError string only says "returned non-zero exit status N" — which
+    is all the user would otherwise see (e.g. for a title that is no longer
+    available). Returns the last few non-empty stderr lines when available, else
+    `fallback`.
+    """
+    stderr = getattr(exc, "stderr", None)
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    if stderr:
+        lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+        if lines:
+            return " | ".join(lines[-3:])
+    return fallback
 
 
 def _yield_progress(asin, status_text, progress, job_id=None):
@@ -55,6 +75,11 @@ def prepare_book_assets(asin, job_id, temp_dir):
     Implements:
     1. Download Strategy: AAXC (Fast) -> AAX (Reliable)
     2. Decrypt Strategy: AAC Copy (Fast) -> FLAC (Safe)
+
+    Returns a (context, error) tuple:
+      - success:   (context_dict, None)
+      - failure:   (None, "human-readable reason")  -- surfaced to the UI
+      - cancelled: (None, None)                      -- job was stopped, not an error
     """
     log.info(f"PREPARE ({asin}): Starting asset preparation in {temp_dir}")
     env = os.environ.copy()
@@ -101,7 +126,14 @@ def prepare_book_assets(asin, job_id, temp_dir):
             )
             process_registry.register(job_id, process)
 
+            # Capture stderr while scanning it for progress. audible-cli writes
+            # its error messages here too, but this loop drains the stream to
+            # EOF, so a later process.stderr.read() would come back empty — keep
+            # a bounded tail so a failure can be explained instead of surfacing
+            # as a bare "non-zero exit status".
+            stderr_tail = deque(maxlen=50)
             for line in iter(process.stderr.readline, ""):
+                stderr_tail.append(line)
                 match = re.search(r"(\d+)%", line)
                 if match:
                     download_percent = int(match.group(1))
@@ -111,8 +143,8 @@ def prepare_book_assets(asin, job_id, temp_dir):
             if process.wait() != 0:
                 if process.returncode == -15:
                     log.info(f"PREPARE ({asin}): Download cancelled.")
-                    return None
-                raise subprocess.CalledProcessError(process.returncode, download_command, stderr=process.stderr.read())
+                    return None, None
+                raise subprocess.CalledProcessError(process.returncode, download_command, stderr="".join(stderr_tail))
 
             process_registry.unregister(job_id, process)
             log.info(f"PREPARE ({asin}): Download finished.")
@@ -205,7 +237,7 @@ def prepare_book_assets(asin, job_id, temp_dir):
 
                     if d_proc.returncode != 0:
                         if d_proc.returncode == -15:
-                            return None  # Cancelled
+                            return None, None  # Cancelled
                         raise subprocess.CalledProcessError(d_proc.returncode, decrypt_cmd, stderr=d_stderr)
 
                     # --- 1. GET ACTUAL DURATION (Needed for both checks) ---
@@ -304,7 +336,8 @@ def prepare_book_assets(asin, job_id, temp_dir):
             break  # Break outer download loop
 
         except Exception as e:
-            log.warning(f"PREPARE ({asin}): Download strategy {strategy_name} failed: {e}")
+            reason = _summarize_subprocess_error(e, str(e))
+            log.warning(f"PREPARE ({asin}): Download strategy {strategy_name} failed: {reason}")
             # Cleanup for retry
             for fname in os.listdir(temp_dir):
                 fpath = os.path.join(temp_dir, fname)
@@ -315,8 +348,8 @@ def prepare_book_assets(asin, job_id, temp_dir):
                     pass
 
             if attempt_idx == len(download_strategies) - 1:
-                log.error(f"PREPARE ({asin}): All download strategies exhausted.")
-                return None
+                log.error(f"PREPARE ({asin}): All download strategies exhausted. Last error: {reason}")
+                return None, f"Download/preparation failed: {reason}"
             else:
                 log.info(f"PREPARE ({asin}): Falling back to next strategy...")
 
@@ -465,11 +498,11 @@ def prepare_book_assets(asin, job_id, temp_dir):
             "chapter_file": chapter_txt_path,
             "chapters": chapters_list,
             "book_info": book_info,
-        }
+        }, None
 
     except Exception as e:
         log.error(f"PREPARE ({asin}): Failed during metadata/chapter phase: {e}", exc_info=True)
-        return None
+        return None, f"Failed during metadata/chapter processing: {e}"
 
 
 def encode_chapter_chunk(asin, job_id, temp_dir, chunk_info, context):

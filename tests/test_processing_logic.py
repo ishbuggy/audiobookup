@@ -77,7 +77,7 @@ def _resolve_output_path(
     with (
         mock.patch.object(processing_logic, "load_settings", return_value={"naming": {"template": template}}),
         mock.patch.object(processing_logic, "get_db_connection", return_value=con),
-        mock.patch.object(processing_logic, "prepare_book_assets", return_value={}),
+        mock.patch.object(processing_logic, "prepare_book_assets", return_value=(None, None)),
         mock.patch("os.path.exists", return_value=path_exists),
         mock.patch("os.makedirs"),
         mock.patch.object(processor, "_probe_file_asin", return_value=embedded_asin),
@@ -201,6 +201,35 @@ class TestDuplicateFlag:
         update_calls = [call for call in con.execute.call_args_list if "status = 'DOWNLOADED'" in call.args[0]]
         assert len(update_calls) == 1
         assert update_calls[0].args[1] == ("/data/A/Title/Title_B0BBBB.m4b", 1, "B0BBBB")
+
+
+class TestFailureReporting:
+    """Bug 7: a failed download reports the real underlying cause instead of a
+    generic 'Failed during asset download/preparation.'"""
+
+    def _run_prepare_with(self, prepare_return):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = BOOK_ROW
+        with (
+            mock.patch.object(processing_logic, "load_settings", return_value={"naming": {}}),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "prepare_book_assets", return_value=prepare_return),
+            mock.patch("os.path.exists", return_value=False),
+            mock.patch("os.makedirs"),
+            mock.patch.object(processor, "_update_db_on_failure") as fail,
+        ):
+            processor._prepare_and_spawn_encode_tasks()
+        return fail
+
+    def test_real_reason_is_surfaced(self):
+        fail = self._run_prepare_with((None, "Title no longer available"))
+        fail.assert_called_once_with("Title no longer available")
+
+    def test_missing_reason_uses_generic_fallback(self):
+        fail = self._run_prepare_with((None, None))
+        fail.assert_called_once_with("Failed during asset download/preparation.")
 
 
 class TestCancellation:

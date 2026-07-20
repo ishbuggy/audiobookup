@@ -288,7 +288,7 @@ class BookProcessor:
             return
 
         # --- 2. Call the asset preparation logic ---
-        self.context = prepare_book_assets(self.asin, self.job_id, self.temp_dir)
+        self.context, prepare_error = prepare_book_assets(self.asin, self.job_id, self.temp_dir)
 
         # Signal that the download/prepare phase is complete.
         # This will unblock the main worker in job_manager.py, allowing it
@@ -297,7 +297,10 @@ class BookProcessor:
             self.download_complete_event.set()
 
         if not self.context:
-            self._update_db_on_failure("Failed during asset download/preparation.")
+            # prepare_error carries the real underlying cause (e.g. audible-cli
+            # reporting a title is no longer available) instead of a generic
+            # message; it is None only on cancellation.
+            self._update_db_on_failure(prepare_error or "Failed during asset download/preparation.")
             self._completion_event.set()
             return
 
