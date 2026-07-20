@@ -707,6 +707,62 @@ def fetch_full_summary(asin):
         return jsonify(error="Failed to update database."), 500
 
 
+@app.route("/api/book/<string:asin>/update", methods=["POST"])
+@login_required
+def update_book_metadata(asin):
+    """
+    Persist user metadata overrides (custom title/author) for a book.
+
+    A field is only touched when its key is present in the request body; an
+    empty value clears that override (reverting to the Audible value). Values
+    are trimmed and length-capped. Filenames on disk are intentionally NOT
+    renamed here (that is the opt-in Phase 5.5 behavior).
+    """
+
+    def _clean(value):
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value[:500] if value else None
+
+    data = request.get_json(silent=True) or {}
+    updates = {}
+    if "custom_title" in data:
+        updates["custom_title"] = _clean(data["custom_title"])
+    if "custom_author" in data:
+        updates["custom_author"] = _clean(data["custom_author"])
+
+    if not updates:
+        return jsonify(error="No editable fields provided."), 400
+
+    con = get_db_connection()
+    try:
+        cur = con.cursor()
+        if cur.execute("SELECT asin FROM audiobooks WHERE asin = ?", (asin,)).fetchone() is None:
+            return jsonify(error="Book not found."), 404
+        # Column names are a fixed allow-list above, so this f-string is safe.
+        set_clause = ", ".join(f"{column} = ?" for column in updates)
+        cur.execute(f"UPDATE audiobooks SET {set_clause} WHERE asin = ?", [*updates.values(), asin])
+        con.commit()
+        row = cur.execute("SELECT * FROM audiobooks WHERE asin = ?", (asin,)).fetchone()
+    except sqlite3.Error as e:
+        log.error(f"Database error updating metadata for {asin}: {e}", exc_info=True)
+        return jsonify(error="Failed to update database."), 500
+    finally:
+        con.close()
+
+    book = apply_metadata_overrides(dict(row))
+    return jsonify(
+        success=True,
+        title=book["title"],
+        author=book["author"],
+        native_title=book["native_title"],
+        native_author=book["native_author"],
+        custom_title=book.get("custom_title"),
+        custom_author=book.get("custom_author"),
+    )
+
+
 @app.route("/api/logs/download")
 @login_required
 def download_log():
