@@ -100,9 +100,12 @@ def prepare_book_assets(asin, job_id, temp_dir):
     env = os.environ.copy()
     env["HOME"] = DATABASE_DIR
 
+    want_pdf = load_settings().get("conversion", {}).get("download_supplementary_pdf", True)
+
     # Variables to hold state across the retry loops
     audio_file = None
     cover_file = None
+    pdf_file = None
     book_info = None
     chapters_list = None
     decryption_args = []
@@ -129,6 +132,10 @@ def prepare_book_assets(asin, job_id, temp_dir):
                 "-o",
                 temp_dir,
             ]
+            # Also pull the companion PDF when enabled. audible-cli simply
+            # downloads nothing extra for titles without one, so this is safe.
+            if want_pdf:
+                download_command.append("--pdf")
 
             process = subprocess.Popen(
                 download_command,
@@ -190,6 +197,8 @@ def prepare_book_assets(asin, job_id, temp_dir):
             raw_audio_file = _find_file_by_ext(temp_dir, [".aax", ".aaxc"])
             cover_file = _find_file_by_ext(temp_dir, [".jpg", ".png"])
             json_file = _find_file_by_ext(temp_dir, [".json"])
+            # Optional: not every title ships a companion PDF, so its absence is fine.
+            pdf_file = _find_file_by_ext(temp_dir, [".pdf"])
 
             if not all([raw_audio_file, cover_file, json_file]):
                 raise FileNotFoundError("Missing one or more critical files after download.")
@@ -516,6 +525,7 @@ def prepare_book_assets(asin, job_id, temp_dir):
             "decryption_args": decryption_args,
             "audio_file": audio_file,
             "cover_file": cover_file,
+            "pdf_file": pdf_file,
             "chapter_file": chapter_txt_path,
             "chapters": chapters_list,
             "book_info": book_info,

@@ -307,6 +307,40 @@ class TestOutputVerification:
         assert downloaded == []
 
 
+class TestSupplementaryPdf:
+    """FR11: a companion PDF, when present, is copied next to the audiobook
+    with a matching name; best-effort and never fatal."""
+
+    def _processor(self, pdf_file):
+        processor = BookProcessor(asin="B0X", job_id=1)
+        processor.context = {"pdf_file": pdf_file}
+        processor.final_output_path = "/data/A/Title/Arthur - Title.m4b"
+        return processor
+
+    def test_no_pdf_is_noop(self):
+        processor = self._processor(None)
+        with mock.patch.object(processing_logic.shutil, "copy2") as copy2:
+            processor._place_supplementary_pdf()
+        copy2.assert_not_called()
+
+    def test_pdf_copied_next_to_audiobook_with_matching_name(self):
+        processor = self._processor("/tmp/book/booklet.pdf")
+        with (
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch.object(processing_logic.shutil, "copy2") as copy2,
+        ):
+            processor._place_supplementary_pdf()
+        copy2.assert_called_once_with("/tmp/book/booklet.pdf", "/data/A/Title/Arthur - Title.pdf")
+
+    def test_copy_failure_is_non_fatal(self):
+        processor = self._processor("/tmp/book/booklet.pdf")
+        with (
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch.object(processing_logic.shutil, "copy2", side_effect=OSError("disk full")),
+        ):
+            processor._place_supplementary_pdf()  # must not raise
+
+
 class TestCancellation:
     """M4 regression: once the job's stop_event is set, queued tasks must
     become no-ops that unblock the processor instead of starting fresh work."""

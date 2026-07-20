@@ -9,6 +9,7 @@
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -421,6 +422,22 @@ class BookProcessor:
 
         return True, None
 
+    def _place_supplementary_pdf(self):
+        """
+        Copy the companion PDF (if the download produced one) next to the
+        finished audiobook, sharing its base name. Best-effort: a failure is
+        logged, never fatal, and titles without a PDF are a silent no-op.
+        """
+        pdf_file = (self.context or {}).get("pdf_file")
+        if not pdf_file or not os.path.exists(pdf_file):
+            return
+        pdf_target = f"{os.path.splitext(self.final_output_path)[0]}.pdf"
+        try:
+            shutil.copy2(pdf_file, pdf_target)
+            log.info(f"PROCESSOR ({self.asin}): Saved companion PDF to {pdf_target}")
+        except OSError as e:
+            log.warning(f"PROCESSOR ({self.asin}): Could not save companion PDF: {e}")
+
     def _merge_and_finalize(self):
         """The actual function for the MERGE_BOOK task."""
         if self._cancelled():
@@ -460,6 +477,8 @@ class BookProcessor:
                         "error_message = '', retry_count = 0, is_duplicate = ? WHERE asin = ?",
                         (self.final_output_path, int(self.is_duplicate), self.asin),
                     )
+                # Place any companion PDF before the temp dir is torn down.
+                self._place_supplementary_pdf()
                 _yield_progress(self.asin, "Complete!", 100, self.job_id)
 
         # This is the final step, so we signal the main `run` method to unblock.

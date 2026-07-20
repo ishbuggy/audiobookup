@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Companion PDF Downloads:** Audiobooks that ship with a supplementary PDF (booklets, maps, reference material) now have that PDF downloaded and saved next to the `.m4b`, sharing its name. Enabled by default; the new `download_supplementary_pdf` conversion setting turns it off. Titles without a PDF are unaffected.
+
 ### Fixed
 - **Cover Art Is Now Embedded in Downloaded Files:** Converted `.m4b` files were missing their cover art. ffmpeg's mp4 muxer cannot write an attached-picture cover and the extended metadata tags (Publisher, ASIN, etc.) in the same pass — enabling the tags silently turned the cover into an unusable data stream. The cover is now embedded in a dedicated step (via AtomicParsley) that writes the standard cover atom without disturbing the metadata, so files show artwork in players again while keeping all their tags. Cover embedding is best-effort: if it fails, the audiobook is still produced.
 - **Downloads Are Verified Before Being Marked Complete:** A book could be reported as successfully downloaded when its file was actually missing from disk (a "ghost" entry with no way to re-download), or silently truncated. After the final merge, the app now confirms the output file exists, is a plausible size, and — when Audible reports a runtime — matches the expected duration, before marking the book DOWNLOADED. Anything that fails those checks is marked ERROR with the reason, so it can be retried.

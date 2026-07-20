@@ -29,6 +29,9 @@ DEFAULT_SETTINGS = {
     "conversion": {
         "quality": "High",
         "is_chunked_conversion_enabled": False,
+        # Download a companion PDF (booklet/supplementary material) alongside
+        # the audiobook when Audible ships one, placed next to the .m4b.
+        "download_supplementary_pdf": True,
     },
     "tasks": {
         "timezone": "UTC",
