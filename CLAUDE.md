@@ -81,6 +81,7 @@ Internal and third-party docs live in `ref-docs/` — **gitignored, local-only, 
 
 ## Roadmap (context, not a to-do list)
 
-- **Deferred from v0.17:** custom metadata editing (`custom_title`/`custom_author` columns, `/api/book/<asin>/update`, edit UI in the detail modal) — planned but never implemented.
-- **Future ideas:** proactive/event-driven library sync; multiple country/account profiles (multiple auth chains); TypeScript or Svelte frontend migration.
-- Known issues and technical-debt inventory: see `REVIEW.md`.
+The project roadmap — release themes, planned work, and longer-horizon ideas — lives in **`ROADMAP.md`** (committed). The current backend/frontend split is **v0.19.0 (backend)** → **v0.20.0 (frontend)**, driven by user feedback in `ref-docs/user-reports/`.
+
+- Detailed, current implementation steps and their status: `PLAN.md` (local-only working doc).
+- Known issues and technical-debt inventory: `REVIEW.md` (local-only).
