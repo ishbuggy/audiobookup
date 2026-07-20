@@ -39,6 +39,23 @@ def get_db_stats():
     return stats
 
 
+def apply_metadata_overrides(book_dict):
+    """
+    Layer user metadata overrides onto a book row. The effective title/author
+    (the custom value when set, else the native Audible value) become
+    `title`/`author` so all existing display code shows them automatically; the
+    originals are preserved as `native_title`/`native_author` for the edit UI.
+    Mutates and returns the dict.
+    """
+    native_title = book_dict.get("title")
+    native_author = book_dict.get("author")
+    book_dict["native_title"] = native_title
+    book_dict["native_author"] = native_author
+    book_dict["title"] = book_dict.get("custom_title") or native_title
+    book_dict["author"] = book_dict.get("custom_author") or native_author
+    return book_dict
+
+
 def get_all_books():
     """Retrieves all books from the database for display in the library."""
     if not os.path.exists(DB_FILE):
@@ -47,7 +64,8 @@ def get_all_books():
     cur = con.cursor()
     # Select only the columns needed for the main library grid to be efficient
     cur.execute(
-        "SELECT author, title, status, asin, series, narrator, runtime_min, release_date, date_added "
+        "SELECT author, title, custom_title, custom_author, status, asin, series, narrator, "
+        "runtime_min, release_date, date_added "
         "FROM audiobooks ORDER BY author, title"
     )
     books_from_db = cur.fetchall()
@@ -55,7 +73,7 @@ def get_all_books():
     books_with_covers = []
     # Append the cover URL, which is not stored in the DB but follows a known pattern
     for book in books_from_db:
-        book_dict = dict(book)
+        book_dict = apply_metadata_overrides(dict(book))
         book_dict["cover_url"] = f"/covers/{book_dict['asin']}_thumb.jpg"
         books_with_covers.append(book_dict)
     return books_with_covers

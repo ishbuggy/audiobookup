@@ -73,3 +73,32 @@ class TestGetBooksForAutoJob:
     def test_all_toggles_off_selects_nothing(self, seeded_db):
         settings = {"tasks": {}}
         assert db_module.get_books_for_auto_job(settings) == []
+
+
+class TestApplyMetadataOverrides:
+    """Phase 5: custom title/author become the effective display values while
+    the native Audible values are preserved for the edit UI."""
+
+    def test_custom_values_win_and_native_preserved(self):
+        result = db_module.apply_metadata_overrides(
+            {"title": "Native T", "author": "Native A", "custom_title": "Custom T", "custom_author": "Custom A"}
+        )
+        assert result["title"] == "Custom T"
+        assert result["author"] == "Custom A"
+        assert result["native_title"] == "Native T"
+        assert result["native_author"] == "Native A"
+
+    def test_missing_custom_falls_back_to_native(self):
+        result = db_module.apply_metadata_overrides(
+            {"title": "T", "author": "A", "custom_title": None, "custom_author": None}
+        )
+        assert result["title"] == "T"
+        assert result["author"] == "A"
+        assert result["native_title"] == "T"
+
+    def test_partial_override_only_affects_that_field(self):
+        result = db_module.apply_metadata_overrides(
+            {"title": "T", "author": "A", "custom_title": "Nicer Title", "custom_author": None}
+        )
+        assert result["title"] == "Nicer Title"
+        assert result["author"] == "A"

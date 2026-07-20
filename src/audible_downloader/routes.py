@@ -42,7 +42,13 @@ from audible_downloader import (
 from audible_downloader.auth import login_required, verify_credentials
 
 # Import the database helper functions from our new db module
-from audible_downloader.db import get_all_books, get_books_for_download_modal, get_db_connection, get_db_stats
+from audible_downloader.db import (
+    apply_metadata_overrides,
+    get_all_books,
+    get_books_for_download_modal,
+    get_db_connection,
+    get_db_stats,
+)
 
 # Import the authentication health check module
 from audible_downloader.health_check import get_audible_auth_status, perform_audible_auth_check
@@ -225,7 +231,7 @@ def get_book_details(asin):
     con.close()
     if book_from_db is None:
         return jsonify(error="Book not found."), 404
-    book_dict = dict(book_from_db)
+    book_dict = apply_metadata_overrides(dict(book_from_db))
     if book_dict.get("is_summary_full") is None:
         book_dict["is_summary_full"] = 0
     if book_dict.get("is_duplicate") is None:

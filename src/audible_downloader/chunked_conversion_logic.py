@@ -18,6 +18,7 @@ from . import (
     DATABASE_DIR,
     announcer,  # Import announcer for progress updates
 )
+from .db import get_db_connection
 from .logger import log
 from .process_registry import process_registry
 from .settings import load_settings
@@ -441,17 +442,26 @@ def prepare_book_assets(asin, job_id, temp_dir):
                 )
             chapters_list = new_chapters
 
+        # User metadata overrides (custom title/author) win over the Audible
+        # values for the embedded tags, matching what the UI displays.
+        with get_db_connection() as con:
+            overrides = con.execute(
+                "SELECT custom_title, custom_author FROM audiobooks WHERE asin = ?", (asin,)
+            ).fetchone()
+        custom_title = overrides["custom_title"] if overrides else None
+        custom_author = overrides["custom_author"] if overrides else None
+
         # 3. Write Metadata File
         chapter_txt_path = os.path.join(temp_dir, "chapters.txt")
         with open(chapter_txt_path, "w", encoding="utf-8") as f:
             f.write(";FFMETADATA1\n")
 
             # --- Standard Tags ---
-            title = book_info.get("title", "N/A")
+            title = custom_title or book_info.get("title", "N/A")
             f.write(f"title={title}\n")
             f.write(f"album={title}\n")  # Players often treat Audiobooks as Albums
 
-            authors = ", ".join([a.get("name", "N/A") for a in book_info.get("authors", [])])
+            authors = custom_author or ", ".join([a.get("name", "N/A") for a in book_info.get("authors", [])])
             f.write(f"artist={authors}\n")
             f.write(f"album_artist={authors}\n")
 
