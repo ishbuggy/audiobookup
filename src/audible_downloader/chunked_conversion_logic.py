@@ -622,14 +622,18 @@ def merge_book_chunks(asin, job_id, temp_dir, final_output_path, context, encode
             # Format for ffmpeg, quoting is not needed here
             f.write(f"file '{os.path.basename(chunk_path)}'\n")
 
+    # Merge audio + chapters + metadata. The cover is deliberately NOT added
+    # here: ffmpeg's mp4 muxer can't write an attached-picture stream together
+    # with the custom "use_metadata_tags" fields — enabling the tags turns the
+    # cover into an unusable 'bin_data' stream — so the cover is embedded in a
+    # separate AtomicParsley step below, which keeps both the tags and the art.
     merge_command = (
         ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", merge_list_path]
-        + ["-i", context["cover_file"], "-i", context["chapter_file"]]
-        + ["-map", "0:a", "-map", "1:v", "-map_metadata", "2", "-map_chapters", "2"]
+        + ["-i", context["chapter_file"]]
+        + ["-map", "0:a", "-map_metadata", "1", "-map_chapters", "1"]
         + ["-c", "copy"]  # Use fast, lossless copy since chunks are already encoded
-        + ["-id3v2_version", "3", "-disposition:v", "attached_pic"]
-        + ["-movflags", "+faststart+use_metadata_tags"]
-        + ["-metadata:s:v", 'title="Album cover"', "-metadata:s:v", 'comment="Cover (front)"', final_output_path]
+        + ["-id3v2_version", "3"]
+        + ["-movflags", "+faststart+use_metadata_tags", final_output_path]
     )
 
     process = None
@@ -658,6 +662,7 @@ def merge_book_chunks(asin, job_id, temp_dir, final_output_path, context, encode
             raise subprocess.CalledProcessError(process.returncode, merge_command, stderr=stderr)
 
         log.info(f"MERGE ({asin}): Successfully merged and finalized file at {final_output_path}")
+        _embed_cover_art(asin, job_id, final_output_path, context.get("cover_file"))
         return True
 
     except subprocess.CalledProcessError as e:
@@ -666,3 +671,35 @@ def merge_book_chunks(asin, job_id, temp_dir, final_output_path, context, encode
     finally:
         if process:
             process_registry.unregister(job_id, process)  # <--- UNREGISTER
+
+
+def _embed_cover_art(asin, job_id, output_path, cover_file):
+    """
+    Add cover art to the finished .m4b via AtomicParsley, which writes the
+    standard mp4 `covr` atom without disturbing the metadata ffmpeg already
+    wrote (see the note in merge_book_chunks on why ffmpeg can't do both).
+
+    Best-effort: a missing cover or an AtomicParsley failure logs a warning but
+    does not fail the book — a book without embedded art is still usable.
+    """
+    if not cover_file or not os.path.exists(cover_file):
+        log.warning(f"MERGE ({asin}): No cover file available; skipping cover art embedding.")
+        return
+
+    cover_cmd = ["AtomicParsley", output_path, "--artwork", cover_file, "--overWrite"]
+    process = None
+    try:
+        process = subprocess.Popen(
+            cover_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace"
+        )
+        process_registry.register(job_id, process)
+        _, stderr = process.communicate()
+        if process.returncode == 0:
+            log.info(f"MERGE ({asin}): Embedded cover art.")
+        elif process.returncode != -15:  # -15 is cancellation, not a failure
+            log.warning(f"MERGE ({asin}): Cover art embedding failed (exit {process.returncode}): {stderr}")
+    except OSError as e:
+        log.warning(f"MERGE ({asin}): Could not run AtomicParsley for cover art: {e}")
+    finally:
+        if process:
+            process_registry.unregister(job_id, process)

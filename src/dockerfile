@@ -16,6 +16,7 @@ ENV APP_VERSION=${APP_VERSION}
 # ADDED: 'locales' package is now installed to generate the UTF-8 locale.
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ffmpeg \
+  atomicparsley \
   sqlite3 \
   jq \
   coreutils \
