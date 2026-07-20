@@ -65,7 +65,7 @@ def get_all_books():
     # Select only the columns needed for the main library grid to be efficient
     cur.execute(
         "SELECT author, title, custom_title, custom_author, status, asin, series, narrator, "
-        "runtime_min, release_date, date_added "
+        "runtime_min, release_date, date_added, source "
         "FROM audiobooks ORDER BY author, title"
     )
     books_from_db = cur.fetchall()
@@ -74,6 +74,9 @@ def get_all_books():
     # Append the cover URL, which is not stored in the DB but follows a known pattern
     for book in books_from_db:
         book_dict = apply_metadata_overrides(dict(book))
+        # Provenance: default old rows (pre-`source` column) to the Audible origin.
+        if book_dict.get("source") is None:
+            book_dict["source"] = "audible"
         book_dict["cover_url"] = f"/covers/{book_dict['asin']}_thumb.jpg"
         books_with_covers.append(book_dict)
     return books_with_covers

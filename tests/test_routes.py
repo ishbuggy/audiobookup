@@ -292,3 +292,102 @@ class TestUploadBookCover:
             assert command[command.index("-protocol_whitelist") + 1] == "file"
             # The whitelist/format flags must precede the input they guard.
             assert command.index("-f") < command.index("-i")
+
+
+@pytest.fixture
+def import_env(tmp_path, monkeypatch):
+    """Point the import module's DATA_DIR (and thus the staging dir) at a temp
+    directory so upload streaming never touches the real /data volume."""
+    from audible_downloader import import_logic
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(import_logic, "DATA_DIR", str(data_dir))
+    return data_dir
+
+
+class TestImportUpload:
+    """Phase 6 (FR2): POST /api/library/import/upload streams a file into /data
+    and adopts it, login- and Origin-gated, with type + size validation."""
+
+    def _upload(self, client, *, filename="Book.m4b", content=b"AUDIODATA"):
+        return client.post(
+            f"/api/library/import/upload?filename={quote(filename)}",
+            data=content,
+            content_type="application/octet-stream",
+        )
+
+    def test_requires_login(self, client, completed_setup, import_env):
+        response = self._upload(client)
+        assert response.status_code == 302  # redirected to login
+
+    def test_cross_origin_is_blocked(self, client, completed_setup, import_env):
+        _login_session(client)
+        response = client.post(
+            "/api/library/import/upload?filename=Book.m4b",
+            data=b"x",
+            content_type="application/octet-stream",
+            headers={"Origin": "https://evil.example"},
+        )
+        assert response.status_code == 403
+
+    def test_unsupported_extension_returns_400(self, client, completed_setup, import_env):
+        _login_session(client)
+        response = self._upload(client, filename="song.mp3")
+        assert response.status_code == 400
+
+    def test_missing_filename_returns_400(self, client, completed_setup, import_env):
+        _login_session(client)
+        response = client.post("/api/library/import/upload", data=b"x", content_type="application/octet-stream")
+        assert response.status_code == 400
+
+    def test_empty_body_returns_400(self, client, completed_setup, import_env):
+        _login_session(client)
+        response = self._upload(client, content=b"")
+        assert response.status_code == 400
+
+    def test_oversize_returns_413(self, client, completed_setup, settings_file, import_env):
+        _login_session(client)
+        # A zero-GB cap makes any non-empty body exceed the limit.
+        settings_file.write_text(json.dumps({"initial_setup_complete": True, "import": {"max_upload_gb": 0}}))
+        response = self._upload(client, content=b"x" * 100)
+        assert response.status_code == 413
+
+    def test_successful_upload_adopts_and_returns_metadata(self, client, completed_setup, import_env, monkeypatch):
+        _login_session(client)
+        captured = {}
+
+        def fake_adopt_upload(staging_path, filename, settings):
+            captured["staging_exists"] = os.path.exists(staging_path)
+            captured["filename"] = filename
+            return {
+                "action": "imported",
+                "key": "IMPORT-deadbeef",
+                "title": "Book",
+                "author": "Unknown Author",
+                "filepath": "/data/Unknown Author/Book.m4b",
+            }
+
+        monkeypatch.setattr("audible_downloader.routes.adopt_upload", fake_adopt_upload)
+        response = self._upload(client)
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["success"] is True
+        assert data["action"] == "imported"
+        assert data["asin"] == "IMPORT-deadbeef"
+        assert captured["staging_exists"] is True  # the body was streamed to disk before adoption
+        assert captured["filename"] == "Book.m4b"
+
+    def test_adoption_failure_returns_500_and_cleans_up(self, client, completed_setup, import_env, monkeypatch):
+        _login_session(client)
+
+        def boom(*a, **k):
+            raise RuntimeError("probe blew up")
+
+        monkeypatch.setattr("audible_downloader.routes.adopt_upload", boom)
+        response = self._upload(client)
+        assert response.status_code == 500
+        # Staging dir should hold no leftover file after the failure cleanup.
+        staging = import_env / ".import_staging"
+        leftovers = list(staging.iterdir()) if staging.exists() else []
+        assert leftovers == []

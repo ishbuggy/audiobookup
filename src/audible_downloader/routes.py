@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+import uuid
 from collections import deque
 from datetime import datetime
 from urllib.parse import urlsplit
@@ -53,6 +54,9 @@ from audible_downloader.db import (
 
 # Import the authentication health check module
 from audible_downloader.health_check import get_audible_auth_status, perform_audible_auth_check
+
+# Import the manual-import (FR2) helpers
+from audible_downloader.import_logic import IMPORTABLE_EXTS, adopt_upload, import_staging_dir
 
 # Import from the job_manager module
 from audible_downloader.job_manager import cancel_active_job, start_new_job
@@ -237,6 +241,9 @@ def get_book_details(asin):
         book_dict["is_summary_full"] = 0
     if book_dict.get("is_duplicate") is None:
         book_dict["is_duplicate"] = 0
+    # Provenance: default old rows (pre-`source` column) to the Audible origin.
+    if book_dict.get("source") is None:
+        book_dict["source"] = "audible"
     original_cover_path = f"/covers/{book_dict['asin']}_original.jpg"
     thumb_cover_path = f"/covers/{book_dict['asin']}_thumb.jpg"
     if os.path.exists(os.path.join(COVERS_DIR, f"{book_dict['asin']}_original.jpg")):
@@ -551,6 +558,10 @@ def start_job():
         # Verification jobs don't need params or ASINs
         success, result = start_new_job(job_type="VERIFY", asins=None)
 
+    elif job_type == "IMPORT":
+        # Scan-in-place import: no params or ASINs — the worker discovers files under /data.
+        success, result = start_new_job(job_type="IMPORT", asins=None)
+
     else:
         return jsonify(error="Invalid or missing 'job_type'."), 400
 
@@ -848,6 +859,77 @@ def upload_book_cover(asin):
         cover_url_original=f"/covers/{asin}_original.jpg",
         cover_url_thumb=f"/covers/{asin}_thumb.jpg",
     )
+
+
+@app.route("/api/library/import/upload", methods=["POST"])
+@login_required
+def import_upload():
+    """
+    Stream an uploaded audiobook file into the managed library and adopt it
+    (Phase 6 / FR2). The body is the raw file bytes; the original filename comes
+    from the `filename` query arg (or an `X-Filename` header). Login + Origin
+    gated like every other write. The upload is streamed straight to disk under
+    /data with a per-chunk size guard (from the `import.max_upload_gb` setting),
+    so an oversize upload is rejected without buffering it in memory.
+    """
+    filename = request.args.get("filename") or request.headers.get("X-Filename", "")
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in IMPORTABLE_EXTS:
+        return jsonify(error="Unsupported file type. Only .m4b and .m4a are accepted."), 400
+
+    max_gb = load_settings().get("import", {}).get("max_upload_gb", 2)
+    try:
+        max_bytes = int(float(max_gb) * 1024 * 1024 * 1024)
+    except (TypeError, ValueError):
+        max_bytes = 2 * 1024 * 1024 * 1024
+
+    staging_dir = import_staging_dir()
+    os.makedirs(staging_dir, exist_ok=True)
+    staging_path = os.path.join(staging_dir, f"{uuid.uuid4().hex}{ext}")
+
+    written = 0
+    over_limit = False
+    try:
+        with open(staging_path, "wb") as out:
+            while True:
+                chunk = request.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    over_limit = True
+                    break
+                out.write(chunk)
+
+        if over_limit:
+            _safe_remove(staging_path)
+            return jsonify(error=f"Upload exceeds the {max_gb} GB limit."), 413
+        if written == 0:
+            _safe_remove(staging_path)
+            return jsonify(error="Uploaded file is empty."), 400
+
+        result = adopt_upload(staging_path, filename, load_settings())
+    except Exception as e:
+        log.error(f"IMPORT: upload adoption failed for '{filename}': {e}", exc_info=True)
+        _safe_remove(staging_path)
+        return jsonify(error="Failed to import the uploaded file."), 500
+
+    return jsonify(
+        success=True,
+        action=result.get("action"),
+        asin=result.get("key"),
+        title=result.get("title"),
+        author=result.get("author"),
+        filepath=result.get("filepath"),
+    )
+
+
+def _safe_remove(path):
+    """Best-effort delete of a staging file; never raises."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 @app.route("/api/logs/download")
