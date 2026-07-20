@@ -195,6 +195,7 @@ class TestDuplicateFlag:
             mock.patch.object(processing_logic, "get_db_connection", return_value=con),
             mock.patch.object(processing_logic, "record_conversion_time"),
             mock.patch.object(processing_logic, "_yield_progress"),
+            mock.patch.object(processor, "_verify_output_file", return_value=(True, None)),
         ):
             processor._merge_and_finalize()
 
@@ -230,6 +231,80 @@ class TestFailureReporting:
     def test_missing_reason_uses_generic_fallback(self):
         fail = self._run_prepare_with((None, None))
         fail.assert_called_once_with("Failed during asset download/preparation.")
+
+
+class TestOutputVerification:
+    """Bugs 2 & FR3: a book is only marked DOWNLOADED after its finished file is
+    confirmed present, non-trivial in size, and not truncated."""
+
+    def _verify_with(self, exists=True, size=10 * 1024 * 1024, runtime_min=60, duration_sec=3600.0):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = "/data/A/Title/Title.m4b"
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = {"runtime_min": runtime_min}
+        with (
+            mock.patch("os.path.exists", return_value=exists),
+            mock.patch("os.path.getsize", return_value=size),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "_probe_duration_seconds", return_value=duration_sec),
+        ):
+            return processor._verify_output_file()
+
+    def test_missing_file_fails(self):
+        ok, reason = self._verify_with(exists=False)
+        assert ok is False
+        assert "no output file" in reason
+
+    def test_tiny_file_fails(self):
+        ok, reason = self._verify_with(size=1000)
+        assert ok is False
+        assert "implausibly small" in reason
+
+    def test_unreadable_duration_fails(self):
+        ok, reason = self._verify_with(duration_sec=None)
+        assert ok is False
+        assert "could not be read back" in reason
+
+    def test_truncated_file_fails(self):
+        ok, reason = self._verify_with(runtime_min=60, duration_sec=1200.0)  # 20m of a 60m book
+        assert ok is False
+        assert "truncated" in reason
+
+    def test_full_length_file_passes(self):
+        assert self._verify_with(runtime_min=60, duration_sec=3600.0) == (True, None)
+
+    def test_unknown_runtime_skips_duration_check(self):
+        # No expected runtime -> existence + size are enough, duration not checked.
+        assert self._verify_with(runtime_min=None, duration_sec=None) == (True, None)
+
+    def _run_merge(self, verify_result):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = "/data/A/Title/Title.m4b"
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = None
+        with (
+            mock.patch.object(processing_logic, "merge_book_chunks", return_value=True),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "record_conversion_time"),
+            mock.patch.object(processing_logic, "_yield_progress"),
+            mock.patch.object(processor, "_verify_output_file", return_value=verify_result),
+            mock.patch.object(processor, "_update_db_on_failure") as fail,
+        ):
+            processor._merge_and_finalize()
+        downloaded = [call for call in con.execute.call_args_list if "status = 'DOWNLOADED'" in call.args[0]]
+        return downloaded, fail
+
+    def test_valid_output_is_marked_downloaded(self):
+        downloaded, fail = self._run_merge((True, None))
+        fail.assert_not_called()
+        assert len(downloaded) == 1
+
+    def test_invalid_output_is_not_marked_downloaded(self):
+        downloaded, fail = self._run_merge((False, "Conversion reported success but no output file was found on disk."))
+        fail.assert_called_once_with("Conversion reported success but no output file was found on disk.")
+        assert downloaded == []
 
 
 class TestCancellation:

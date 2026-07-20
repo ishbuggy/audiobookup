@@ -41,6 +41,35 @@ from .task_runner import Task, TaskPriority, task_runner
 _reserved_output_paths: set[str] = set()
 _reservation_lock = Lock()
 
+# A finished .m4b is far larger than this floor; it only catches an absent or
+# empty/stub output — the "ghost book" that reported success but isn't on disk.
+_MIN_OUTPUT_BYTES = 64 * 1024
+
+
+def _probe_duration_seconds(filepath):
+    """Return the media duration of `filepath` in seconds via ffprobe, or None
+    if it can't be determined (missing or unreadable/corrupt file)."""
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        filepath,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        return float(result.stdout.strip())
+    except ValueError:
+        return None
+
 
 def _sanitize_filename(name):
     """Sanitizes a string to be used as a valid filename."""
@@ -363,6 +392,35 @@ class BookProcessor:
                 )
                 task_runner.submit_task(merge_task)
 
+    def _verify_output_file(self):
+        """
+        Validate the finished file before we claim success, so a book is never
+        marked DOWNLOADED while its file is missing, empty, or truncated (the
+        "ghost book" and silent-truncation cases). Returns (ok, reason).
+        """
+        path = self.final_output_path
+        if not path or not os.path.exists(path):
+            return False, "Conversion reported success but no output file was found on disk."
+
+        size = os.path.getsize(path)
+        if size < _MIN_OUTPUT_BYTES:
+            return False, f"Output file is implausibly small ({size} bytes); the conversion likely failed."
+
+        with get_db_connection() as con:
+            row = con.execute("SELECT runtime_min FROM audiobooks WHERE asin = ?", (self.asin,)).fetchone()
+        expected_min = row["runtime_min"] if row else None
+        if expected_min and expected_min > 0:
+            actual_sec = _probe_duration_seconds(path)
+            if actual_sec is None:
+                return False, "Output file could not be read back (corrupt or unreadable)."
+            expected_sec = expected_min * 60
+            # Mirror the library Verify job's tolerance: only flag a file that
+            # is significantly SHORTER than expected (under 95% and >10 minutes).
+            if actual_sec < expected_sec * 0.95 and (expected_sec - actual_sec) > 600:
+                return False, f"Output file is truncated (expected ~{expected_min}m, got {int(actual_sec / 60)}m)."
+
+        return True, None
+
     def _merge_and_finalize(self):
         """The actual function for the MERGE_BOOK task."""
         if self._cancelled():
@@ -374,26 +432,35 @@ class BookProcessor:
             self.asin, self.job_id, self.temp_dir, self.final_output_path, self.context, self.encoded_chunk_paths
         )
 
-        if success:
-            conversion_duration_sec = time.time() - conversion_start_time
-            with get_db_connection() as con:
-                runtime_row = con.execute("SELECT runtime_min FROM audiobooks WHERE asin = ?", (self.asin,)).fetchone()
-                if runtime_row:
-                    record_conversion_time(runtime_row["runtime_min"], conversion_duration_sec)
-
-            # On Success, update the database. is_duplicate records whether a
-            # same-author+title collision forced an ASIN suffix onto our name;
-            # it is written explicitly (0 when clean) so a later re-download
-            # that resolves without a collision clears a stale flag.
-            with get_db_connection() as con:
-                con.execute(
-                    "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, "
-                    "error_message = '', retry_count = 0, is_duplicate = ? WHERE asin = ?",
-                    (self.final_output_path, int(self.is_duplicate), self.asin),
-                )
-            _yield_progress(self.asin, "Complete!", 100, self.job_id)
-        else:
+        if not success:
             self._update_db_on_failure("Final merge of chapter chunks failed.")
+        else:
+            # Never trust the merge's exit code alone: confirm the file is
+            # actually on disk and complete before declaring the book DOWNLOADED.
+            output_ok, reason = self._verify_output_file()
+            if not output_ok:
+                log.error(f"PROCESSOR ({self.asin}): Output verification failed: {reason}")
+                self._update_db_on_failure(reason)
+            else:
+                conversion_duration_sec = time.time() - conversion_start_time
+                with get_db_connection() as con:
+                    runtime_row = con.execute(
+                        "SELECT runtime_min FROM audiobooks WHERE asin = ?", (self.asin,)
+                    ).fetchone()
+                    if runtime_row:
+                        record_conversion_time(runtime_row["runtime_min"], conversion_duration_sec)
+
+                # On Success, update the database. is_duplicate records whether a
+                # same-author+title collision forced an ASIN suffix onto our name;
+                # it is written explicitly (0 when clean) so a later re-download
+                # that resolves without a collision clears a stale flag.
+                with get_db_connection() as con:
+                    con.execute(
+                        "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, "
+                        "error_message = '', retry_count = 0, is_duplicate = ? WHERE asin = ?",
+                        (self.final_output_path, int(self.is_duplicate), self.asin),
+                    )
+                _yield_progress(self.asin, "Complete!", 100, self.job_id)
 
         # This is the final step, so we signal the main `run` method to unblock.
         self._completion_event.set()

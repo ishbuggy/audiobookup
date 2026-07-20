@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Downloads Are Verified Before Being Marked Complete:** A book could be reported as successfully downloaded when its file was actually missing from disk (a "ghost" entry with no way to re-download), or silently truncated. After the final merge, the app now confirms the output file exists, is a plausible size, and — when Audible reports a runtime — matches the expected duration, before marking the book DOWNLOADED. Anything that fails those checks is marked ERROR with the reason, so it can be retried.
+- **Clear Failure Messages for Unavailable Titles:** A failed download previously showed only a generic `Failed during asset download/preparation.` The progress reader drained the downloader's output before the error could be captured, so the real cause was lost. The actual message from `audible-cli` (for example, a title no longer being available to your account) is now captured and shown as the book's error.
 - **Bulk Duplicate Downloads No Longer Overwrite Each Other:** Downloading two different books that share the same author and title in a single job (common with public-domain classics — multiple recordings of *Dracula*, *Pride and Prejudice*, etc.) could silently overwrite the first file with the second. Both books chose their output path before either had written its file, so the existing on-disk collision check couldn't see the conflict. Colliding books now reserve their target path in-process, so the second and later copies get a guaranteed-unique ASIN-suffixed name (`Title_B00XYZ.m4b`) and are flagged as duplicates in the database (surfacing in the UI is planned for a later release).
 
 ## [0.18.0] - 2026-07-20
