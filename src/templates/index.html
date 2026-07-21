@@ -189,6 +189,18 @@
                     <option value="date_added_desc">Date Added (Newest)</option>
                     <option value="date_added_asc">Date Added (Oldest)</option>
                 </select>
+                <!-- Grid / List / Table view switcher (persisted in localStorage) -->
+                <div id="view-switcher" class="view-switcher" role="group" aria-label="Library view">
+                    <button type="button" data-view="grid" title="Grid view" aria-label="Grid view">
+                        <i class="fas fa-th-large"></i>
+                    </button>
+                    <button type="button" data-view="list" title="List view" aria-label="List view">
+                        <i class="fas fa-list"></i>
+                    </button>
+                    <button type="button" data-view="table" title="Table view" aria-label="Table view">
+                        <i class="fas fa-table"></i>
+                    </button>
+                </div>
             </div>
             <div id="library-grid">
                 {% for book in books %}

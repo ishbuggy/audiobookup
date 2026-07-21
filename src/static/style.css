@@ -1038,6 +1038,172 @@ h2 {
     border-color: #e0a800;
 }
 
+/* ==========================================================================
+   Library View Switcher (Grid / List / Table)
+   ========================================================================== */
+
+.view-switcher {
+    display: inline-flex;
+    border: 1px solid var(--color-input-border);
+    border-radius: 6px;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+.view-switcher button {
+    background: var(--color-input-bg);
+    color: var(--color-text-muted);
+    border: none;
+    border-left: 1px solid var(--color-input-border);
+    padding: 0.5em 0.8em;
+    font-size: 1em;
+    cursor: pointer;
+    transition:
+        background-color 0.2s ease,
+        color 0.2s ease;
+}
+.view-switcher button:first-child {
+    border-left: none;
+}
+.view-switcher button:hover {
+    background: var(--color-bg-button-hover);
+    color: var(--color-text-primary);
+}
+.view-switcher button.active {
+    background: var(--color-accent-blue);
+    color: #fff;
+}
+
+/* --- List View --- */
+/* One book per row: fixed-size thumbnail, a growing metadata column, then the
+   status badge and action button. Rows reuse the .book-card class so the modal
+   / card-action click delegation keeps working. */
+#library-grid.view-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75em;
+}
+#library-grid.view-list .book-card.list-card {
+    flex-direction: row;
+    align-items: center;
+    gap: 1em;
+    padding: 0.75em 1em;
+}
+#library-grid.view-list .book-card.list-card:hover {
+    /* No scale transform on full-width rows — a subtle lift reads better. */
+    transform: none;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+.list-card .book-card-cover {
+    width: 64px;
+    height: 64px;
+    flex-shrink: 0;
+    border-radius: 4px;
+    aspect-ratio: auto;
+}
+.list-card-main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0; /* allow the title/meta text to truncate instead of overflow */
+    flex-grow: 1;
+}
+.list-card-main .book-card-title,
+.list-card-main .book-card-author {
+    margin: 0;
+    flex-grow: 0;
+}
+.list-card-meta {
+    font-size: 0.85em;
+    color: var(--color-text-muted);
+    margin: 0.25em 0 0 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+#library-grid.view-list .book-card-status {
+    flex-shrink: 0;
+}
+#library-grid.view-list .book-card-actions {
+    padding-top: 0;
+    flex-shrink: 0;
+}
+#library-grid.view-list .retry-button {
+    width: auto;
+    white-space: nowrap;
+}
+
+/* --- Table View --- */
+/* A dense tabular layout. The container becomes a block so the inner <table>
+   can size normally; each <tr> keeps the .book-card class for click handling. */
+#library-grid.view-table {
+    display: block;
+    overflow-x: auto;
+}
+.library-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--color-bg-container);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    overflow: hidden;
+}
+.library-table thead th {
+    text-align: left;
+    font-size: 0.85em;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--color-text-muted);
+    padding: 0.75em 1em;
+    border-bottom: 2px solid var(--color-border);
+    white-space: nowrap;
+}
+.library-table tbody tr.book-card {
+    /* Neutralize the card styling that doesn't apply to table rows. */
+    display: table-row;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    background: transparent;
+    border-bottom: 1px solid var(--color-border);
+}
+.library-table tbody tr.book-card:last-child {
+    border-bottom: none;
+}
+.library-table tbody tr.book-card:hover {
+    transform: none;
+    box-shadow: none;
+    background: var(--color-bg-button-hover);
+}
+.library-table td {
+    padding: 0.5em 1em;
+    vertical-align: middle;
+}
+.library-table .col-cover {
+    width: 48px;
+}
+.library-table .col-cover .book-card-cover {
+    width: 40px;
+    height: 40px;
+    border-radius: 4px;
+    aspect-ratio: auto;
+    display: block;
+}
+.library-table .table-title {
+    font-weight: 600;
+}
+.library-table .col-actions {
+    text-align: right;
+    white-space: nowrap;
+}
+#library-grid.view-table .retry-button {
+    width: auto;
+    padding: 0.4em 0.9em;
+    font-size: 0.9em;
+    white-space: nowrap;
+}
+#library-grid.view-table .book-card-actions {
+    padding-top: 0;
+}
+
 /* Ensure Confirmation Modal sits on top of Detail Modal */
 #confirmation-modal {
     z-index: 2200; /* Higher than generic .modal-overlay which is usually 2000 */
@@ -1549,6 +1715,15 @@ body.dark-mode .action-button.is-warning:hover:not(:disabled) {
         flex-direction: column;
         align-items: stretch;
         gap: 1em;
+    }
+    /* Let the view-switcher buttons share the full width when controls stack. */
+    .view-switcher button {
+        flex: 1;
+    }
+    /* On narrow screens the release/series meta line can crowd the row; keep
+       the primary title/author and let the meta truncate as it already does. */
+    #library-grid.view-list .book-card.list-card {
+        gap: 0.75em;
     }
     .modal-overlay {
         padding: 1em;
