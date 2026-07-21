@@ -1,6 +1,6 @@
 // src/static/js/modules/modal-manager.js
 
-import { startJob, openProcessingPanel } from "./job-manager.js";
+import { startJob } from "./job-manager.js";
 import {
     getLibraryData,
     getSelectedAsins,
@@ -61,9 +61,11 @@ async function handleBookClick(event) {
         const book = libraryData.find((b) => b.asin === asin);
         if (!book) return;
 
-        const runDownload = () => {
-            openProcessingPanel([book]);
-            startJob("DOWNLOAD", [asin]);
+        const runDownload = async () => {
+            // startJob populates the panel itself (only if no other job is
+            // running) and reports whether the job actually started.
+            const started = await startJob("DOWNLOAD", [asin], null, null, [book]);
+            if (!started) return;
             // Visual Feedback: Scroll to the job panel
             const panel = document.getElementById("processing-panel");
             if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -160,10 +162,12 @@ async function handleBookClick(event) {
             newBtn.style.display = "inline-block";
 
             newBtn.onclick = () => {
-                const runDownload = () => {
+                const runDownload = async () => {
                     closeDetailModal();
-                    openProcessingPanel([book]);
-                    startJob("DOWNLOAD", [asin]);
+                    // startJob populates the panel itself (only if no other job
+                    // is running) and reports whether the job actually started.
+                    const started = await startJob("DOWNLOAD", [asin], null, null, [book]);
+                    if (!started) return;
                     // Visual Feedback: Scroll to panel
                     setTimeout(() => {
                         const panel = document.getElementById("processing-panel");
@@ -775,13 +779,13 @@ function formatRoughDuration(totalSeconds) {
     return `about ${hourPart} ${remMinutes} minute${remMinutes === 1 ? "" : "s"}`;
 }
 
-// Start the bulk download job for the given ASINs (populates the panel first).
+// Start the bulk download job for the given ASINs. startJob populates the
+// processing panel itself, only after confirming no other job is running.
 function startBulkDownload(selectedASINs) {
     const libraryData = getLibraryData();
     const selectedBooks = libraryData.filter((book) => selectedASINs.includes(book.asin));
-    openProcessingPanel(selectedBooks);
     closeSelectionModal();
-    startJob("DOWNLOAD", selectedASINs);
+    startJob("DOWNLOAD", selectedASINs, null, null, selectedBooks);
 }
 
 // --- Download Selection Modal Logic ---

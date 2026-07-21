@@ -21,14 +21,14 @@ const latestLogLine = document.getElementById("latest-log-line");
 // Exported so other modules (library-manager) share this one implementation.
 export function addLogLine(text) {
     const now = new Date();
-    const timeString = now.toLocaleTimeString('en-US', { hour12: false });
+    const timeString = now.toLocaleTimeString("en-US", { hour12: false });
     const line = `[${timeString}] ${text}`;
-    
+
     if (logOutput) {
         logOutput.textContent += line + "\n";
         logOutput.scrollTop = logOutput.scrollHeight;
     }
-    
+
     // Update the status bar footer
     if (text.trim() && latestLogLine) {
         latestLogLine.textContent = text;
@@ -53,9 +53,13 @@ function setActionsBusy(busy) {
 // Updates the panel visuals when the watchdog detects a silent completion
 function forceVisualCompletion() {
     const items = processingList.querySelectorAll(".processing-item");
-    items.forEach(item => {
+    items.forEach((item) => {
         // If not already marked as success/error
-        if (!item.classList.contains("success") && !item.classList.contains("error") && !item.classList.contains("cancelled")) {
+        if (
+            !item.classList.contains("success") &&
+            !item.classList.contains("error") &&
+            !item.classList.contains("cancelled")
+        ) {
             item.classList.add("success");
             const statusText = item.querySelector(".status-text");
             if (statusText) statusText.textContent = "Completed";
@@ -83,11 +87,11 @@ function cleanupUIState() {
     }
 
     currentJobId = null;
-    
+
     // Unlock the UI
     setTimeout(() => {
         setActionsBusy(false);
-        if (_refreshCallback) _refreshCallback(); 
+        if (_refreshCallback) _refreshCallback();
     }, 1000);
 }
 
@@ -99,7 +103,7 @@ function startJobWatchdog() {
             const response = await fetch("/api/jobs/active");
             if (response.ok) {
                 const data = await response.json();
-                
+
                 const serverHasJob = !!data.job_id;
                 const uiHasJob = !!currentJobId;
 
@@ -109,25 +113,23 @@ function startJobWatchdog() {
                     currentJobId = data.job_id;
                     setActionsBusy(true);
                     rebuildPanelForJob(data);
-                }
-                else if (serverHasJob && uiHasJob && data.job_id !== currentJobId) {
+                } else if (serverHasJob && uiHasJob && data.job_id !== currentJobId) {
                     // CASE 2: ID Mismatch (Smart Chaining: Sync finished, Download started)
                     // Do NOT unlock UI. Switch context immediately.
                     console.log(`Watchdog: Switching from Job ${currentJobId} to Job ${data.job_id}`);
-                    
+
                     // Visually complete the old job in the log before switching
                     addLogLine(`--- Job ${currentJobId} Finished (Transitioning) ---`);
-                    
+
                     currentJobId = data.job_id;
                     // Ensure buttons stay locked
-                    setActionsBusy(true); 
+                    setActionsBusy(true);
                     rebuildPanelForJob(data);
-                }
-                else if (!serverHasJob && uiHasJob) {
+                } else if (!serverHasJob && uiHasJob) {
                     // CASE 3: Job finished silently (Event missed)
                     console.warn(`Watchdog: UI stuck on Job ${currentJobId}, but server is Idle. Resetting.`);
                     addLogLine("--- Watchdog: Detected job completion. Resetting UI. ---");
-                    
+
                     if (processingPanelTitle) {
                         processingPanelTitle.textContent = `Job ${currentJobId} Finished (Recovered)`;
                         if (processingPanelHeader) {
@@ -135,10 +137,10 @@ function startJobWatchdog() {
                             processingPanelHeader.style.cursor = "default";
                         }
                     }
-                    
+
                     // Update visual state of items to look "done"
                     forceVisualCompletion();
-                    
+
                     // Unlock controls
                     cleanupUIState();
                 }
@@ -185,7 +187,7 @@ export function initializeSSEConnection(onJobFinishedCallback) {
         if (targetButton) {
             targetButton.classList.add("is-processing");
             let startMsg = `--- Job ${jobData.job_id} (${jobData.job_type}) Started ---`;
-            
+
             if (jobStartSource !== "manual") {
                 startMsg += " (Automatic)";
                 targetButton.classList.add("is-automatic");
@@ -193,7 +195,7 @@ export function initializeSSEConnection(onJobFinishedCallback) {
             addLogLine(startMsg);
 
             if (jobData.items && jobData.items.length > 0) {
-                const titles = jobData.items.map(item => item.title).join(", ");
+                const titles = jobData.items.map((item) => item.title).join(", ");
                 addLogLine(`Queue: ${titles}`);
             }
         }
@@ -208,7 +210,7 @@ export function initializeSSEConnection(onJobFinishedCallback) {
     jobEventSource.addEventListener("job_update", (event) => {
         const data = JSON.parse(event.data);
         const item = processingList.querySelector(`.processing-item[data-asin="${data.asin}"]`);
-        
+
         if (item) {
             if (data.stage_text) {
                 const stageElement = document.getElementById("sync-stage-text");
@@ -217,20 +219,19 @@ export function initializeSSEConnection(onJobFinishedCallback) {
 
             item.querySelector(".status-text").textContent = data.status_text;
             item.querySelector(".progress-bar-inner").style.width = `${data.progress}%`;
-            
-            const title = item.querySelector('.processing-item-title').textContent;
+
+            const title = item.querySelector(".processing-item-title").textContent;
 
             // Logging Logic
             if (data.status_text === "Downloading..." && !item.classList.contains("processing-started")) {
                 addLogLine(`Processing: ${title}...`);
-                item.classList.add("processing-started"); 
+                item.classList.add("processing-started");
             }
 
             if (data.final_status === "success") {
                 item.classList.add("success");
                 addLogLine(`✓ Completed: ${title}`);
-            }
-            else if (data.final_status === "error") {
+            } else if (data.final_status === "error") {
                 item.classList.add("error");
                 addLogLine(`✗ Failed: ${title}`);
             }
@@ -248,8 +249,12 @@ export function initializeSSEConnection(onJobFinishedCallback) {
                     if (itemElement) {
                         itemElement.classList.remove("success", "error", "cancelled");
                         switch (finalItem.status) {
-                            case "COMPLETED": itemElement.classList.add("success"); break;
-                            case "FAILED": itemElement.classList.add("error"); break;
+                            case "COMPLETED":
+                                itemElement.classList.add("success");
+                                break;
+                            case "FAILED":
+                                itemElement.classList.add("error");
+                                break;
                             case "CANCELLED":
                                 itemElement.classList.add("cancelled");
                                 itemElement.querySelector(".status-text").textContent = "Cancelled";
@@ -264,12 +269,11 @@ export function initializeSSEConnection(onJobFinishedCallback) {
             if (processingPanelTitle) {
                 processingPanelTitle.textContent = `Job ${data.job_id} Finished (${data.status})`;
             }
-            
+
             if (processingPanelHeader) {
                 processingPanelHeader.removeEventListener("click", toggleProcessingPanel);
                 processingPanelHeader.style.cursor = "default";
             }
-
         } catch (error) {
             console.error("Error processing job_finished event:", error);
         } finally {
@@ -283,7 +287,7 @@ export function initializeSSEConnection(onJobFinishedCallback) {
 // --- Panel Rebuilders ---
 function rebuildSyncPanel(jobData) {
     currentJobId = jobData.job_id;
-    
+
     // 1. Reset Buttons
     if (cancelJobBtn) cancelJobBtn.style.display = "inline-block";
     if (clearReportBtn) clearReportBtn.style.display = "none"; // Hide residual clear button
@@ -295,11 +299,11 @@ function rebuildSyncPanel(jobData) {
         processingPanelHeader.addEventListener("click", toggleProcessingPanel);
         processingPanelHeader.style.cursor = "pointer";
     }
-    
+
     // Determine labels based on job type
     let title = "Library Synchronization";
     let asin = "sync-job";
-    
+
     if (jobData.job_type === "VERIFY") {
         title = "Library Integrity Check";
         asin = "verify-job";
@@ -325,7 +329,7 @@ function rebuildSyncPanel(jobData) {
 
 function rebuildProcessingPanel(jobData) {
     currentJobId = jobData.job_id;
-    
+
     // 1. Reset Buttons
     if (cancelJobBtn) cancelJobBtn.style.display = "inline-block";
     if (clearReportBtn) clearReportBtn.style.display = "none"; // Hide residual clear button
@@ -351,9 +355,20 @@ function rebuildProcessingPanel(jobData) {
             let itemClass = "";
 
             switch (book.status) {
-                case "PROCESSING": statusText = "Processing..."; progress = 25; break;
-                case "COMPLETED": statusText = "Complete!"; progress = 100; itemClass = "success"; break;
-                case "FAILED": statusText = "Failed!"; progress = 100; itemClass = "error"; break;
+                case "PROCESSING":
+                    statusText = "Processing...";
+                    progress = 25;
+                    break;
+                case "COMPLETED":
+                    statusText = "Complete!";
+                    progress = 100;
+                    itemClass = "success";
+                    break;
+                case "FAILED":
+                    statusText = "Failed!";
+                    progress = 100;
+                    itemClass = "error";
+                    break;
             }
             if (itemClass) item.classList.add(itemClass);
 
@@ -399,13 +414,19 @@ export async function checkForActiveJob() {
     }
 }
 
-export async function startJob(job_type, asins = [], clickedButton = null, job_params = null) {
+// Returns true if the job was started, false if it was refused (another job is
+// already running) or the request failed. Callers that show the processing
+// panel pass the selected books as `booksForPanel`: the panel is populated only
+// after the busy check passes, so starting a download while another job runs no
+// longer wipes the live job's panel and then bails.
+export async function startJob(job_type, asins = [], clickedButton = null, job_params = null, booksForPanel = null) {
     if (isBusy) {
         window.showCustomAlert("An operation is already in progress.");
-        return;
+        return false;
     }
     jobStartSource = "manual";
     setActionsBusy(true);
+    if (booksForPanel) openProcessingPanel(booksForPanel);
 
     try {
         const payload = { job_type };
@@ -421,10 +442,12 @@ export async function startJob(job_type, asins = [], clickedButton = null, job_p
         if (!response.ok || !data.success) {
             throw new Error(data.error || `Server responded with status: ${response.status}`);
         }
+        return true;
     } catch (error) {
         console.error(`Error starting ${job_type} job:`, error);
         window.showCustomAlert(`Could not start the ${job_type} job. Please check the application log.`);
         setActionsBusy(false);
+        return false;
     }
 }
 
