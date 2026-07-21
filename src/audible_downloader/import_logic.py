@@ -171,6 +171,23 @@ def _extract_cover(filepath, key):
         log.debug(f"IMPORT: thumbnail generation failed for {key}: {e}")
 
 
+def _row_blocks_repoint(existing_filepath, incoming_filepath):
+    """
+    True if a DB row we were about to repoint at `incoming_filepath` already
+    points at a *different* file that is still on disk — in which case we must
+    NOT repoint it. Repointing there would orphan the good file, and because the
+    embedded `asin` tag is file-controlled, it would let an imported file silently
+    hijack a real Audible row (mark it DOWNLOADED, steal its filepath). A row with
+    no filepath, a filepath whose file is gone, or one already pointing at this
+    same file does not block — those are the legitimate reconcile cases.
+    """
+    if not existing_filepath:
+        return False
+    if os.path.abspath(existing_filepath) == os.path.abspath(incoming_filepath):
+        return False
+    return os.path.isfile(existing_filepath)
+
+
 def adopt_file(filepath, *, allow_reconcile=True, key=None):
     """
     Adopt a single on-disk audio file into the library.
@@ -178,13 +195,17 @@ def adopt_file(filepath, *, allow_reconcile=True, key=None):
     Identity resolution (see the design note):
       1. Embedded `asin` tag that matches an existing DB row -> reconcile that
          Audible book in place (set filepath, mark DOWNLOADED). action="reconciled".
+         Guarded: if that row already points at a different, still-present file we
+         skip instead of repointing (action="skipped", reason="asin-already-linked"),
+         so a stray or hostile copy can neither hijack the row nor flip-flop the
+         filepath between duplicates on repeated scans.
       2. Same absolute path already tracked -> action="skipped" (idempotent
          re-scan; no duplicate row).
       3. Otherwise a genuine import: the key is `key` (when the caller pre-chose
          one, e.g. the upload path so the on-disk name and the row agree), else
          the embedded ASIN (present but unknown), else a synthetic "IMPORT-<uuid>".
          Metadata from the file's tags, then its filename. source='imported'.
-         action="imported".
+         action="imported". The same repoint guard applies here.
 
     `allow_reconcile=False` forces the file to be treated as an import even if it
     carries a known ASIN tag (not used by the current callers, but keeps the core
@@ -206,8 +227,14 @@ def adopt_file(filepath, *, allow_reconcile=True, key=None):
     with get_db_connection() as con:
         # (1) Known Audible book by embedded ASIN -> reconcile in place.
         if embedded_asin and allow_reconcile:
-            known = con.execute("SELECT asin FROM audiobooks WHERE asin = ?", (embedded_asin,)).fetchone()
+            known = con.execute("SELECT asin, filepath FROM audiobooks WHERE asin = ?", (embedded_asin,)).fetchone()
             if known is not None:
+                if _row_blocks_repoint(known["filepath"], filepath):
+                    log.info(
+                        f"IMPORT: ASIN {embedded_asin} is already linked to an existing file; "
+                        f"skipping '{filepath}' rather than repointing it."
+                    )
+                    return {"action": "skipped", "reason": "asin-already-linked", "key": embedded_asin}
                 con.execute(
                     "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ? WHERE asin = ?",
                     (filepath, embedded_asin),
@@ -229,8 +256,16 @@ def adopt_file(filepath, *, allow_reconcile=True, key=None):
     date_added = datetime.now(timezone.utc).isoformat()
 
     with get_db_connection() as con:
-        exists = con.execute("SELECT asin FROM audiobooks WHERE asin = ?", (key,)).fetchone()
+        exists = con.execute("SELECT asin, filepath FROM audiobooks WHERE asin = ?", (key,)).fetchone()
         if exists is not None:
+            # The chosen key already has a row. Same guard as step 1: never
+            # repoint a row that is already linked to a different live file.
+            if _row_blocks_repoint(exists["filepath"], filepath):
+                log.info(
+                    f"IMPORT: key {key} is already linked to an existing file; "
+                    f"skipping '{filepath}' rather than repointing it."
+                )
+                return {"action": "skipped", "reason": "key-already-linked", "key": key}
             # Re-adopting a previously imported book (embedded-ASIN key) at a new
             # path: refresh its location without spawning a duplicate row.
             con.execute(
@@ -289,6 +324,17 @@ def adopt_upload(staging_path, original_filename, settings):
     shutil.move(staging_path, final_path)
 
     result = adopt_file(final_path, key=key)
+    if result.get("action") == "skipped":
+        # The upload duplicated a book already linked to an existing file, so
+        # adopt_file declined to repoint the row. Don't leave the redundant copy
+        # we just placed sitting untracked under /data (a later scan would keep
+        # re-skipping it forever); remove it and report the skip.
+        try:
+            os.remove(final_path)
+        except OSError as e:
+            log.warning(f"IMPORT: could not remove redundant upload '{final_path}': {e}")
+        result["filepath"] = None
+        return result
     result["filepath"] = final_path
     return result
 

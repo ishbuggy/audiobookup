@@ -110,6 +110,51 @@ class TestAdoptFile:
         assert row["source"] == "audible"  # provenance is untouched by reconcile
         cover.assert_not_called()  # reconcile does not re-extract a cover
 
+    def test_reconcile_skipped_when_asin_already_linked_to_live_file(self, db, tmp_path):
+        # A book already DOWNLOADED to a real file on disk must NOT be repointed
+        # by a stray/hostile copy carrying the same embedded ASIN (H1: no clobber,
+        # no hijack). The original filepath is preserved and no row is duplicated.
+        existing = tmp_path / "canonical.m4b"
+        existing.write_bytes(b"real")
+        _seed(db, asin="B0KNOWN123", title="Known", status="DOWNLOADED", filepath=str(existing), source="audible")
+        result, _path, cover = _adopt(db, "stray.m4b", tmp_path, embedded_asin="B0KNOWN123")
+        assert result["action"] == "skipped"
+        assert result["reason"] == "asin-already-linked"
+        rows = _rows(db)
+        assert len(rows) == 1
+        assert rows[0]["filepath"] == str(existing)  # untouched
+        assert rows[0]["source"] == "audible"
+        cover.assert_not_called()
+
+    def test_reconcile_proceeds_when_linked_file_is_gone(self, db, tmp_path):
+        # If the tracked file no longer exists, the row IS the legitimate reconcile
+        # target and gets repointed at the found file.
+        _seed(db, asin="B0KNOWN123", title="Known", status="DOWNLOADED", filepath="/data/gone.m4b", source="audible")
+        result, path, _cover = _adopt(db, "found.m4b", tmp_path, embedded_asin="B0KNOWN123")
+        assert result["action"] == "reconciled"
+        assert _rows(db)[0]["filepath"] == path
+
+    def test_duplicate_asin_files_do_not_flip_flop(self, db, tmp_path):
+        # Two distinct files under /data carrying the same ASIN: the first is
+        # reconciled, the second is skipped, and re-adopting either is stable — the
+        # filepath never oscillates between them across repeated scans.
+        _seed(db, asin="B0DUP000000", title="Dup", status="MISSING", filepath="", source="audible")
+        r1, path_a, _c = _adopt(db, "a/dup.m4b", tmp_path, embedded_asin="B0DUP000000")
+        assert r1["action"] == "reconciled"
+        assert _rows(db)[0]["filepath"] == path_a
+
+        r2, _path_b, _c = _adopt(db, "b/dup.m4b", tmp_path, embedded_asin="B0DUP000000")
+        assert r2["action"] == "skipped"
+        assert r2["reason"] == "asin-already-linked"
+        assert _rows(db)[0]["filepath"] == path_a  # still A, not flipped to B
+
+        # Re-adopting A is the idempotent same-file case (still A).
+        m_meta, m_cover = _patch_meta(embedded_asin="B0DUP000000")
+        with m_meta, m_cover:
+            r3 = import_logic.adopt_file(path_a)
+        assert r3["action"] == "reconciled"
+        assert _rows(db)[0]["filepath"] == path_a
+
     def test_allow_reconcile_false_forces_import_of_known_asin(self, db, tmp_path):
         _seed(db, asin="B0KNOWN123", title="Known", author="A", status="DOWNLOADED", filepath="/data/x.m4b")
         # Same ASIN key already exists -> the import branch UPDATEs rather than duplicating.
@@ -261,6 +306,33 @@ class TestAdoptUpload:
         assert result["filepath"] != str(target)
         assert result["key"] in result["filepath"]
         assert target.read_bytes() == b"existing"
+
+    def test_duplicate_upload_is_skipped_and_orphan_removed(self, db, tmp_path):
+        # Uploading a file whose ASIN matches a book already linked to a live file
+        # must not clobber the row (H1); adopt_upload also removes the redundant
+        # copy it placed so no untracked orphan is left under /data.
+        existing = tmp_path / "canonical.m4b"
+        existing.write_bytes(b"real")
+        _seed(db, asin="B0KNOWN123", title="Known", status="DOWNLOADED", filepath=str(existing), source="audible")
+
+        staging = tmp_path / "stage.m4b"
+        staging.write_bytes(b"x")
+        target = str(tmp_path / "lib" / "Known.m4b")
+        m_meta, m_cover = _patch_meta(embedded_asin="B0KNOWN123", title="Known")
+        with (
+            m_meta,
+            m_cover,
+            mock.patch("audible_downloader.processing_logic.build_base_output_path", return_value=target),
+        ):
+            result = import_logic.adopt_upload(str(staging), "orig.m4b", {})
+
+        assert result["action"] == "skipped"
+        assert result["reason"] == "asin-already-linked"
+        assert result["filepath"] is None
+        assert not os.path.exists(target)  # orphan removed
+        rows = _rows(db)
+        assert len(rows) == 1
+        assert rows[0]["filepath"] == str(existing)  # canonical row untouched
 
 
 class TestScanUntracked:
