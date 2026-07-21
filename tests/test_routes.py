@@ -350,6 +350,46 @@ class TestUploadBookCover:
         response = self._upload(client)
         assert response.status_code == 400
 
+    def test_second_pass_failure_leaves_existing_covers_untouched(self, client, completed_setup, book_db, monkeypatch):
+        # If the thumbnail pass fails after the full-cover pass succeeded, the old
+        # covers must be preserved and custom_cover must NOT be set — no partial,
+        # inconsistent update.
+        from audible_downloader.routes import COVERS_DIR
+
+        os.makedirs(COVERS_DIR, exist_ok=True)
+        original = os.path.join(COVERS_DIR, "B001_original.jpg")
+        thumb = os.path.join(COVERS_DIR, "B001_thumb.jpg")
+        for p in (original, thumb):
+            with open(p, "wb") as f:
+                f.write(b"OLD")
+
+        _login_session(client)
+        # ffmpeg writes its output file and succeeds on the first call, fails on
+        # the second (thumbnail) call.
+        calls = {"n": 0}
+
+        def fake_run(command, *args, **kwargs):
+            calls["n"] += 1
+            out_path = command[-1]
+            if calls["n"] == 1:
+                with open(out_path, "wb") as f:
+                    f.write(b"NEW")
+                return mock.MagicMock(returncode=0, stderr="")
+            return mock.MagicMock(returncode=1, stderr="boom")
+
+        monkeypatch.setattr("audible_downloader.routes.subprocess.run", fake_run)
+        response = self._upload(client)
+        assert response.status_code == 400
+        # Old covers intact, no half-written staging file left behind.
+        assert open(original, "rb").read() == b"OLD"
+        assert open(thumb, "rb").read() == b"OLD"
+        # No half-written staging temp left behind in the covers dir.
+        assert not [f for f in os.listdir(COVERS_DIR) if f.startswith("tmp")]
+        con = sqlite3.connect(str(book_db))
+        flag = con.execute("SELECT custom_cover FROM audiobooks WHERE asin = 'B001'").fetchone()[0]
+        con.close()
+        assert flag == 0
+
     def test_ffmpeg_command_is_hardened_against_ssrf(self, client, completed_setup, book_db, monkeypatch):
         # ffmpeg detects format by content, so the input must be pinned to the
         # image demuxer with protocols restricted to local files, or a crafted

@@ -917,6 +917,12 @@ def upload_book_cover(asin):
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
         tmp.write(data)
         tmp_path = tmp.name
+    # Normalize into temporary .jpg outputs first and only swap BOTH into place
+    # once both passes succeed. Writing straight to the final paths meant a
+    # failure on the second (thumbnail) pass left the full cover already replaced
+    # while the thumbnail and the custom_cover flag lagged behind — an
+    # inconsistent state where the grid and detail views disagree.
+    staged = []  # (temp_output, final_path) pairs, swapped in only on full success
     try:
         # ffmpeg both validates the image (non-images fail) and normalizes to JPEG.
         # Security: ffmpeg detects format by content, not our extension check, so
@@ -924,20 +930,29 @@ def upload_book_cover(asin):
         # local files. Without this, a crafted upload could be parsed as a
         # concat/hls playlist and made to read local files or reach the network
         # (SSRF). -nostdin avoids any prompt hang.
-        for out_path, vf in ((original_path, None), (thumb_path, "scale=200:200")):
+        for final_path, vf in ((original_path, None), (thumb_path, "scale=200:200")):
+            fd, out_tmp = tempfile.mkstemp(suffix=".jpg", dir=COVERS_DIR)
+            os.close(fd)
+            staged.append((out_tmp, final_path))
             command = ["ffmpeg", "-nostdin", "-y", "-protocol_whitelist", "file", "-f", "image2", "-i", tmp_path]
             if vf:
                 command += ["-vf", vf]
-            command.append(out_path)
+            command.append(out_tmp)
             result = subprocess.run(command, capture_output=True, text=True)
             if result.returncode != 0:
                 log.warning(f"Cover conversion failed for {asin}: {result.stderr}")
                 return jsonify(error="Could not process the uploaded image."), 400
+        # Both passes succeeded: swap the new covers in atomically.
+        for out_tmp, final_path in staged:
+            os.replace(out_tmp, final_path)
     finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+        # Remove the input temp and any staged output not swapped in (the
+        # failure/early-return path); swapped-in temps are already gone.
+        for leftover in [tmp_path, *(out_tmp for out_tmp, _ in staged)]:
+            try:
+                os.remove(leftover)
+            except OSError:
+                pass
 
     con = get_db_connection()
     try:
