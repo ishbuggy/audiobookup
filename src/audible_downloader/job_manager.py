@@ -195,7 +195,7 @@ def import_worker(job_id, app_context, stop_event):
                 progress = 5 + int((index / total) * 90) if total else 100
                 announce(f"Importing {index}/{total}...", progress)
                 try:
-                    result = adopt_file(path)
+                    result = adopt_file(path, job_id=job_id)
                     action = result.get("action")
                     if action == "imported":
                         imported += 1

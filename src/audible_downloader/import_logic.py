@@ -23,6 +23,25 @@ from datetime import datetime, timezone
 from . import COVERS_DIR
 from .db import get_db_connection
 from .logger import log
+from .process_registry import process_registry
+
+
+def _run_registered(cmd, job_id):
+    """
+    Run `cmd` to completion as a registered subprocess so a job cancel can
+    SIGTERM it (house rule: every long-running ffmpeg/ffprobe call registers
+    with process_registry). Returns (returncode, stdout, stderr). When job_id is
+    None (e.g. the upload path, which isn't a cancellable job) register/unregister
+    are no-ops. OSError from spawning propagates to the caller.
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process_registry.register(job_id, proc)
+    try:
+        stdout, stderr = proc.communicate()
+    finally:
+        process_registry.unregister(job_id, proc)
+    return proc.returncode, stdout, stderr
+
 
 # An Audible ASIN is exactly 10 uppercase alphanumerics. The embedded `asin`
 # tag is read from *file content* (fully attacker-controlled on upload), and the
@@ -52,7 +71,7 @@ def import_staging_dir():
     return os.path.join(DATA_DIR, IMPORT_STAGING_DIRNAME)
 
 
-def _run_ffprobe_json(filepath):
+def _run_ffprobe_json(filepath, job_id=None):
     """
     Return the parsed `ffprobe -show_format` JSON for `filepath`, or an empty
     dict if the file can't be probed. Used to pull the embedded metadata tags
@@ -68,20 +87,20 @@ def _run_ffprobe_json(filepath):
         filepath,
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        returncode, stdout, stderr = _run_registered(cmd, job_id)
     except OSError as e:
         log.warning(f"IMPORT: ffprobe could not run on '{filepath}': {e}")
         return {}
-    if result.returncode != 0:
-        log.warning(f"IMPORT: ffprobe failed for '{filepath}': {result.stderr.strip()}")
+    if returncode != 0:
+        log.warning(f"IMPORT: ffprobe failed for '{filepath}': {(stderr or '').strip()}")
         return {}
     try:
-        return json.loads(result.stdout)
+        return json.loads(stdout)
     except json.JSONDecodeError:
         return {}
 
 
-def _probe_metadata(filepath):
+def _probe_metadata(filepath, job_id=None):
     """
     Extract the fields we persist for an imported book from `filepath`.
 
@@ -90,7 +109,7 @@ def _probe_metadata(filepath):
     runtime_min. Missing values are returned as None / 0 for the caller to
     apply its own fallbacks.
     """
-    fmt = _run_ffprobe_json(filepath).get("format", {})
+    fmt = _run_ffprobe_json(filepath, job_id).get("format", {})
     tags = {str(k).lower(): v for k, v in fmt.get("tags", {}).items()}
 
     runtime_min = 0
@@ -116,7 +135,7 @@ def _probe_metadata(filepath):
     }
 
 
-def _extract_cover(filepath, key):
+def _extract_cover(filepath, key, job_id=None):
     """
     Best-effort: pull an embedded cover image out of `filepath` into the same
     covers/<key>_original.jpg + _thumb.jpg layout the sync and upload paths use.
@@ -156,17 +175,17 @@ def _extract_cover(filepath, key):
         original_path,
     ]
     try:
-        result = subprocess.run(extract, capture_output=True, text=True)
+        returncode, _out, _err = _run_registered(extract, job_id)
     except OSError as e:
         log.debug(f"IMPORT: cover extract could not run for '{key}': {e}")
         return
-    if result.returncode != 0 or not os.path.exists(original_path):
+    if returncode != 0 or not os.path.exists(original_path):
         log.debug(f"IMPORT: no embedded cover in '{filepath}' for {key}.")
         return
 
     scale = ["ffmpeg", "-nostdin", "-y", "-i", original_path, "-vf", "scale=200:200", thumb_path]
     try:
-        subprocess.run(scale, capture_output=True, text=True)
+        _run_registered(scale, job_id)
     except OSError as e:
         log.debug(f"IMPORT: thumbnail generation failed for {key}: {e}")
 
@@ -188,7 +207,7 @@ def _row_blocks_repoint(existing_filepath, incoming_filepath):
     return os.path.isfile(existing_filepath)
 
 
-def adopt_file(filepath, *, allow_reconcile=True, key=None):
+def adopt_file(filepath, *, allow_reconcile=True, key=None, job_id=None):
     """
     Adopt a single on-disk audio file into the library.
 
@@ -221,7 +240,7 @@ def adopt_file(filepath, *, allow_reconcile=True, key=None):
     if not os.path.isfile(filepath):
         return {"action": "skipped", "reason": "not-found", "key": None}
 
-    meta = _probe_metadata(filepath)
+    meta = _probe_metadata(filepath, job_id)
     embedded_asin = meta["embedded_asin"]
 
     with get_db_connection() as con:
@@ -286,7 +305,7 @@ def adopt_file(filepath, *, allow_reconcile=True, key=None):
             action = "imported"
         con.commit()
 
-    _extract_cover(filepath, key)
+    _extract_cover(filepath, key, job_id)
     log.info(f"IMPORT: {action} '{title}' as {key} from '{filepath}'.")
     return {"action": action, "key": key, "title": title, "author": author}
 

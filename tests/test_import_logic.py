@@ -251,11 +251,45 @@ class TestCoverKeyGuard:
     def test_unsafe_key_bails_before_invoking_ffmpeg(self, tmp_path, monkeypatch):
         monkeypatch.setattr(import_logic, "COVERS_DIR", str(tmp_path))
         ran = []
-        monkeypatch.setattr(
-            import_logic.subprocess, "run", lambda *a, **k: ran.append(a) or mock.MagicMock(returncode=0)
-        )
+        monkeypatch.setattr(import_logic.subprocess, "Popen", lambda *a, **k: ran.append(a) or mock.MagicMock())
         import_logic._extract_cover("/some/file.m4b", "../evil")
         assert ran == []  # returned before touching ffmpeg / the disk
+
+
+class TestSubprocessRegistration:
+    """M5 regression: import ffprobe/ffmpeg calls register with process_registry
+    (via _run_registered) so a job cancel can SIGTERM them; job_id is threaded
+    from the import worker through adopt_file down to the probe/cover helpers."""
+
+    def test_run_registered_registers_and_unregisters(self, monkeypatch):
+        proc = mock.MagicMock()
+        proc.communicate.return_value = ("{}", "")
+        proc.returncode = 0
+        monkeypatch.setattr(import_logic.subprocess, "Popen", lambda *a, **k: proc)
+        registered, unregistered = [], []
+        monkeypatch.setattr(import_logic.process_registry, "register", lambda j, p: registered.append((j, p)))
+        monkeypatch.setattr(import_logic.process_registry, "unregister", lambda j, p: unregistered.append((j, p)))
+
+        import_logic._run_ffprobe_json("/some/file.m4b", job_id=7)
+        assert registered == [(7, proc)]
+        assert unregistered == [(7, proc)]
+
+    def test_job_id_reaches_the_probe(self, db, tmp_path, monkeypatch):
+        # adopt_file(..., job_id=N) must forward N to _probe_metadata so the
+        # underlying ffprobe is registered under the job.
+        full = tmp_path / "book.m4b"
+        full.write_bytes(b"x")
+        seen = {}
+        meta = {"embedded_asin": None, "title": "T", "author": None, "release_date": None, "runtime_min": 0}
+
+        def fake_probe(filepath, job_id=None):
+            seen["job_id"] = job_id
+            return meta
+
+        monkeypatch.setattr(import_logic, "_probe_metadata", fake_probe)
+        monkeypatch.setattr(import_logic, "_extract_cover", lambda *a, **k: None)
+        import_logic.adopt_file(str(full), job_id=42)
+        assert seen["job_id"] == 42
 
 
 class TestAdoptUpload:
