@@ -12,7 +12,7 @@ import os
 import re
 import subprocess
 from collections import deque
-from threading import Lock
+from threading import Lock, Thread
 
 from . import (
     DATABASE_DIR,
@@ -83,6 +83,39 @@ def _summarize_subprocess_error(exc, fallback):
         if lowered.startswith("error") or "not found" in lowered or "not available" in lowered:
             return line
     return " | ".join(candidates[-3:])
+
+
+def _run_registered(cmd, job_id, *, check=False, text=True, encoding=None, errors=None, env=None):
+    """
+    Run `cmd` to completion like subprocess.run, but registered with the
+    process_registry for its lifetime so a job cancel (SIGTERM) reaches these
+    otherwise-unregistered short probe/metadata calls (house rule: every
+    ffmpeg/ffprobe/audible subprocess must be cancellable). stdout and stderr are
+    always captured. Returns a subprocess.CompletedProcess; with check=True a
+    non-zero exit raises CalledProcessError carrying output/stderr, exactly as
+    subprocess.run would — so the existing fallback and error-summary handling is
+    unchanged. A SIGTERM surfaces as returncode -15, which the callers already
+    treat as cancellation.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=text,
+        encoding=encoding,
+        errors=errors,
+        env=env,
+    )
+    process_registry.register(job_id, proc)
+    try:
+        stdout, stderr = proc.communicate()
+    finally:
+        process_registry.unregister(job_id, proc)
+
+    result = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    if check:
+        result.check_returncode()
+    return result
 
 
 def _yield_progress(asin, status_text, progress, job_id=None):
@@ -183,6 +216,21 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             )
             process_registry.register(job_id, process)
 
+            # audible-cli writes its user-facing error text (e.g. "error: Asin ...
+            # not found in library.") to stdout, which we never read for progress.
+            # Drain it concurrently in a thread rather than only after wait(): if
+            # the child ever filled the ~64KB stdout pipe while we were busy
+            # reading stderr below, an undrained stdout would deadlock it. The
+            # collected text is joined after wait().
+            stdout_chunks = []
+
+            def _drain_stdout():
+                if process.stdout:
+                    stdout_chunks.append(process.stdout.read())
+
+            stdout_thread = Thread(target=_drain_stdout, daemon=True)
+            stdout_thread.start()
+
             # Capture stderr while scanning it for progress. audible-cli writes
             # its error messages here too, but this loop drains the stream to
             # EOF, so a later process.stderr.read() would come back empty — keep
@@ -202,10 +250,8 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
                         _yield_progress(asin, f"Downloading... {download_percent}%", overall_progress, job_id)
 
                 returncode = process.wait()
-                # audible-cli writes its user-facing error to stdout (e.g.
-                # "error: Asin ... not found in library."), which we never read
-                # for progress — grab it now so a failure can be explained.
-                stdout_text = process.stdout.read() if process.stdout else ""
+                stdout_thread.join()
+                stdout_text = "".join(stdout_chunks)
             finally:
                 process_registry.unregister(job_id, process)
 
@@ -224,9 +270,7 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
 
             endpoint, params = f"/1.0/library/{asin}", "response_groups=media,contributors,series,category_ladders"
             meta_command = ["audible", "api", "-p", params, endpoint]
-            result = subprocess.run(
-                meta_command, capture_output=True, text=True, check=True, encoding="utf-8", errors="replace", env=env
-            )
+            result = _run_registered(meta_command, job_id, check=True, encoding="utf-8", errors="replace", env=env)
             book_info = json.loads(result.stdout).get("item")
 
             def _find_file_by_ext(directory, extensions):
@@ -249,10 +293,9 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             current_decryption_args = []
             if raw_audio_file.lower().endswith(".aax"):
                 log.debug(f"PREPARE ({asin}): Detected AAX file. Using activation bytes.")
-                res = subprocess.run(
+                res = _run_registered(
                     ["audible", "activation-bytes"],
-                    capture_output=True,
-                    text=True,
+                    job_id,
                     check=True,
                     encoding="utf-8",
                     errors="replace",
@@ -324,7 +367,7 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
                         "default=noprint_wrappers=1:nokey=1",
                         decrypted_master_file,
                     ]
-                    dur_res = subprocess.run(dur_cmd, capture_output=True, text=True)
+                    dur_res = _run_registered(dur_cmd, job_id)
                     try:
                         actual_dur_sec = float(dur_res.stdout.strip())
                     except ValueError:
@@ -369,7 +412,7 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
                             "-",
                         ]
 
-                        v_proc = subprocess.run(verify_cmd, capture_output=True, text=True)
+                        v_proc = _run_registered(verify_cmd, job_id)
                         if v_proc.returncode != 0:
                             log.warning(f"PREPARE ({asin}): Verification failed for {dec_name}. Seek error detected.")
                             raise ValueError("Verification failed: File is not seekable.")
@@ -408,6 +451,14 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             break  # Break outer download loop
 
         except Exception as e:
+            # A registered probe/metadata subprocess killed by SIGTERM (-15) means
+            # the job was cancelled — bail cleanly like the download SIGTERM path
+            # above, rather than treating it as this strategy failing and either
+            # falling back to (an equally-cancelled) AAX or stranding the book in
+            # ERROR on the last strategy.
+            if isinstance(e, subprocess.CalledProcessError) and e.returncode == -15:
+                log.info(f"PREPARE ({asin}): Cancelled during preparation.")
+                return None, None
             reason = _summarize_subprocess_error(e, str(e))
             log.warning(f"PREPARE ({asin}): Download strategy {strategy_name} failed: {reason}")
             # Cleanup for retry
@@ -441,9 +492,7 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             "default=noprint_wrappers=1:nokey=1",
             audio_file,
         ]
-        probe_result = subprocess.run(
-            probe_cmd, capture_output=True, text=True, check=True, encoding="utf-8", errors="replace"
-        )
+        probe_result = _run_registered(probe_cmd, job_id, check=True, encoding="utf-8", errors="replace")
         total_duration_sec = float(probe_result.stdout.strip())
         total_duration_ms = int(total_duration_sec * 1000)
 
@@ -528,9 +577,7 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             if not copyright_info:
                 # Fallback to probe if API is empty
                 ffprobe_command = ["ffprobe"] + [audio_file]
-                probe_result = subprocess.run(
-                    ffprobe_command, capture_output=True, text=True, encoding="utf-8", errors="replace"
-                )
+                probe_result = _run_registered(ffprobe_command, job_id, encoding="utf-8", errors="replace")
                 for line in probe_result.stderr.splitlines():
                     if "copyright" in line.lower():
                         if ":" in line:
@@ -580,6 +627,11 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
         }, None
 
     except Exception as e:
+        # SIGTERM (-15) on the registered duration probe here is a cancellation,
+        # not a corrupt file — surface it as the clean cancel signal.
+        if isinstance(e, subprocess.CalledProcessError) and e.returncode == -15:
+            log.info(f"PREPARE ({asin}): Cancelled during metadata/chapter phase.")
+            return None, None
         log.error(f"PREPARE ({asin}): Failed during metadata/chapter phase: {e}", exc_info=True)
         return None, f"Failed during metadata/chapter processing: {e}"
 

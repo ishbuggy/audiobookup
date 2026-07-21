@@ -125,6 +125,44 @@ class TestDownloadRegistration:
         unregister.assert_called_once_with(1, proc)
 
 
+class TestRunRegistered:
+    """L3: short probe/metadata subprocesses run registered so a job cancel can
+    SIGTERM them, while preserving subprocess.run's check=True semantics so the
+    existing fallback/error-summary handling is unchanged."""
+
+    def test_registers_and_unregisters(self):
+        proc = mock.MagicMock()
+        proc.returncode = 0
+        proc.communicate.return_value = ("out", "err")
+        with (
+            mock.patch.object(ccl.subprocess, "Popen", return_value=proc),
+            mock.patch.object(ccl.process_registry, "register") as register,
+            mock.patch.object(ccl.process_registry, "unregister") as unregister,
+        ):
+            result = ccl._run_registered(["ffprobe"], 3)
+        assert result.returncode == 0
+        assert result.stdout == "out"
+        register.assert_called_once_with(3, proc)
+        unregister.assert_called_once_with(3, proc)
+
+    def test_check_raises_and_still_unregisters(self):
+        proc = mock.MagicMock()
+        proc.returncode = 1
+        proc.communicate.return_value = ("bad stdout", "boom")
+        with (
+            mock.patch.object(ccl.subprocess, "Popen", return_value=proc),
+            mock.patch.object(ccl.process_registry, "register"),
+            mock.patch.object(ccl.process_registry, "unregister") as unregister,
+        ):
+            with pytest.raises(subprocess.CalledProcessError) as excinfo:
+                ccl._run_registered(["audible", "api"], 3, check=True)
+        # The raised error carries the captured streams (used by the summarizer).
+        assert excinfo.value.output == "bad stdout"
+        assert excinfo.value.stderr == "boom"
+        # Unregistered even though check raised (finally-paired).
+        unregister.assert_called_once_with(3, proc)
+
+
 class TestRemuxLossless:
     """Phase 8 (FR12): no-re-encode finalize copies the audio straight through
     (-c copy) while muxing chapters/metadata, then embeds the cover — same

@@ -48,9 +48,11 @@ _reservation_lock = Lock()
 _MIN_OUTPUT_BYTES = 64 * 1024
 
 
-def _probe_duration_seconds(filepath):
+def _probe_duration_seconds(filepath, job_id=None):
     """Return the media duration of `filepath` in seconds via ffprobe, or None
-    if it can't be determined (missing or unreadable/corrupt file)."""
+    if it can't be determined (missing or unreadable/corrupt file). Registered
+    with process_registry (house rule) so a job cancel can SIGTERM the probe;
+    job_id may be None, in which case register/unregister are no-ops."""
     cmd = [
         "ffprobe",
         "-v",
@@ -62,13 +64,18 @@ def _probe_duration_seconds(filepath):
         filepath,
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        process_registry.register(job_id, process)
+        try:
+            stdout, _stderr = process.communicate()
+        finally:
+            process_registry.unregister(job_id, process)
     except OSError:
         return None
-    if result.returncode != 0:
+    if process.returncode != 0:
         return None
     try:
-        return float(result.stdout.strip())
+        return float(stdout.strip())
     except ValueError:
         return None
 
@@ -279,6 +286,15 @@ class BookProcessor:
         On collision we inject the ASIN ("Title.m4b" -> "Title_B00XYZ.m4b"),
         which is unique per book, and mark this book as a duplicate.
         """
+        # Decide whether an on-disk file at the target forces a collision BEFORE
+        # taking the lock: _existing_file_is_foreign may run an ffprobe subprocess
+        # (to read an untracked file's embedded ASIN), and holding the global
+        # reservation lock across a subprocess would serialize every other book's
+        # PREPARE reservation. This check only reads the filesystem/DB, not the
+        # in-memory reservation set, so it's safe outside the lock; the atomic
+        # check-and-reserve against _reserved_output_paths still happens under it.
+        file_is_foreign = os.path.exists(base_output_path) and self._existing_file_is_foreign(base_output_path)
+
         with _reservation_lock:
             collision = False
             if base_output_path in _reserved_output_paths:
@@ -287,8 +303,8 @@ class BookProcessor:
                     f"in-flight book. Appending unique ID."
                 )
                 collision = True
-            elif os.path.exists(base_output_path):
-                collision = self._existing_file_is_foreign(base_output_path)
+            elif file_is_foreign:
+                collision = True
 
             if collision:
                 root, ext = os.path.splitext(base_output_path)
@@ -517,7 +533,7 @@ class BookProcessor:
             else:
                 # If a chunk fails, we can't proceed.
                 log.error(f"PROCESSOR ({self.asin}): A chunk failed to encode. Aborting merge.")
-                self._update_db_on_failure("A chapter chunk failed to encode.")
+                self._fail_or_cancel("A chapter chunk failed to encode.")
                 self._completion_event.set()  # Signal completion to unblock the main thread
                 return  # Stop processing further
 
@@ -549,7 +565,7 @@ class BookProcessor:
             row = con.execute("SELECT runtime_min FROM audiobooks WHERE asin = ?", (self.asin,)).fetchone()
         expected_min = row["runtime_min"] if row else None
         if expected_min and expected_min > 0:
-            actual_sec = _probe_duration_seconds(path)
+            actual_sec = _probe_duration_seconds(path, self.job_id)
             if actual_sec is None:
                 return False, "Output file could not be read back (corrupt or unreadable)."
             expected_sec = expected_min * 60
@@ -594,6 +610,16 @@ class BookProcessor:
         output_ok, reason = self._verify_output_file()
         if not output_ok:
             log.error(f"PROCESSOR ({self.asin}): Output verification failed: {reason}")
+            # Delete the failed artifact so a truncated/corrupt file isn't left
+            # sitting at the final path masquerading as a real book. It would
+            # otherwise linger until a later retry's embedded-ASIN check chose to
+            # overwrite it; removing it now keeps /data honest in the meantime.
+            if self.final_output_path and os.path.exists(self.final_output_path):
+                try:
+                    os.remove(self.final_output_path)
+                    log.info(f"PROCESSOR ({self.asin}): Removed failed output file {self.final_output_path}.")
+                except OSError as e:
+                    log.warning(f"PROCESSOR ({self.asin}): Could not remove failed output file: {e}")
             self._update_db_on_failure(reason)
             return
 
@@ -630,7 +656,7 @@ class BookProcessor:
         )
 
         if not success:
-            self._update_db_on_failure("Final merge of chapter chunks failed.")
+            self._fail_or_cancel("Final merge of chapter chunks failed.")
         else:
             self._finalize_success(conversion_start_time)
 
@@ -652,7 +678,7 @@ class BookProcessor:
         success = remux_book_lossless(self.asin, self.job_id, self.temp_dir, self.final_output_path, self.context)
 
         if not success:
-            self._update_db_on_failure("Lossless remux failed.")
+            self._fail_or_cancel("Lossless remux failed.")
         else:
             # Don't feed the remux's (much faster) duration into the shared ETA
             # model — see _finalize_success's record_eta note.
@@ -661,6 +687,23 @@ class BookProcessor:
         # This is the final step, so we signal the main `run` method to unblock.
         self._completion_event.set()
         log.info(f"TASK-REMUX ({self.asin}): Finalization complete.")
+
+    def _fail_or_cancel(self, error_message):
+        """
+        Record a step failure — unless the job is being cancelled.
+
+        Cancellation sends SIGTERM to the running ffmpeg, and the merge/encode/
+        remux helpers report that -15 as a plain False/None without distinguishing
+        it from a genuine error. When the stop_event is set we treat that as the
+        cancellation it is and leave the book's status untouched (it stays
+        NEW/MISSING and is retried) instead of stranding it in ERROR with a
+        misleading "... failed." message. Mirrors the (None, None) cancel handling
+        on the prepare path.
+        """
+        if self.stop_event is not None and self.stop_event.is_set():
+            log.info(f"PROCESSOR ({self.asin}): Step cancelled; leaving book status unchanged.")
+            return
+        self._update_db_on_failure(error_message)
 
     def _update_db_on_failure(self, error_message):
         """Centralized method to update the database when any step fails."""

@@ -670,3 +670,127 @@ class TestCancellation:
         processor = BookProcessor(asin="B0OURS", job_id=1)
         assert processor._cancelled() is False
         assert not processor._completion_event.is_set()
+
+
+class TestCancellationMidConversion:
+    """L1: a book cancelled *while its ffmpeg is running* (merge/remux/encode
+    report the -15 SIGTERM as a plain False/None, indistinguishable from a real
+    error) must NOT be stranded in ERROR. The mid-subprocess cancel is treated
+    like the prepare-phase (None, None) cancel: the book's status is left
+    untouched for a later retry."""
+
+    def _processor(self):
+        # stop_event is UNSET at task entry (so _cancelled() lets the work start)
+        # and is set while the subprocess "runs", exactly like a real cancel.
+        processor = BookProcessor(asin="B0OURS", job_id=1, stop_event=Event())
+        processor.final_output_path = "/data/A/Title/Title.m4b"
+        return processor
+
+    def test_merge_cancel_does_not_mark_error(self):
+        processor = self._processor()
+
+        def _cancel_then_fail(*_a, **_k):
+            processor.stop_event.set()
+            return False
+
+        with (
+            mock.patch.object(processing_logic, "merge_book_chunks", side_effect=_cancel_then_fail),
+            mock.patch.object(processor, "_update_db_on_failure") as fail,
+        ):
+            processor._merge_and_finalize()
+        fail.assert_not_called()
+        assert processor._completion_event.is_set()
+
+    def test_remux_cancel_does_not_mark_error(self):
+        processor = self._processor()
+
+        def _cancel_then_fail(*_a, **_k):
+            processor.stop_event.set()
+            return False
+
+        with (
+            mock.patch.object(processing_logic, "remux_book_lossless", side_effect=_cancel_then_fail),
+            mock.patch.object(processor, "_update_db_on_failure") as fail,
+        ):
+            processor._remux_and_finalize()
+        fail.assert_not_called()
+        assert processor._completion_event.is_set()
+
+    def test_encode_chunk_cancel_does_not_mark_error(self):
+        processor = self._processor()
+        processor.total_chunks = 1
+
+        def _cancel_then_fail(*_a, **_k):
+            processor.stop_event.set()
+            return None  # chunk "failed" (really: SIGTERM'd)
+
+        with (
+            mock.patch.object(processing_logic, "encode_chapter_chunk", side_effect=_cancel_then_fail),
+            mock.patch.object(processor, "_update_db_on_failure") as fail,
+        ):
+            processor._encode_and_track_chunk({"index": 0})
+        fail.assert_not_called()
+        assert processor._completion_event.is_set()
+
+    def test_genuine_merge_failure_still_marks_error(self):
+        # Contrast: with no cancellation the failure is real and IS recorded.
+        processor = BookProcessor(asin="B0OURS", job_id=1, stop_event=Event())
+        processor.final_output_path = "/data/A/Title/Title.m4b"
+        with (
+            mock.patch.object(processing_logic, "merge_book_chunks", return_value=False),
+            mock.patch.object(processor, "_update_db_on_failure") as fail,
+        ):
+            processor._merge_and_finalize()
+        fail.assert_called_once_with("Final merge of chapter chunks failed.")
+
+
+class TestFailedVerificationCleanup:
+    """L4: when merge/remux succeed but the output fails verification, the bad
+    (truncated/corrupt) artifact is removed from disk so it doesn't linger at the
+    final path looking like a real book until a later retry overwrites it."""
+
+    def test_failed_verification_removes_output_file(self):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = "/data/A/Title/Title.m4b"
+        with (
+            mock.patch.object(processing_logic, "merge_book_chunks", return_value=True),
+            mock.patch.object(processor, "_verify_output_file", return_value=(False, "truncated")),
+            mock.patch.object(processor, "_update_db_on_failure"),
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("os.remove") as remove,
+        ):
+            processor._merge_and_finalize()
+        remove.assert_called_once_with("/data/A/Title/Title.m4b")
+
+    def test_remove_failure_is_non_fatal(self):
+        # An unremovable bad file still marks the book ERROR; it doesn't raise.
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = "/data/A/Title/Title.m4b"
+        with (
+            mock.patch.object(processing_logic, "merge_book_chunks", return_value=True),
+            mock.patch.object(processor, "_verify_output_file", return_value=(False, "truncated")),
+            mock.patch.object(processor, "_update_db_on_failure") as fail,
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("os.remove", side_effect=OSError("busy")),
+        ):
+            processor._merge_and_finalize()
+        fail.assert_called_once_with("truncated")
+
+
+class TestProbeDurationRegistration:
+    """L3: the output-verification duration probe runs as a registered
+    subprocess so a job cancel can SIGTERM it."""
+
+    def test_probe_registers_and_unregisters(self):
+        proc = mock.MagicMock()
+        proc.returncode = 0
+        proc.communicate.return_value = ("3600.0", "")
+        with (
+            mock.patch.object(processing_logic.subprocess, "Popen", return_value=proc),
+            mock.patch.object(processing_logic.process_registry, "register") as register,
+            mock.patch.object(processing_logic.process_registry, "unregister") as unregister,
+        ):
+            result = processing_logic._probe_duration_seconds("/x.m4b", job_id=7)
+        assert result == 3600.0
+        register.assert_called_once_with(7, proc)
+        unregister.assert_called_once_with(7, proc)
