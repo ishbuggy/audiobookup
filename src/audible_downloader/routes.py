@@ -589,6 +589,12 @@ def cancel_job():
 # can never be removed out from under the worker.
 _CLEARABLE_JOB_STATUSES = ("COMPLETED", "FAILED", "CANCELLED")
 
+# Upper bound for the older_than `days` param. timedelta(days=...) raises
+# OverflowError for astronomically large values (and that computation sits
+# outside the DB try block), so cap the input; "older than 100 years" already
+# clears every job anyway.
+_MAX_CLEAR_DAYS = 36500
+
 
 @app.route("/api/jobs/clear", methods=["POST"])
 @login_required
@@ -612,8 +618,10 @@ def clear_jobs():
         params = list(_CLEARABLE_JOB_STATUSES)
     elif mode == "older_than":
         days = data.get("days")
-        if not isinstance(days, int) or isinstance(days, bool) or days <= 0:
-            return jsonify(error="'days' must be a positive integer for older_than mode."), 400
+        if not isinstance(days, int) or isinstance(days, bool) or days <= 0 or days > _MAX_CLEAR_DAYS:
+            return jsonify(
+                error=f"'days' must be a positive integer no greater than {_MAX_CLEAR_DAYS} for older_than mode."
+            ), 400
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         # COALESCE so a finished job that somehow lacks an end_time still gets
         # aged out by its start_time rather than being immortal.

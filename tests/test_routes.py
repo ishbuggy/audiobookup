@@ -576,7 +576,9 @@ class TestClearJobs:
         assert response.status_code == 400
         assert _job_ids(jobs_db) == {1, 2, 3, 4, 5}  # nothing deleted
 
-    @pytest.mark.parametrize("days", [0, -5, "30", 1.5, True, None])
+    # The huge value (10**18) would overflow timedelta(days=...) and raise an
+    # unhandled 500 before the bound was added; it must be a clean 400.
+    @pytest.mark.parametrize("days", [0, -5, "30", 1.5, True, None, 10**18, 36501])
     def test_older_than_requires_positive_int_days(self, client, completed_setup, jobs_db, days):
         _login_session(client)
         response = client.post("/api/jobs/clear", json={"mode": "older_than", "days": days})
