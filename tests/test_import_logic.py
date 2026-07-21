@@ -200,6 +200,32 @@ class TestAdoptFile:
         assert result["action"] == "skipped"
         assert result["reason"] == "not-found"
 
+    def test_zero_byte_file_is_skipped_on_scan(self, db, tmp_path):
+        # L11: a 0-byte file under /data must not become a junk row. The size guard
+        # fires even though the (mocked) probe returns no explicit probe_ok flag.
+        full = tmp_path / "empty.m4b"
+        full.write_bytes(b"")
+        m_meta, m_cover = _patch_meta()
+        with m_meta, m_cover:
+            result = import_logic.adopt_file(str(full))
+        assert result["action"] == "skipped"
+        assert result["reason"] == "unreadable-media"
+        assert _rows(db) == []
+
+    def test_unprobeable_file_is_skipped_on_scan(self, db, tmp_path):
+        # L11: non-audio content that merely carries an importable extension yields
+        # no ffprobe `format` (probe_ok False) and must be skipped, not adopted.
+        full = tmp_path / "junk.m4b"
+        full.write_bytes(b"not really audio")
+        with (
+            mock.patch.object(import_logic, "_run_ffprobe_json", return_value={}),
+            mock.patch.object(import_logic, "_extract_cover"),
+        ):
+            result = import_logic.adopt_file(str(full))
+        assert result["action"] == "skipped"
+        assert result["reason"] == "unreadable-media"
+        assert _rows(db) == []
+
     def test_m4a_is_accepted(self, db, tmp_path):
         result, _path, _cover = _adopt(db, "book.m4a", tmp_path, title="AAC Book")
         assert result["action"] == "imported"
@@ -368,6 +394,30 @@ class TestAdoptUpload:
         assert len(rows) == 1
         assert rows[0]["filepath"] == str(existing)  # canonical row untouched
 
+    def test_upload_preserves_m4a_extension(self, db, tmp_path):
+        # L8: an uploaded .m4a keeps its real container extension instead of being
+        # stored as .m4b — adopt_upload passes the staged file's ext through to
+        # build_base_output_path.
+        staging = tmp_path / "stage.m4a"
+        staging.write_bytes(b"x")
+        target = str(tmp_path / "lib" / "Book.m4a")
+        captured = {}
+
+        def fake_build(settings, key, author, title, narrator, publisher, ext=".m4b"):
+            captured["ext"] = ext
+            return target
+
+        m_meta, m_cover = _patch_meta(title="Book", author="A")
+        with (
+            m_meta,
+            m_cover,
+            mock.patch("audible_downloader.processing_logic.build_base_output_path", side_effect=fake_build),
+        ):
+            result = import_logic.adopt_upload(str(staging), "orig.m4a", {})
+
+        assert captured["ext"] == ".m4a"
+        assert result["filepath"] == target
+
 
 class TestScanUntracked:
     def test_returns_only_untracked_importable_files(self, db, tmp_path, monkeypatch):
@@ -387,3 +437,22 @@ class TestScanUntracked:
 
         found = import_logic.scan_data_dir_for_untracked()
         assert found == [str(untracked)]  # tracked, non-audio, and staged files excluded
+
+    def test_staging_sibling_dir_is_still_scanned(self, db, tmp_path, monkeypatch):
+        # L10: only the staging dir (and its contents) is skipped. A sibling whose
+        # name merely shares the staging prefix (e.g. `.import_staging_old`) must
+        # still be scanned — the skip matches on a separator boundary, not a bare
+        # string prefix.
+        data = tmp_path / "data"
+        sibling = data / f"{import_logic.IMPORT_STAGING_DIRNAME}_old"
+        sibling.mkdir(parents=True)
+        kept = sibling / "kept.m4b"
+        kept.write_bytes(b"x")
+        staged = data / import_logic.IMPORT_STAGING_DIRNAME / "wip.m4b"
+        staged.parent.mkdir(parents=True)
+        staged.write_bytes(b"x")
+
+        monkeypatch.setattr(import_logic, "DATA_DIR", str(data))
+        found = import_logic.scan_data_dir_for_untracked()
+        assert os.path.abspath(str(kept)) in found  # sibling dir scanned
+        assert os.path.abspath(str(staged)) not in found  # real staging dir skipped

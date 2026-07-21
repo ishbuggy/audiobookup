@@ -640,7 +640,13 @@ def clear_jobs():
         id_placeholders = ",".join("?" for _ in job_ids)
         # Remove child job_items first so no orphan rows are left behind.
         deleted_items = cur.execute(f"DELETE FROM job_items WHERE job_id IN ({id_placeholders})", job_ids).rowcount
-        deleted_jobs = cur.execute(f"DELETE FROM jobs WHERE job_id IN ({id_placeholders})", job_ids).rowcount
+        # Re-assert the finished-status predicate on the DELETE itself so the
+        # "never delete RUNNING/QUEUED" guarantee is enforced by the query rather
+        # than resting solely on the finished-states-are-terminal invariant.
+        deleted_jobs = cur.execute(
+            f"DELETE FROM jobs WHERE job_id IN ({id_placeholders}) AND status IN ({status_placeholders})",
+            [*job_ids, *_CLEARABLE_JOB_STATUSES],
+        ).rowcount
         con.commit()
     except sqlite3.Error as e:
         con.rollback()
@@ -812,8 +818,9 @@ def update_book_metadata(asin):
 
     A field is only touched when its key is present in the request body; an
     empty value clears that override (reverting to the Audible value). Values
-    are trimmed and length-capped. Filenames on disk are intentionally NOT
-    renamed here (that is the opt-in Phase 5.5 behavior).
+    are trimmed and length-capped. After the DB write the on-disk filename is
+    reconciled via rename_book_to_match_metadata(), which itself gates whether a
+    rename actually happens (the opt-in Phase 5.5 behavior lives inside that fn).
     """
 
     def _clean(value):
@@ -982,6 +989,8 @@ def import_upload():
     filename = request.args.get("filename") or request.headers.get("X-Filename", "")
     ext = os.path.splitext(filename)[1].lower()
     if ext not in IMPORTABLE_EXTS:
+        # Rejected before reading any bytes; drain so the client sees this 400.
+        _drain_request_stream(request.stream)
         return jsonify(error="Unsupported file type. Only .m4b and .m4a are accepted."), 400
 
     max_gb = load_settings().get("import", {}).get("max_upload_gb", 2)
@@ -1009,6 +1018,8 @@ def import_upload():
                 out.write(chunk)
 
         if over_limit:
+            # Discard the rest of the oversize body so the client receives the 413.
+            _drain_request_stream(request.stream)
             _safe_remove(staging_path)
             return jsonify(error=f"Upload exceeds the {max_gb} GB limit."), 413
         if written == 0:
@@ -1035,6 +1046,29 @@ def _safe_remove(path):
     """Best-effort delete of a staging file; never raises."""
     try:
         os.remove(path)
+    except OSError:
+        pass
+
+
+# Cap on how much of a rejected upload body we'll read-and-discard. Draining lets
+# the client see our error response instead of a mid-send connection reset, but we
+# won't sit reading an unbounded body from a client that ignores the rejection.
+_DRAIN_LIMIT_BYTES = 8 * 1024 * 1024
+
+
+def _drain_request_stream(stream):
+    """
+    Best-effort: read and discard up to _DRAIN_LIMIT_BYTES of the request body so
+    a client whose upload we rejected early still receives the JSON error rather
+    than a broken pipe. Never raises; stops at the cap for an oversize/hostile body.
+    """
+    drained = 0
+    try:
+        while drained < _DRAIN_LIMIT_BYTES:
+            chunk = stream.read(min(1024 * 1024, _DRAIN_LIMIT_BYTES - drained))
+            if not chunk:
+                break
+            drained += len(chunk)
     except OSError:
         pass
 

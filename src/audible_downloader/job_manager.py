@@ -187,6 +187,7 @@ def import_worker(job_id, app_context, stop_event):
 
             imported, reconciled, skipped = 0, 0, 0
             cancelled = False
+            progress = 5  # last announced progress; keeps a first-iteration cancel bounded
             for index, path in enumerate(candidates, start=1):
                 if stop_event.is_set():
                     log.info(f"WORKER ({job_id}): IMPORT job cancelled.")
@@ -208,10 +209,13 @@ def import_worker(job_id, app_context, stop_event):
                     skipped += 1
 
             final_status = "CANCELLED" if cancelled else "COMPLETED"
-            announce(
-                f"Done: {imported} imported, {reconciled} reconciled, {skipped} skipped.",
-                100,
-            )
+            counts = f"{imported} imported, {reconciled} reconciled, {skipped} skipped"
+            if cancelled:
+                # Don't read as a clean success: report the cancel and freeze the
+                # progress where it stopped rather than snapping to 100%.
+                announce(f"Cancelled: {counts} before stopping.", progress)
+            else:
+                announce(f"Done: {counts}.", 100)
             log.info(
                 f"WORKER ({job_id}): IMPORT complete. imported={imported} reconciled={reconciled} skipped={skipped}."
             )

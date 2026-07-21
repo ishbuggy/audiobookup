@@ -111,6 +111,11 @@ def _probe_metadata(filepath, job_id=None):
     """
     fmt = _run_ffprobe_json(filepath, job_id).get("format", {})
     tags = {str(k).lower(): v for k, v in fmt.get("tags", {}).items()}
+    # ffprobe returns no `format` object for a file it can't read (missing,
+    # zero-byte, truncated, or non-audio content that merely carries an
+    # importable extension). The scan path uses this to skip junk rather than
+    # creating a placeholder row.
+    probe_ok = bool(fmt)
 
     runtime_min = 0
     try:
@@ -132,6 +137,7 @@ def _probe_metadata(filepath, job_id=None):
         "author": (tags.get("artist") or tags.get("album_artist") or "").strip() or None,
         "release_date": (tags.get("date") or "").strip() or None,
         "runtime_min": runtime_min,
+        "probe_ok": probe_ok,
     }
 
 
@@ -267,7 +273,23 @@ def adopt_file(filepath, *, allow_reconcile=True, key=None, job_id=None):
         if tracked is not None:
             return {"action": "skipped", "reason": "already-tracked", "key": tracked["asin"]}
 
-    # (3) Genuine import. Choose a stable key and build the metadata.
+    # (3) Genuine import.
+    # Scan-path robustness: a zero-byte or unprobeable file is almost certainly
+    # not a genuine audiobook (empty, truncated, or non-audio content that merely
+    # carries an importable extension). Skip it rather than polluting the library
+    # with a junk row (title=filename, Unknown Author, runtime 0). The upload path
+    # (key set) is an explicit user action and already rejects empty bodies at the
+    # endpoint, so it isn't second-guessed here.
+    if key is None and (os.path.getsize(filepath) == 0 or not meta.get("probe_ok", True)):
+        log.info(f"IMPORT: skipping unreadable/empty media '{filepath}' (ffprobe found no media format).")
+        return {"action": "skipped", "reason": "unreadable-media", "key": None}
+
+    # Choose a stable key and build the metadata. NOTE: for an untagged file the
+    # synthetic IMPORT-<uuid> key is minted fresh per adoption and identity rests
+    # solely on the filepath match in step (2) — moving or renaming an already-
+    # imported untagged file within /data orphans its old row and adopts the new
+    # path under a new key (a duplicate row). Inherent to the no-content-hash
+    # design; a tagged file (real ASIN) reconciles correctly across moves.
     key = key or embedded_asin or f"IMPORT-{uuid.uuid4().hex[:12]}"
     title = meta["title"] or os.path.splitext(os.path.basename(filepath))[0]
     author = meta["author"] or "Unknown Author"
@@ -332,7 +354,11 @@ def adopt_upload(staging_path, original_filename, settings):
     title = meta["title"] or os.path.splitext(os.path.basename(original_filename))[0] or "Unknown Title"
     author = meta["author"] or "Unknown Author"
 
-    final_path = build_base_output_path(settings, key, author, title, "N/A", "N/A")
+    # Keep the uploaded file's real container extension (.m4a stays .m4a) rather
+    # than defaulting to .m4b, so the on-disk name reflects the actual content and
+    # matches what scan-in-place would record for the same file.
+    ext = os.path.splitext(staging_path)[1].lower() or ".m4b"
+    final_path = build_base_output_path(settings, key, author, title, "N/A", "N/A", ext=ext)
     # Collision-safe: never overwrite an existing file (which may belong to
     # another book) — suffix the key, matching the download/rename convention.
     if os.path.exists(final_path):
@@ -371,10 +397,14 @@ def scan_data_dir_for_untracked():
             if row["filepath"]
         }
 
-    staging = import_staging_dir()
+    staging = os.path.abspath(import_staging_dir())
     untracked = []
     for root, _dirs, files in os.walk(DATA_DIR):
-        if os.path.abspath(root).startswith(os.path.abspath(staging)):
+        # Skip the staging dir itself and anything under it. Match on a separator
+        # boundary so a sibling like `/data/.import_staging_old/` isn't caught by
+        # a bare prefix match.
+        root_abs = os.path.abspath(root)
+        if root_abs == staging or root_abs.startswith(staging + os.sep):
             continue
         for name in files:
             if name.lower().endswith(IMPORTABLE_EXTS):

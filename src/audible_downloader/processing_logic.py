@@ -102,13 +102,17 @@ def _strip_subtitle(title):
     return main or title
 
 
-def build_base_output_path(settings, asin, author, title, narrator, publisher):
+def build_base_output_path(settings, asin, author, title, narrator, publisher, ext=".m4b"):
     """
     Compute the base output path (`/data/.../Name.m4b`) for a book from the
     naming template and settings, applying optional subtitle trimming and
     filename sanitization. Collision handling is layered on top by the caller.
     The author/title passed in are already the effective values (native or the
     custom override) — this function does not decide which to use.
+
+    `ext` defaults to '.m4b' (every conversion output); the import path passes the
+    uploaded file's real extension so an adopted `.m4a` keeps its true extension
+    instead of being mislabeled `.m4b`.
     """
     template = settings.get("naming", {}).get("template", "{author}/{title}/{author} - {title}")
 
@@ -124,7 +128,7 @@ def build_base_output_path(settings, asin, author, title, narrator, publisher):
         .replace("{publisher}", _sanitize_filename(publisher or "Unknown Publisher"))
         .replace("{asin}", _sanitize_filename(asin))
     )
-    return os.path.join("/data", f"{relative_path}.m4b")
+    return os.path.join("/data", f"{relative_path}{ext}")
 
 
 def _cleanup_empty_dirs(directory):
