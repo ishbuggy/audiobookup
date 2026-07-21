@@ -438,10 +438,16 @@ class BookProcessor:
             self.download_complete_event.set()
 
         if not self.context:
-            # prepare_error carries the real underlying cause (e.g. audible-cli
-            # reporting a title is no longer available) instead of a generic
-            # message; it is None only on cancellation.
-            self._update_db_on_failure(prepare_error or "Failed during asset download/preparation.")
+            # prepare_book_assets returns (None, reason) on a genuine failure and
+            # (None, None) on cancellation. Only a real failure marks the book
+            # ERROR (with the underlying cause, e.g. audible-cli reporting a title
+            # is no longer available). A cancel leaves the book's status untouched
+            # — it stays NEW/MISSING and is retried — instead of stranding it in
+            # ERROR with a misleading message.
+            if prepare_error is None:
+                log.info(f"TASK-PREPARE ({self.asin}): Preparation cancelled; leaving book status unchanged.")
+            else:
+                self._update_db_on_failure(prepare_error)
             self._completion_event.set()
             return
 

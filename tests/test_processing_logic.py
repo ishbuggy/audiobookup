@@ -518,9 +518,12 @@ class TestFailureReporting:
         fail = self._run_prepare_with((None, "Title no longer available"))
         fail.assert_called_once_with("Title no longer available")
 
-    def test_missing_reason_uses_generic_fallback(self):
+    def test_cancellation_does_not_mark_error(self):
+        # (None, None) is the cancellation signal, not a failure: the book must
+        # NOT be marked ERROR — it stays in its prior status (NEW/MISSING) for a
+        # later retry instead of being stranded in ERROR with a bogus message.
         fail = self._run_prepare_with((None, None))
-        fail.assert_called_once_with("Failed during asset download/preparation.")
+        fail.assert_not_called()
 
 
 class TestOutputVerification:
