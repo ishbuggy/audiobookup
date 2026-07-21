@@ -732,6 +732,19 @@ h2 {
     background: var(--color-accent-red);
 }
 
+/* Deep-linkable status boxes: clicking one filters the library grid below.
+   The lift + shadow on hover signals the box is interactive. */
+.status-box[data-status-filter] {
+    cursor: pointer;
+    transition:
+        transform 0.15s ease,
+        box-shadow 0.15s ease;
+}
+.status-box[data-status-filter]:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+}
+
 /* Process Downloads Modal */
 #process-selected-btn {
     /* ADDED: The green background color for primary actions. */
@@ -1011,6 +1024,18 @@ h2 {
 
 .retry-button:hover:not(:disabled) {
     background-color: #0056b3;
+}
+
+/* Cautionary variant for the card "Re-download" action (DOWNLOADED books),
+   matching the detail modal's yellow "Force Re-download" button. */
+.retry-button.is-warning {
+    background-color: #ffc107;
+    border-color: #e0a800;
+    color: #212529;
+}
+.retry-button.is-warning:hover:not(:disabled) {
+    background-color: #e0a800;
+    border-color: #e0a800;
 }
 
 /* Ensure Confirmation Modal sits on top of Detail Modal */

@@ -36,6 +36,14 @@
                 <h1 style="text-align: left; margin: 0"><i class="fas fa-history"></i> Job History</h1>
                 <div class="header-controls">
                     <button
+                        id="clear-finished-jobs-btn"
+                        class="action-button is-warning"
+                        style="font-size: 1em; padding: 0.6em 1.2em"
+                        title="Delete completed, failed, and cancelled jobs from history"
+                    >
+                        <i class="fas fa-trash-alt"></i> Clear Finished
+                    </button>
+                    <button
                         id="theme-toggle-btn"
                         class="top-right-icon-btn"
                         style="position: static; font-size: 1.2em"
@@ -90,6 +98,27 @@
             </div>
             <div id="pagination-controls-container" style="text-align: center; margin-top: 2em"></div>
         </div>
+
+        <!-- START: CONFIRMATION MODAL -->
+        <!-- Required by ui.js's window.showConfirmationModal (used by the Clear
+             Finished button). Mirrors the markup on the dashboard page. -->
+        <div id="confirmation-modal" class="modal-overlay">
+            <div class="modal-content" style="max-width: 450px; text-align: center">
+                <div class="modal-header">
+                    <h2 id="confirmation-title" style="width: 100%; text-align: center">
+                        <i class="fas fa-exclamation-triangle" style="color: #dc3545"></i> Are you sure?
+                    </h2>
+                </div>
+                <div class="modal-body">
+                    <p id="confirmation-message" style="font-size: 1.1em"></p>
+                </div>
+                <div class="modal-footer" style="justify-content: center; gap: 1em">
+                    <button id="confirmation-cancel-btn" class="action-button">Cancel</button>
+                    <button id="confirmation-confirm-btn" class="action-button blue">Confirm</button>
+                </div>
+            </div>
+        </div>
+        <!-- END: CONFIRMATION MODAL -->
 
         <!-- Load shared helper functions -->
         <script src="{{ url_for('static', filename='js/ui.js') }}"></script>

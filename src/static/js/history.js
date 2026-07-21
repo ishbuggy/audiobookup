@@ -47,6 +47,48 @@ document.addEventListener("DOMContentLoaded", () => {
         fetchAndRenderHistory();
     });
 
+    // "Clear Finished" — delete all finished (COMPLETED/FAILED/CANCELLED) jobs
+    // from history via POST /api/jobs/clear, behind a confirmation modal. An
+    // active/queued job is never eligible (the endpoint enforces this).
+    const clearFinishedJobsBtn = document.getElementById("clear-finished-jobs-btn");
+    if (clearFinishedJobsBtn) {
+        clearFinishedJobsBtn.addEventListener("click", () => {
+            const runClear = async () => {
+                try {
+                    const response = await fetch("/api/jobs/clear", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ mode: "all" }),
+                    });
+                    const data = await response.json();
+                    if (!response.ok || !data.success) {
+                        throw new Error(data.error || `Server responded with status: ${response.status}`);
+                    }
+                    if (window.showToast) {
+                        window.showToast(`Cleared ${data.deleted_jobs} finished job(s) from history.`, "success");
+                    }
+                    currentPage = 1;
+                    fetchAndRenderHistory();
+                } catch (error) {
+                    console.error("Failed to clear finished jobs:", error);
+                    if (window.showToast) {
+                        window.showToast("Could not clear jobs. Please check the application log.", "error");
+                    }
+                }
+            };
+
+            if (window.showConfirmationModal) {
+                window.showConfirmationModal(
+                    '<i class="fas fa-trash-alt"></i> Clear Finished Jobs?',
+                    "This permanently deletes all completed, failed, and cancelled jobs from history. Any active or queued job is left untouched.",
+                    runClear,
+                );
+            } else if (confirm("Clear all finished jobs from history?")) {
+                runClear();
+            }
+        });
+    }
+
     // Initial fetch when the page loads.
     fetchAndRenderHistory();
 });

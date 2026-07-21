@@ -29,20 +29,39 @@ async function handleBookClick(event) {
     const asin = card.dataset.asin;
     if (!asin) return;
 
-    // --- CASE 1: RETRY BUTTON CLICKED ---
-    if (event.target.matches("button.retry-button")) {
-        console.log("Retry button clicked for", asin);
-        const libraryData = getLibraryData(); // Ensure this is imported from library-manager.js
+    // --- CASE 1: CARD ACTION BUTTON CLICKED (download / re-download) ---
+    // Mirrors the detail-modal download logic without opening the modal:
+    // a plain download for not-yet-on-disk books, and a confirmation-gated
+    // re-download for DOWNLOADED books.
+    const cardActionBtn = event.target.closest("button[data-card-action]");
+    if (cardActionBtn) {
+        const action = cardActionBtn.dataset.cardAction;
+        const libraryData = getLibraryData(); // imported from library-manager.js
         const book = libraryData.find((b) => b.asin === asin);
-        
-        // Open panel and start job
-        openProcessingPanel([book]); 
-        startJob("DOWNLOAD", [asin]);
-        
-        // Visual Feedback: Scroll to the job panel
-        const panel = document.getElementById("processing-panel");
-        if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
-        return; 
+        if (!book) return;
+
+        const runDownload = () => {
+            openProcessingPanel([book]);
+            startJob("DOWNLOAD", [asin]);
+            // Visual Feedback: Scroll to the job panel
+            const panel = document.getElementById("processing-panel");
+            if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+        };
+
+        if (action === "redownload") {
+            if (window.showConfirmationModal) {
+                window.showConfirmationModal(
+                    '<i class="fas fa-exclamation-triangle"></i> Force Re-download?',
+                    `Are you sure you want to re-download "<strong>${window.escapeHtml(book.title)}</strong>"?<br>This will overwrite the existing file.`,
+                    runDownload,
+                );
+            } else if (confirm(`Re-download "${book.title}"?`)) {
+                runDownload();
+            }
+        } else {
+            runDownload();
+        }
+        return;
     }
 
     // --- CASE 2: CARD CLICKED (OPEN MODAL) ---

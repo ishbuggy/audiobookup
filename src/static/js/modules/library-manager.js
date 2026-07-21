@@ -55,10 +55,16 @@ function updateLibraryTable(books) {
         card.setAttribute("data-asin", book.asin);
         // Escape all book-derived strings before interpolating them into HTML.
         const esc = window.escapeHtml;
-        let actionButtonHTML =
-            book.status === "ERROR" || book.status === "MISSING"
-                ? `<button class="retry-button" data-asin="${esc(book.asin)}">Retry</button>`
-                : "";
+        // Status-aware card action, mirroring the detail modal: a plain
+        // "Download" for anything not yet on disk, and a cautionary
+        // "Re-download" (confirmation-gated in the click handler) for
+        // DOWNLOADED books. Transitional statuses get no button.
+        let actionButtonHTML = "";
+        if (book.status === "DOWNLOADED") {
+            actionButtonHTML = `<button class="retry-button is-warning" data-asin="${esc(book.asin)}" data-card-action="redownload">Re-download</button>`;
+        } else if (book.status === "NEW" || book.status === "MISSING" || book.status === "ERROR") {
+            actionButtonHTML = `<button class="retry-button" data-asin="${esc(book.asin)}" data-card-action="download">Download</button>`;
+        }
         card.innerHTML = `
         <img class="book-card-cover lazy-load" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" data-src="${esc(book.cover_url || "")}" alt="Cover for ${esc(book.title)}">
         <div class="book-card-info">
@@ -129,4 +135,18 @@ document.addEventListener("DOMContentLoaded", () => {
     searchBar.addEventListener("input", renderLibraryGrid);
     sortBy.addEventListener("change", renderLibraryGrid);
     filterByStatus.addEventListener("change", renderLibraryGrid);
+
+    // Deep-link the dashboard status boxes into the library grid: clicking a
+    // count applies the matching status filter and scrolls to the results,
+    // reusing the existing filter/render pipeline.
+    const libraryContainer = document.getElementById("library-container");
+    document.querySelectorAll(".status-box[data-status-filter]").forEach((box) => {
+        box.addEventListener("click", () => {
+            filterByStatus.value = box.dataset.statusFilter;
+            renderLibraryGrid();
+            if (libraryContainer) {
+                libraryContainer.scrollIntoView({ behavior: "smooth", block: "start" });
+            }
+        });
+    });
 });

@@ -118,28 +118,44 @@
                 <div class="dashboard-sidebar">
                     <h2>Library Status</h2>
                     <div class="status-grid" id="status-grid">
-                        <div class="status-box downloaded">
+                        <div
+                            class="status-box downloaded"
+                            data-status-filter="DOWNLOADED"
+                            title="Show downloaded books in the library below"
+                        >
                             <div class="status-header">
                                 <i class="fas fa-check-circle"></i>
                                 <h3>Downloaded</h3>
                             </div>
                             <p id="stats-downloaded">{{ stats.DOWNLOADED or 0 }}</p>
                         </div>
-                        <div class="status-box new">
+                        <div
+                            class="status-box new"
+                            data-status-filter="NEW"
+                            title="Show new books in the library below"
+                        >
                             <div class="status-header">
                                 <i class="fas fa-star"></i>
                                 <h3>New</h3>
                             </div>
                             <p id="stats-new">{{ stats.NEW or 0 }}</p>
                         </div>
-                        <div class="status-box missing">
+                        <div
+                            class="status-box missing"
+                            data-status-filter="MISSING"
+                            title="Show missing books in the library below"
+                        >
                             <div class="status-header">
                                 <i class="fas fa-question-circle"></i>
                                 <h3>Missing</h3>
                             </div>
                             <p id="stats-missing">{{ stats.MISSING or 0 }}</p>
                         </div>
-                        <div class="status-box error">
+                        <div
+                            class="status-box error"
+                            data-status-filter="ERROR"
+                            title="Show books with errors in the library below"
+                        >
                             <div class="status-header">
                                 <i class="fas fa-exclamation-triangle"></i>
                                 <h3>Error</h3>
@@ -188,8 +204,18 @@
                         <p class="book-card-author">{{ book.author }}</p>
                         <span class="book-card-status status-{{ book.status }}">{{ book.status }}</span>
                         <div class="book-card-actions">
-                            {% if book.status == 'ERROR' or book.status == 'MISSING' %}
-                            <button class="retry-button" data-asin="{{ book.asin }}">Retry</button>
+                            {% if book.status == 'DOWNLOADED' %}
+                            <button
+                                class="retry-button is-warning"
+                                data-asin="{{ book.asin }}"
+                                data-card-action="redownload"
+                            >
+                                Re-download
+                            </button>
+                            {% elif book.status == 'NEW' or book.status == 'MISSING' or book.status == 'ERROR' %}
+                            <button class="retry-button" data-asin="{{ book.asin }}" data-card-action="download">
+                                Download
+                            </button>
                             {% endif %}
                         </div>
                     </div>
