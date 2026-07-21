@@ -202,6 +202,17 @@
                     </button>
                 </div>
             </div>
+            <!-- Bulk action bar (Phase 4). Shown only in List/Table views; its
+                 visibility, count, and the Bulk Rename button's enabled state are
+                 driven by library-manager.js from the row-checkbox selection. -->
+            <div id="bulk-action-bar" style="display: none">
+                <span class="bulk-bar-count"><strong id="bulk-selected-count">0</strong> selected</span>
+                <button id="bulk-select-all-btn" class="action-button" type="button">Select all shown</button>
+                <button id="bulk-clear-btn" class="action-button" type="button">Clear</button>
+                <button id="bulk-rename-btn" class="action-button blue" type="button" disabled>
+                    <i class="fas fa-i-cursor"></i> Bulk Rename&hellip;
+                </button>
+            </div>
             <div id="library-grid">
                 {% for book in books %}
                 <div class="book-card" data-asin="{{ book.asin }}">
@@ -419,6 +430,56 @@
                 </div>
             </div>
         </div>
+
+        <!-- START: BULK RENAME MODAL (Phase 4) -->
+        <div id="bulk-rename-modal" class="modal-overlay">
+            <div class="modal-content" style="max-width: 700px">
+                <div class="modal-header">
+                    <h2>Bulk Rename</h2>
+                    <span class="close-btn" id="bulk-rename-close">&times;</span>
+                </div>
+                <div class="modal-body">
+                    <div class="bulk-rename-controls">
+                        <div class="edit-field">
+                            <label for="bulk-rename-op">Operation</label>
+                            <select id="bulk-rename-op">
+                                <option value="subtitle">Strip subtitle from title</option>
+                                <option value="replace">Find and replace</option>
+                            </select>
+                        </div>
+                        <!-- Find/replace inputs, shown only for the replace operation. -->
+                        <div id="bulk-replace-fields" style="display: none">
+                            <div class="edit-field">
+                                <label for="bulk-replace-target">Apply to</label>
+                                <select id="bulk-replace-target">
+                                    <option value="title">Title</option>
+                                    <option value="author">Author</option>
+                                </select>
+                            </div>
+                            <div class="edit-field">
+                                <label for="bulk-find">Find</label>
+                                <input type="text" id="bulk-find" autocomplete="off" />
+                            </div>
+                            <div class="edit-field">
+                                <label for="bulk-replace">Replace with</label>
+                                <input type="text" id="bulk-replace" autocomplete="off" />
+                            </div>
+                        </div>
+                    </div>
+                    <p id="bulk-rename-warning" class="edit-warning" style="display: none">
+                        <i class="fas fa-exclamation-triangle"></i>
+                        Applying will also rename the matching files on disk.
+                    </p>
+                    <p id="bulk-rename-summary" class="bulk-rename-summary"></p>
+                    <div id="bulk-rename-preview" class="bulk-rename-preview"></div>
+                </div>
+                <div class="modal-footer" style="gap: 1em">
+                    <button id="bulk-rename-cancel-btn" class="action-button" type="button">Cancel</button>
+                    <button id="bulk-rename-apply-btn" class="action-button blue" type="button" disabled>Apply</button>
+                </div>
+            </div>
+        </div>
+        <!-- END: BULK RENAME MODAL -->
 
         <div id="custom-alert-modal" class="modal-overlay">
             <div class="modal-content" style="max-width: 400px; text-align: center">

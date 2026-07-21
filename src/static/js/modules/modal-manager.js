@@ -1,7 +1,13 @@
 // src/static/js/modules/modal-manager.js
 
 import { startJob, openProcessingPanel } from "./job-manager.js";
-import { getLibraryData, initializeLazyLoading, renderLibraryGrid } from "./library-manager.js";
+import {
+    getLibraryData,
+    getSelectedAsins,
+    clearSelection,
+    initializeLazyLoading,
+    renderLibraryGrid,
+} from "./library-manager.js";
 
 // The book currently shown in the detail modal. The metadata editor and cover
 // upload handlers (attached once at load) read the active ASIN/values from here
@@ -25,6 +31,7 @@ const processSelectedBtn = document.getElementById("process-selected-btn");
 const selectionCountSpan = document.getElementById("selection-count");
 const libraryGrid = document.getElementById("library-grid");
 const fetchSummaryBtn = document.getElementById("fetch-full-summary-btn");
+const bulkRenameModal = document.getElementById("bulk-rename-modal");
 
 // --- Book Detail Modal Logic ---
 function closeDetailModal() {
@@ -35,6 +42,10 @@ function closeDetailModal() {
 async function handleBookClick(event) {
     const card = event.target.closest(".book-card");
     if (!card) return; // Not a book card click
+
+    // The multi-select checkbox (Phase 4) lives inside the card; a click on it
+    // must toggle the selection, not open the detail modal.
+    if (event.target.closest(".select-checkbox")) return;
 
     const asin = card.dataset.asin;
     if (!asin) return;
@@ -214,6 +225,23 @@ async function handleFetchFullSummary(event) {
     }
 }
 
+// Lazily fetch (and cache for the session) whether saving a metadata edit also
+// renames the file on disk. Used by both the single-book editor and the bulk
+// rename modal to decide whether to show the "will rename the file" warning.
+async function ensureApplyCustomToFilenames() {
+    if (applyCustomToFilenames === null) {
+        try {
+            const res = await fetch("/api/settings");
+            const settings = await res.json();
+            applyCustomToFilenames = Boolean(settings?.naming?.apply_custom_to_filenames);
+        } catch (error) {
+            console.error("Could not read settings for rename warning:", error);
+            applyCustomToFilenames = false;
+        }
+    }
+    return applyCustomToFilenames;
+}
+
 // --- Metadata Editor (Phase 3.1) ---
 
 // Reflect an edit back into the in-memory library array and re-render the grid
@@ -248,17 +276,8 @@ async function openMetadataEditor() {
 
     // Warn (once we know the setting) that saving will rename the file on disk.
     // The setting is fetched lazily and cached for the session.
-    if (applyCustomToFilenames === null) {
-        try {
-            const res = await fetch("/api/settings");
-            const settings = await res.json();
-            applyCustomToFilenames = Boolean(settings?.naming?.apply_custom_to_filenames);
-        } catch (error) {
-            console.error("Could not read settings for rename warning:", error);
-            applyCustomToFilenames = false;
-        }
-    }
-    document.getElementById("modal-edit-rename-warning").style.display = applyCustomToFilenames ? "block" : "none";
+    const willRename = await ensureApplyCustomToFilenames();
+    document.getElementById("modal-edit-rename-warning").style.display = willRename ? "block" : "none";
 
     document.getElementById("modal-edit-metadata-btn").style.display = "none";
     document.getElementById("modal-edit-container").style.display = "block";
@@ -373,6 +392,192 @@ async function handleCoverUpload(event) {
     }
 }
 
+// --- Bulk Rename (Phase 4) ---
+// Reuses the per-book POST /api/book/<asin>/update endpoint: the new value is
+// computed client-side for each selected book and applied one POST at a time
+// (sequential, so opt-in on-disk renames can't race each other). A live preview
+// shows exactly which titles/authors change before anything is written.
+
+// Mirror of the backend `_strip_subtitle`: drop a "Main Title: Subtitle" tail on
+// the first ": " (so ratios/times like "12:00" survive) and never return empty.
+function stripSubtitle(value) {
+    if (!value) return "";
+    const main = value.split(": ")[0].trim();
+    return main || value;
+}
+
+// Read the current bulk-rename form controls.
+function readBulkForm() {
+    return {
+        op: document.getElementById("bulk-rename-op").value,
+        find: document.getElementById("bulk-find").value,
+        replace: document.getElementById("bulk-replace").value,
+        target: document.getElementById("bulk-replace-target").value,
+    };
+}
+
+// Compute the proposed new value for one book: which override field it writes,
+// the current value, and the transformed value.
+function bulkTransform(book, form) {
+    if (form.op === "subtitle") {
+        const before = book.title || "";
+        return { field: "custom_title", before, after: stripSubtitle(before) };
+    }
+    // Find & replace on the chosen field (all occurrences, literal — no regex).
+    const field = form.target === "author" ? "custom_author" : "custom_title";
+    const before = (form.target === "author" ? book.author : book.title) || "";
+    const after = form.find ? before.split(form.find).join(form.replace) : before;
+    return { field, before, after };
+}
+
+// Build the preview rows for the current selection + form. Each row is tagged
+// "change" (will be written), "same" (no effect), or "empty" (would blank the
+// value — skipped, since an empty override just reverts to the Audible value).
+function computeBulkPreview() {
+    const form = readBulkForm();
+    const library = getLibraryData();
+    const items = [];
+    getSelectedAsins().forEach((asin) => {
+        const book = library.find((b) => b.asin === asin);
+        if (!book) return;
+        const { field, before, after } = bulkTransform(book, form);
+        let state = "same";
+        if (after !== before) state = after.trim() === "" ? "empty" : "change";
+        items.push({ asin, field, before, after, state });
+    });
+    return items;
+}
+
+// Render the live preview and keep the summary line + Apply button in sync.
+function renderBulkPreview() {
+    const items = computeBulkPreview();
+    const container = document.getElementById("bulk-rename-preview");
+    container.innerHTML = "";
+
+    items.forEach((item) => {
+        const row = document.createElement("div");
+        row.className = `bulk-preview-row bulk-preview-${item.state}`;
+
+        // Use textContent for all book-derived strings so nothing is injected as
+        // markup (the values are user/Audible-supplied).
+        const before = document.createElement("span");
+        before.className = "bulk-preview-before";
+        before.textContent = item.before;
+
+        const arrow = document.createElement("span");
+        arrow.className = "bulk-preview-arrow";
+        arrow.textContent = "→";
+
+        const after = document.createElement("span");
+        after.className = "bulk-preview-after";
+        if (item.state === "same") after.textContent = "(no change)";
+        else if (item.state === "empty") after.textContent = "(would be empty — skipped)";
+        else after.textContent = item.after;
+
+        row.append(before, arrow, after);
+        container.appendChild(row);
+    });
+
+    const changeCount = items.filter((i) => i.state === "change").length;
+    document.getElementById("bulk-rename-summary").textContent =
+        `${changeCount} of ${items.length} selected will change.`;
+    document.getElementById("bulk-rename-apply-btn").disabled = changeCount === 0;
+}
+
+// Show the find/replace inputs only for the find-and-replace operation.
+function updateBulkFieldsVisibility() {
+    const op = document.getElementById("bulk-rename-op").value;
+    document.getElementById("bulk-replace-fields").style.display = op === "replace" ? "block" : "none";
+}
+
+function closeBulkRenameModal() {
+    document.body.classList.remove("modal-open");
+    bulkRenameModal.style.display = "none";
+}
+
+async function openBulkRenameModal() {
+    if (getSelectedAsins().length === 0) return;
+
+    // Reset the form to its defaults on every open.
+    document.getElementById("bulk-rename-op").value = "subtitle";
+    document.getElementById("bulk-find").value = "";
+    document.getElementById("bulk-replace").value = "";
+    document.getElementById("bulk-replace-target").value = "title";
+    updateBulkFieldsVisibility();
+
+    // Warn if the opt-in setting will also rename files on disk for each change.
+    const willRename = await ensureApplyCustomToFilenames();
+    document.getElementById("bulk-rename-warning").style.display = willRename ? "block" : "none";
+
+    renderBulkPreview();
+    document.body.classList.add("modal-open");
+    bulkRenameModal.style.display = "flex";
+}
+
+// Apply the changed rows one POST at a time, reconciling each book from the
+// authoritative response, then clear the selection and re-render.
+async function applyBulkRename() {
+    const items = computeBulkPreview().filter((i) => i.state === "change");
+    if (items.length === 0) return;
+
+    const applyBtn = document.getElementById("bulk-rename-apply-btn");
+    const cancelBtn = document.getElementById("bulk-rename-cancel-btn");
+    const originalLabel = applyBtn.textContent;
+    applyBtn.disabled = true;
+    cancelBtn.disabled = true;
+
+    const library = getLibraryData();
+    let ok = 0;
+    let failed = 0;
+
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        applyBtn.textContent = `Applying ${i + 1} / ${items.length}…`;
+        try {
+            const response = await fetch(`/api/book/${item.asin}/update`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ [item.field]: item.after }),
+            });
+            const data = await response.json();
+            if (!response.ok || !data.success) {
+                throw new Error(data.error || `status ${response.status}`);
+            }
+            const book = library.find((b) => b.asin === item.asin);
+            if (book) {
+                Object.assign(book, {
+                    title: data.title,
+                    author: data.author,
+                    native_title: data.native_title,
+                    native_author: data.native_author,
+                    custom_title: data.custom_title,
+                    custom_author: data.custom_author,
+                });
+            }
+            ok++;
+        } catch (error) {
+            console.error(`Bulk rename failed for ${item.asin}:`, error);
+            failed++;
+        }
+    }
+
+    applyBtn.textContent = originalLabel;
+    applyBtn.disabled = false;
+    cancelBtn.disabled = false;
+
+    closeBulkRenameModal();
+    clearSelection();
+    renderLibraryGrid();
+
+    if (window.showToast) {
+        if (failed === 0) {
+            window.showToast(`Renamed ${ok} book${ok === 1 ? "" : "s"}.`, "success");
+        } else {
+            window.showToast(`Renamed ${ok}; ${failed} failed (see the log).`, "error");
+        }
+    }
+}
+
 // --- Download Selection Modal Logic ---
 function updateSelectionCount() {
     const count = selectionBookList.querySelectorAll('input[type="checkbox"]:checked').length;
@@ -466,6 +671,21 @@ document.addEventListener("DOMContentLoaded", () => {
         .getElementById("modal-cover-upload-btn")
         .addEventListener("click", () => document.getElementById("modal-cover-input").click());
     document.getElementById("modal-cover-input").addEventListener("change", handleCoverUpload);
+
+    // Bulk rename (Phase 4). The bar's "Bulk Rename" button (rendered/enabled in
+    // library-manager) opens the modal; the operation controls drive a live
+    // preview; Apply writes the changes via the per-book update endpoint.
+    document.getElementById("bulk-rename-btn").addEventListener("click", openBulkRenameModal);
+    document.getElementById("bulk-rename-close").addEventListener("click", closeBulkRenameModal);
+    document.getElementById("bulk-rename-cancel-btn").addEventListener("click", closeBulkRenameModal);
+    document.getElementById("bulk-rename-op").addEventListener("change", () => {
+        updateBulkFieldsVisibility();
+        renderBulkPreview();
+    });
+    document.getElementById("bulk-replace-target").addEventListener("change", renderBulkPreview);
+    document.getElementById("bulk-find").addEventListener("input", renderBulkPreview);
+    document.getElementById("bulk-replace").addEventListener("input", renderBulkPreview);
+    document.getElementById("bulk-rename-apply-btn").addEventListener("click", applyBulkRename);
 
     // Download Selection Events
     selectionModalCloseBtn.onclick = closeSelectionModal;
