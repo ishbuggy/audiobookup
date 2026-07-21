@@ -735,6 +735,55 @@ async function applyBulkRename() {
     }
 }
 
+// --- Large-bulk download warning (Phase 6 / FR13) ---
+// AudioBookup always re-encodes, so a big batch takes real time. When a bulk
+// selection reaches this many books we interrupt with a confirmation that
+// explains the expectation and shows a rough total-time estimate.
+const LARGE_BULK_THRESHOLD = 10;
+
+// The estimator's learned conversion rate (seconds of processing per minute of
+// audio), fetched lazily from the backend the first time a large bulk fires and
+// cached for the page's lifetime.
+let conversionRatePromise = null;
+
+function ensureConversionRate() {
+    if (conversionRatePromise === null) {
+        conversionRatePromise = fetch("/api/conversion_rate")
+            .then((r) => r.json())
+            .then((d) => (typeof d.sec_per_min === "number" && d.sec_per_min > 0 ? d.sec_per_min : 10))
+            // If the rate endpoint fails, fall back to the estimator's default
+            // guess (10 sec/min) so the warning still shows a figure.
+            .catch(() => 10);
+    }
+    return conversionRatePromise;
+}
+
+// Render a rough duration ("about 2 hours 30 minutes") from a second count.
+// Deliberately coarse — this is a "this will take a while" expectation, not a
+// precise ETA (real processing runs several books/chapters in parallel).
+function formatRoughDuration(totalSeconds) {
+    const minutes = Math.max(1, Math.round(totalSeconds / 60));
+    if (minutes < 60) {
+        return `about ${minutes} minute${minutes === 1 ? "" : "s"}`;
+    }
+    const hours = Math.floor(minutes / 60);
+    const remMinutes = minutes % 60;
+    const hourPart = `${hours} hour${hours === 1 ? "" : "s"}`;
+    if (remMinutes === 0) {
+        return `about ${hourPart}`;
+    }
+    return `about ${hourPart} ${remMinutes} minute${remMinutes === 1 ? "" : "s"}`;
+}
+
+// Start the bulk download job for the given ASINs (populates the panel first).
+function startBulkDownload(selectedASINs) {
+    const libraryData = getLibraryData();
+    const selectedBooks = libraryData.filter((book) => selectedASINs.includes(book.asin));
+    openProcessingPanel(selectedBooks);
+    closeSelectionModal();
+    startJob("DOWNLOAD", selectedASINs);
+}
+
 // --- Download Selection Modal Logic ---
 function updateSelectionCount() {
     const count = selectionBookList.querySelectorAll('input[type="checkbox"]:checked').length;
@@ -873,12 +922,39 @@ document.addEventListener("DOMContentLoaded", () => {
             window.showCustomAlert("Please select at least one book to process.");
             return;
         }
-        // Get book objects for the selected ASINs to populate the panel immediately
+
+        // Small selections start immediately. Large ones get a heads-up first
+        // (Phase 6 / FR13): AudioBookup always re-encodes, so a big batch takes
+        // real time — set the expectation with a rough estimate before starting.
+        if (selectedASINs.length < LARGE_BULK_THRESHOLD) {
+            startBulkDownload(selectedASINs);
+            return;
+        }
+
         const libraryData = getLibraryData();
         const selectedBooks = libraryData.filter((book) => selectedASINs.includes(book.asin));
+        const totalRuntimeMin = selectedBooks.reduce((sum, book) => sum + (Number(book.runtime_min) || 0), 0);
 
-        openProcessingPanel(selectedBooks);
-        closeSelectionModal();
-        startJob("DOWNLOAD", selectedASINs);
+        const secPerMin = await ensureConversionRate();
+        // Rough upper-bound estimate: the rate is per-book-sequential, while real
+        // processing runs several books/chapters in parallel, so the true wall
+        // time is usually less. Only show a figure when we know the runtimes.
+        const estimateHtml =
+            totalRuntimeMin > 0
+                ? `<br><br>Based on recent conversions, this could take roughly <strong>${formatRoughDuration(
+                      totalRuntimeMin * secPerMin,
+                  )}</strong> (a rough estimate — it often finishes sooner).`
+                : "";
+
+        window.showConfirmationModal(
+            '<i class="fas fa-clock" style="color: #ffc107;"></i> Large download',
+            `You've selected <strong>${selectedASINs.length}</strong> books. AudioBookup converts every ` +
+                `book to a DRM-free file, which takes time.${estimateHtml}<br><br>Downloads run in the ` +
+                `background — you can keep using the app while they process. Start now?`,
+            () => {
+                window.closeConfirmationModal();
+                startBulkDownload(selectedASINs);
+            },
+        );
     };
 });

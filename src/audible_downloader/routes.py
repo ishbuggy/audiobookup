@@ -745,6 +745,22 @@ def api_get_downloadable_books():
     return jsonify(categorized_books)
 
 
+@app.route("/api/conversion_rate")
+@login_required
+def api_get_conversion_rate():
+    """
+    Expose the estimator's effective conversion rate (seconds of processing per
+    minute of audio) so the frontend can warn before a large bulk download.
+
+    AudioBookup always re-encodes, so a big batch takes real time; the
+    large-library warning (v0.20 Phase 6 / FR13) multiplies this learned rate by
+    the selected books' total runtime to show a rough expectation. Read-only.
+    """
+    from audible_downloader.eta_estimator import get_average_rate
+
+    return jsonify(sec_per_min=get_average_rate())
+
+
 @app.route("/clear_log", methods=["POST"])
 @login_required
 def clear_log():

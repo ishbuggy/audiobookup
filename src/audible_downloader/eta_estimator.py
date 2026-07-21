@@ -58,6 +58,27 @@ def record_conversion_time(runtime_min, duration_sec):
     log.info(f"ETA_ESTIMATOR: Recorded new conversion rate: {rate:.2f} sec/min")
 
 
+def get_average_rate():
+    """
+    Returns the effective conversion rate in seconds-of-processing per minute-of-audio.
+
+    This is the single source of truth for the rate used by the estimator: the
+    rolling average of recorded conversions, or a conservative default when there
+    is no history yet (mirrors the fallback in `estimate_conversion_time`). The
+    frontend's large-bulk warning multiplies this by the selected books' total
+    runtime to show a rough "this will take a while" expectation.
+
+    Returns:
+        float: Seconds of processing per minute of audio (always > 0).
+    """
+    cache = _load_cache()
+    rates = cache.get("conversion_rates", [])
+    if not rates:
+        # No history yet: same conservative guess as estimate_conversion_time.
+        return 10.0
+    return sum(rates) / len(rates)
+
+
 def estimate_conversion_time(runtime_min):
     """
     Estimates the conversion time for a book based on historical data.

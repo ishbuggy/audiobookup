@@ -128,6 +128,25 @@ class TestCoverAuthentication:
         assert response.status_code == 404
 
 
+class TestConversionRate:
+    """Phase 6 / FR13: GET /api/conversion_rate exposes the estimator's learned
+    sec/min rate for the large-bulk download warning."""
+
+    def test_requires_login(self, client, completed_setup):
+        response = client.get("/api/conversion_rate")
+        assert response.status_code == 302
+        assert response.headers["Location"].startswith("/login")
+
+    def test_returns_rate_for_logged_in_user(self, client, completed_setup):
+        with client.session_transaction() as session:
+            session["username"] = "admin"
+        response = client.get("/api/conversion_rate")
+        assert response.status_code == 200
+        data = response.get_json()
+        # With no conversion history the estimator returns its default guess.
+        assert data["sec_per_min"] > 0
+
+
 @pytest.fixture
 def book_db(tmp_path, monkeypatch):
     """A temp library.db with one book, including the custom-metadata columns."""
