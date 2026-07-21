@@ -302,6 +302,74 @@ h2 {
 
 .modal-cover {
     flex-shrink: 0; /* Prevent the cover from shrinking */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+}
+
+/* "Change Cover" button sits under the cover image (Phase 3.2). */
+#modal-cover-upload-btn {
+    width: 100%;
+}
+
+/* In-place metadata editor (Phase 3.1). Colors come from CSS variables so dark
+   mode is automatic. */
+.metadata-editor {
+    margin-top: 1em;
+    padding: 1em;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    background: var(--color-bg-inset);
+}
+
+.metadata-editor .edit-field {
+    display: flex;
+    flex-direction: column;
+    margin-bottom: 0.75em;
+}
+
+.metadata-editor .edit-field label {
+    font-weight: bold;
+    font-size: 0.9em;
+    margin-bottom: 0.25em;
+}
+
+.metadata-editor .edit-field input {
+    padding: 0.5em;
+    border: 1px solid var(--color-input-border);
+    border-radius: 4px;
+    background: var(--color-input-bg);
+    color: var(--color-text-primary);
+    font-size: 0.95em;
+}
+
+.metadata-editor .edit-field input:focus {
+    outline: none;
+    border-color: var(--color-input-focus-border);
+    box-shadow: 0 0 0 0.2rem var(--color-input-focus-shadow);
+}
+
+.metadata-editor .edit-native-hint {
+    margin-top: 0.25em;
+    font-size: 0.8em;
+    color: var(--color-text-muted);
+    font-style: italic;
+}
+
+.metadata-editor .edit-warning {
+    color: var(--color-accent-yellow-text);
+    background: var(--color-accent-yellow-bg);
+    padding: 0.5em 0.75em;
+    border-radius: 4px;
+    font-size: 0.85em;
+    margin: 0 0 0.75em 0;
+}
+
+.metadata-editor .edit-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
 }
 
 .modal-details-column {
