@@ -213,6 +213,65 @@ class TestUpdateBookMetadata:
         response = client.post("/api/book/B001/update", json={"foo": "bar"})
         assert response.status_code == 400
 
+    def test_response_reports_is_duplicate(self, client, completed_setup, book_db):
+        _login_session(client)
+        response = client.post("/api/book/B001/update", json={"custom_title": "X"})
+        # A normal edit leaves the (default-0) flag untouched but reports it.
+        assert response.get_json()["is_duplicate"] == 0
+
+
+class TestResolveDuplicate:
+    """Phase 5.2: an explicit resolve_duplicate flag clears is_duplicate via the
+    same update endpoint; a normal edit never touches the flag."""
+
+    def _set_duplicate(self, book_db):
+        con = sqlite3.connect(book_db)
+        con.execute("UPDATE audiobooks SET is_duplicate = 1 WHERE asin = 'B001'")
+        con.commit()
+        con.close()
+
+    def _flag_in_db(self, book_db):
+        con = sqlite3.connect(book_db)
+        value = con.execute("SELECT is_duplicate FROM audiobooks WHERE asin = 'B001'").fetchone()[0]
+        con.close()
+        return value
+
+    def test_resolve_with_title_clears_flag_and_sets_override(self, client, completed_setup, book_db):
+        _login_session(client)
+        self._set_duplicate(book_db)
+        response = client.post(
+            "/api/book/B001/update",
+            json={"custom_title": "Native Title (Narrated by X)", "resolve_duplicate": True},
+        )
+        data = response.get_json()
+        assert data["is_duplicate"] == 0
+        assert data["title"] == "Native Title (Narrated by X)"
+        assert self._flag_in_db(book_db) == 0
+
+    def test_resolve_alone_clears_flag_without_changing_title(self, client, completed_setup, book_db):
+        _login_session(client)
+        self._set_duplicate(book_db)
+        response = client.post("/api/book/B001/update", json={"resolve_duplicate": True})
+        data = response.get_json()
+        assert data["is_duplicate"] == 0
+        assert data["title"] == "Native Title"  # unchanged — "keep ASIN suffix"
+        assert self._flag_in_db(book_db) == 0
+
+    def test_normal_edit_leaves_flag_set(self, client, completed_setup, book_db):
+        _login_session(client)
+        self._set_duplicate(book_db)
+        response = client.post("/api/book/B001/update", json={"custom_title": "Nicer"})
+        assert response.get_json()["is_duplicate"] == 1
+        assert self._flag_in_db(book_db) == 1
+
+    def test_resolve_false_is_ignored(self, client, completed_setup, book_db):
+        _login_session(client)
+        self._set_duplicate(book_db)
+        # Only a literal True clears the flag; a falsey value must not.
+        response = client.post("/api/book/B001/update", json={"custom_title": "Y", "resolve_duplicate": False})
+        assert response.get_json()["is_duplicate"] == 1
+        assert self._flag_in_db(book_db) == 1
+
 
 class TestUploadBookCover:
     """Phase 5.4: POST /api/book/<asin>/cover replaces the cover, login- and

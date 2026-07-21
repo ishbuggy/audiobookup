@@ -65,7 +65,7 @@ def get_all_books():
     # Select only the columns needed for the main library grid to be efficient
     cur.execute(
         "SELECT author, title, custom_title, custom_author, status, asin, series, narrator, "
-        "runtime_min, release_date, date_added, source "
+        "runtime_min, release_date, date_added, source, is_duplicate "
         "FROM audiobooks ORDER BY author, title"
     )
     books_from_db = cur.fetchall()
@@ -77,6 +77,10 @@ def get_all_books():
         # Provenance: default old rows (pre-`source` column) to the Audible origin.
         if book_dict.get("source") is None:
             book_dict["source"] = "audible"
+        # Duplicate flag (v0.19 Phase 1.3): default old rows to not-a-duplicate so
+        # the v0.20 grid badge / filter can read it unconditionally.
+        if book_dict.get("is_duplicate") is None:
+            book_dict["is_duplicate"] = 0
         book_dict["cover_url"] = f"/covers/{book_dict['asin']}_thumb.jpg"
         books_with_covers.append(book_dict)
     return books_with_covers

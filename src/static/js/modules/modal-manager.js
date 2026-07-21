@@ -92,9 +92,16 @@ async function handleBookClick(event) {
         const book = await response.json();
 
         // Remember the open book for the editor / cover-upload handlers, and
-        // make sure the editor starts collapsed on every open.
+        // make sure the editor + duplicate resolver start collapsed on every open.
         currentDetailBook = book;
         closeMetadataEditor();
+        closeDuplicateResolver();
+
+        // Duplicate flag + resolve action (Phase 5): shown only when the book was
+        // flagged as a colliding duplicate.
+        const isDuplicate = Boolean(book.is_duplicate);
+        document.getElementById("modal-duplicate-flag").style.display = isDuplicate ? "inline-block" : "none";
+        document.getElementById("modal-resolve-duplicate-btn").style.display = isDuplicate ? "inline-block" : "none";
 
         // --- Populate Basic Metadata ---
         document.getElementById("modal-book-cover").src = book.cover_url_original || "";
@@ -392,6 +399,156 @@ async function handleCoverUpload(event) {
     }
 }
 
+// --- Duplicate Resolution (Phase 5) ---
+// A flagged duplicate is a book whose filename collided with another and was
+// saved as `Title_<ASIN>.m4b`. The resolver lets the user disambiguate it by
+// choosing a naming convention (append narrator or release year) — applied as a
+// title override via the same POST /api/book/<asin>/update endpoint, with an
+// explicit `resolve_duplicate` flag that clears `is_duplicate`. "Keep" just
+// dismisses the flag without changing the title.
+
+// Pull a 4-digit year out of an Audible release_date (e.g. "2015-06-01" → "2015").
+function releaseYear(book) {
+    const match = /\b(\d{4})\b/.exec(book.release_date || "");
+    return match ? match[1] : "";
+}
+
+// The disambiguated title for a given choice. Built from the native Audible title
+// so re-resolving never stacks suffixes. Returns null for "keep" (no title change)
+// or when the chosen field is unavailable.
+function duplicateNewTitle(book, choice) {
+    const base = book.native_title || book.title || "";
+    if (choice === "narrator") return book.narrator ? `${base} (${book.narrator})` : null;
+    if (choice === "year") {
+        const year = releaseYear(book);
+        return year ? `${base} (${year})` : null;
+    }
+    return null; // "keep"
+}
+
+// The currently-selected resolution choice.
+function selectedDuplicateChoice() {
+    const checked = document.querySelector('input[name="dup-resolve-choice"]:checked');
+    return checked ? checked.value : "keep";
+}
+
+// Update the live preview line for the current choice.
+function renderDuplicatePreview() {
+    if (!currentDetailBook) return;
+    const choice = selectedDuplicateChoice();
+    const preview = document.getElementById("modal-duplicate-preview");
+    if (choice === "keep") {
+        preview.textContent = "(unchanged — keeps the ASIN-suffixed filename)";
+        return;
+    }
+    const newTitle = duplicateNewTitle(currentDetailBook, choice);
+    preview.textContent = newTitle || "(not available for this book)";
+}
+
+async function openDuplicateResolver() {
+    if (!currentDetailBook) return;
+    const book = currentDetailBook;
+
+    // Enable only the choices we can actually build for this book, and select
+    // the first available one (falling back to "keep").
+    const hasNarrator = Boolean(book.narrator);
+    const hasYear = Boolean(releaseYear(book));
+    const radios = {
+        narrator: document.querySelector('input[name="dup-resolve-choice"][value="narrator"]'),
+        year: document.querySelector('input[name="dup-resolve-choice"][value="year"]'),
+        keep: document.querySelector('input[name="dup-resolve-choice"][value="keep"]'),
+    };
+    radios.narrator.disabled = !hasNarrator;
+    radios.year.disabled = !hasYear;
+    if (hasNarrator) radios.narrator.checked = true;
+    else if (hasYear) radios.year.checked = true;
+    else radios.keep.checked = true;
+
+    // Reuse the shared rename-warning setting (only meaningful when a title
+    // actually changes, i.e. not for "keep").
+    const willRename = await ensureApplyCustomToFilenames();
+    document.getElementById("modal-duplicate-rename-warning").style.display = willRename ? "block" : "none";
+
+    renderDuplicatePreview();
+    document.getElementById("modal-resolve-duplicate-btn").style.display = "none";
+    document.getElementById("modal-duplicate-container").style.display = "block";
+}
+
+function closeDuplicateResolver() {
+    const container = document.getElementById("modal-duplicate-container");
+    if (container) container.style.display = "none";
+    // The resolve button is only restored when the book is still a duplicate.
+    const btn = document.getElementById("modal-resolve-duplicate-btn");
+    if (btn && currentDetailBook && currentDetailBook.is_duplicate) btn.style.display = "inline-block";
+}
+
+// Apply the chosen resolution: POST the title override (if any) plus the
+// resolve_duplicate flag, then reconcile the modal + library from the response.
+async function applyDuplicateResolution() {
+    if (!currentDetailBook) return;
+    const asin = currentDetailBook.asin;
+    const choice = selectedDuplicateChoice();
+    const newTitle = duplicateNewTitle(currentDetailBook, choice);
+
+    const applyBtn = document.getElementById("modal-duplicate-apply-btn");
+    const cancelBtn = document.getElementById("modal-duplicate-cancel-btn");
+    applyBtn.disabled = true;
+    cancelBtn.disabled = true;
+
+    // "keep" (or an unavailable field) sends no custom_title — it only clears the
+    // flag. Otherwise set the disambiguated title override.
+    const payload = { resolve_duplicate: true };
+    if (newTitle) payload.custom_title = newTitle;
+
+    try {
+        const response = await fetch(`/api/book/${asin}/update`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+            throw new Error(data.error || `Server responded with status ${response.status}.`);
+        }
+
+        // Reflect the effective title/author and the cleared flag everywhere.
+        document.getElementById("modal-book-title").textContent = data.title || "N/A";
+        document.getElementById("modal-book-author").textContent = data.author || "N/A";
+        Object.assign(currentDetailBook, {
+            title: data.title,
+            author: data.author,
+            native_title: data.native_title,
+            native_author: data.native_author,
+            custom_title: data.custom_title,
+            custom_author: data.custom_author,
+            is_duplicate: data.is_duplicate,
+        });
+        applyEditToLibrary(asin, {
+            title: data.title,
+            author: data.author,
+            custom_title: data.custom_title,
+            custom_author: data.custom_author,
+            is_duplicate: data.is_duplicate,
+        });
+
+        if (data.renamed_to) {
+            document.getElementById("modal-file-path").textContent = data.renamed_to;
+        }
+
+        // The flag is now clear: hide both the indicator and the resolve button.
+        document.getElementById("modal-duplicate-flag").style.display = "none";
+        document.getElementById("modal-resolve-duplicate-btn").style.display = "none";
+        document.getElementById("modal-duplicate-container").style.display = "none";
+        if (window.showToast) window.showToast("Duplicate resolved.", "success");
+    } catch (error) {
+        console.error("Failed to resolve duplicate:", error);
+        if (window.showToast) window.showToast(`Could not resolve duplicate: ${error.message}`, "error");
+    } finally {
+        applyBtn.disabled = false;
+        cancelBtn.disabled = false;
+    }
+}
+
 // --- Bulk Rename (Phase 4) ---
 // Reuses the per-book POST /api/book/<asin>/update endpoint: the new value is
 // computed client-side for each selected book and applied one POST at a time
@@ -671,6 +828,16 @@ document.addEventListener("DOMContentLoaded", () => {
         .getElementById("modal-cover-upload-btn")
         .addEventListener("click", () => document.getElementById("modal-cover-input").click());
     document.getElementById("modal-cover-input").addEventListener("change", handleCoverUpload);
+
+    // Duplicate resolution (Phase 5). The Resolve Duplicate button reveals the
+    // panel; the radio choices drive the live preview; Apply writes the override
+    // and clears the flag via the per-book update endpoint.
+    document.getElementById("modal-resolve-duplicate-btn").addEventListener("click", openDuplicateResolver);
+    document.getElementById("modal-duplicate-cancel-btn").addEventListener("click", closeDuplicateResolver);
+    document.getElementById("modal-duplicate-apply-btn").addEventListener("click", applyDuplicateResolution);
+    document.querySelectorAll('input[name="dup-resolve-choice"]').forEach((radio) => {
+        radio.addEventListener("change", renderDuplicatePreview);
+    });
 
     // Bulk rename (Phase 4). The bar's "Bulk Rename" button (rendered/enabled in
     // library-manager) opens the modal; the operation controls drive a live

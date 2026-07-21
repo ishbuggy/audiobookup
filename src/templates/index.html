@@ -178,6 +178,9 @@
                     <option value="NEW">New</option>
                     <option value="MISSING">Missing</option>
                     <option value="ERROR">Error</option>
+                    <!-- Not a status: filters to books flagged as duplicates
+                         (v0.20 Phase 5), handled specially in library-manager.js. -->
+                    <option value="__DUPLICATES__">Flagged Duplicates</option>
                 </select>
                 <select id="sort-by">
                     <option value="author_asc">Author (A-Z)</option>
@@ -319,11 +322,28 @@
                         <p><strong>Date Added:</strong> <span id="modal-book-date-added"></span></p>
                         <p><strong>Language:</strong> <span id="modal-book-language"></span></p>
                         <p><strong>ASIN:</strong> <span id="modal-book-asin"></span></p>
-                        <p><strong>Status:</strong> <span id="modal-book-status"></span></p>
+                        <p>
+                            <strong>Status:</strong> <span id="modal-book-status"></span>
+                            <!-- Duplicate indicator (v0.20 Phase 5): shown only when
+                                 the book was flagged as a colliding duplicate. -->
+                            <span id="modal-duplicate-flag" class="badge-duplicate" style="display: none">
+                                <i class="fas fa-clone"></i> Duplicate
+                            </span>
+                        </p>
                         <div id="modal-actions-container" style="margin-top: 1em; display: flex; gap: 10px">
                             <button id="modal-download-btn" class="action-button">Download</button>
                             <button id="modal-edit-metadata-btn" class="action-button" type="button">
                                 <i class="fas fa-pen"></i> Edit Metadata
+                            </button>
+                            <!-- Resolve-duplicate action (v0.20 Phase 5): shown only for
+                                 flagged duplicates; reveals the resolution panel below. -->
+                            <button
+                                id="modal-resolve-duplicate-btn"
+                                class="action-button is-warning"
+                                type="button"
+                                style="display: none"
+                            >
+                                <i class="fas fa-clone"></i> Resolve Duplicate
                             </button>
                         </div>
 
@@ -358,6 +378,48 @@
                                     title="Clear overrides and revert to the original Audible metadata"
                                 >
                                     Reset to Audible
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Duplicate resolution panel (Phase 5.2). Hidden until the
+                             user clicks "Resolve Duplicate". Picks a disambiguating
+                             naming convention (narrator / release year) and applies it
+                             as a title override via /api/book/<asin>/update, clearing
+                             the duplicate flag. "Keep ASIN-suffixed name" just dismisses
+                             the flag without changing the title. -->
+                        <div id="modal-duplicate-container" class="metadata-editor" style="display: none">
+                            <p class="duplicate-resolver-intro">
+                                This title collided with another book and was saved with a unique ASIN-suffixed
+                                filename. Choose how to disambiguate it:
+                            </p>
+                            <div class="duplicate-resolver-options">
+                                <label>
+                                    <input type="radio" name="dup-resolve-choice" value="narrator" />
+                                    Append narrator
+                                </label>
+                                <label>
+                                    <input type="radio" name="dup-resolve-choice" value="year" />
+                                    Append release year
+                                </label>
+                                <label>
+                                    <input type="radio" name="dup-resolve-choice" value="keep" />
+                                    Keep ASIN-suffixed name
+                                </label>
+                            </div>
+                            <p class="duplicate-resolver-preview">
+                                New title: <span id="modal-duplicate-preview"></span>
+                            </p>
+                            <p id="modal-duplicate-rename-warning" class="edit-warning" style="display: none">
+                                <i class="fas fa-exclamation-triangle"></i>
+                                Applying will rename the file on disk to match.
+                            </p>
+                            <div class="edit-actions">
+                                <button id="modal-duplicate-apply-btn" class="action-button blue" type="button">
+                                    Apply
+                                </button>
+                                <button id="modal-duplicate-cancel-btn" class="action-button" type="button">
+                                    Cancel
                                 </button>
                             </div>
                         </div>

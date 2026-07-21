@@ -1401,6 +1401,62 @@ h2 {
     color: var(--color-accent-red);
 }
 
+/* ==========================================================================
+   Duplicate flag + resolution (Phase 5)
+   ========================================================================== */
+
+/* Amber pill shown next to the status badge in every view (and in the detail
+   modal) for books flagged as colliding duplicates. Colors via variables so
+   dark mode is automatic. */
+.badge-duplicate {
+    display: inline-block;
+    margin-left: 0.4em;
+    padding: 0.2em 0.55em;
+    border-radius: 20px;
+    font-size: 0.75em;
+    font-weight: bold;
+    background-color: var(--color-accent-yellow-bg);
+    color: var(--color-accent-yellow-text);
+    white-space: nowrap;
+    vertical-align: middle;
+}
+
+/* Grid cards stack their info vertically, so let the badge sit on its own line
+   under the status pill rather than pushing the layout. */
+#library-grid.view-grid .badge-duplicate {
+    margin-left: 0;
+    margin-top: 0.4em;
+    align-self: flex-start;
+}
+
+/* Resolution panel (reuses .metadata-editor for the frame/border/background). */
+.duplicate-resolver-intro {
+    margin: 0 0 0.75em 0;
+    font-size: 0.9em;
+    color: var(--color-text-muted);
+}
+.duplicate-resolver-options {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4em;
+    margin-bottom: 0.75em;
+}
+.duplicate-resolver-options label {
+    font-size: 0.95em;
+    cursor: pointer;
+}
+.duplicate-resolver-options label:has(input:disabled) {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+.duplicate-resolver-preview {
+    margin: 0 0 0.75em 0;
+    font-size: 0.9em;
+}
+.duplicate-resolver-preview span {
+    font-weight: 600;
+}
+
 /* Ensure Confirmation Modal sits on top of Detail Modal */
 #confirmation-modal {
     z-index: 2200; /* Higher than generic .modal-overlay which is usually 2000 */

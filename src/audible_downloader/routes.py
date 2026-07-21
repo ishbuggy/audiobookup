@@ -804,6 +804,12 @@ def update_book_metadata(asin):
         updates["custom_title"] = _clean(data["custom_title"])
     if "custom_author" in data:
         updates["custom_author"] = _clean(data["custom_author"])
+    # Duplicate resolution (v0.20 Phase 5): an explicit opt-in that clears the
+    # `is_duplicate` flag once the user has chosen a disambiguating name (or
+    # accepted the ASIN-suffixed one). Kept separate from the title/author
+    # allow-list above so a normal edit never touches the flag.
+    if data.get("resolve_duplicate") is True:
+        updates["is_duplicate"] = 0
 
     if not updates:
         return jsonify(error="No editable fields provided."), 400
@@ -840,6 +846,7 @@ def update_book_metadata(asin):
         native_author=book["native_author"],
         custom_title=book.get("custom_title"),
         custom_author=book.get("custom_author"),
+        is_duplicate=book.get("is_duplicate") or 0,
         renamed_to=renamed_to,
     )
 

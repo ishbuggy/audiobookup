@@ -102,3 +102,43 @@ class TestApplyMetadataOverrides:
         )
         assert result["title"] == "Nicer Title"
         assert result["author"] == "A"
+
+
+@pytest.fixture
+def full_library_db(tmp_path, monkeypatch):
+    """A temp library.db with the columns get_all_books selects, so the grid
+    query (including the Phase 5 is_duplicate flag) can be exercised."""
+    db_path = tmp_path / "library.db"
+    con = sqlite3.connect(db_path)
+    con.execute(
+        "CREATE TABLE audiobooks ("
+        "asin TEXT PRIMARY KEY, title TEXT, author TEXT, custom_title TEXT, custom_author TEXT, "
+        "status TEXT, series TEXT, narrator TEXT, runtime_min INTEGER, release_date TEXT, "
+        "date_added TEXT, source TEXT, is_duplicate INTEGER)"
+    )
+    con.executemany(
+        "INSERT INTO audiobooks (asin, title, author, status, is_duplicate) VALUES (?, ?, ?, ?, ?)",
+        [
+            ("B001", "Dracula", "Bram Stoker", "DOWNLOADED", 1),
+            ("B002", "Frankenstein", "Mary Shelley", "DOWNLOADED", 0),
+            ("B003", "Legacy Row", "Old Author", "DOWNLOADED", None),
+        ],
+    )
+    con.commit()
+    con.close()
+    monkeypatch.setattr(db_module, "DB_FILE", str(db_path))
+    return db_path
+
+
+class TestGetAllBooksDuplicateFlag:
+    """Phase 5.1: get_all_books surfaces is_duplicate so the grid can badge and
+    filter flagged duplicates; NULL (old rows) defaults to 0."""
+
+    def test_is_duplicate_is_surfaced(self, full_library_db):
+        by_asin = {b["asin"]: b for b in db_module.get_all_books()}
+        assert by_asin["B001"]["is_duplicate"] == 1
+        assert by_asin["B002"]["is_duplicate"] == 0
+
+    def test_null_flag_defaults_to_zero(self, full_library_db):
+        by_asin = {b["asin"]: b for b in db_module.get_all_books()}
+        assert by_asin["B003"]["is_duplicate"] == 0

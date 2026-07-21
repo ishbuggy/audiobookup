@@ -119,6 +119,15 @@ function buildActionButtonHTML(book, esc) {
     return "";
 }
 
+// Duplicate badge markup (Phase 5). Rendered next to the status pill in every
+// view when a book was flagged as a colliding duplicate (`is_duplicate`), so the
+// user can spot the ASIN-suffixed books and resolve them from the detail modal.
+function buildDuplicateBadgeHTML(book) {
+    return book.is_duplicate
+        ? '<span class="badge-duplicate" title="Flagged as a duplicate"><i class="fas fa-clone"></i> Duplicate</span>'
+        : "";
+}
+
 // --- Grid View (default cards) ---
 function renderGridView(books, esc) {
     books.forEach((book) => {
@@ -131,6 +140,7 @@ function renderGridView(books, esc) {
             <p class="book-card-title">${esc(book.title)}</p>
             <p class="book-card-author">${esc(book.author)}</p>
             <span class="book-card-status status-${esc(book.status)}">${esc(book.status)}</span>
+            ${buildDuplicateBadgeHTML(book)}
             <div class="book-card-actions">${buildActionButtonHTML(book, esc)}</div>
         </div>`;
         libraryGrid.appendChild(card);
@@ -160,6 +170,7 @@ function renderListView(books, esc) {
             ${metaParts.length ? `<p class="list-card-meta">${metaParts.join(" &middot; ")}</p>` : ""}
         </div>
         <span class="book-card-status status-${esc(book.status)}">${esc(book.status)}</span>
+        ${buildDuplicateBadgeHTML(book)}
         <div class="book-card-actions">${buildActionButtonHTML(book, esc)}</div>`;
         libraryGrid.appendChild(card);
     });
@@ -196,7 +207,7 @@ function renderTableView(books, esc) {
             <td class="table-title">${esc(book.title)}</td>
             <td>${esc(book.author)}</td>
             <td>${esc(book.series || "")}</td>
-            <td><span class="book-card-status status-${esc(book.status)}">${esc(book.status)}</span></td>
+            <td><span class="book-card-status status-${esc(book.status)}">${esc(book.status)}</span>${buildDuplicateBadgeHTML(book)}</td>
             <td class="col-actions"><div class="book-card-actions">${buildActionButtonHTML(book, esc)}</div></td>`;
         tbody.appendChild(row);
     });
@@ -244,8 +255,11 @@ export function renderLibraryGrid() {
         });
     }
 
-    // 2. Apply Status Filter
-    if (statusFilter) {
+    // 2. Apply Status Filter. The special "__DUPLICATES__" value isn't a status —
+    // it narrows to books flagged as colliding duplicates (Phase 5).
+    if (statusFilter === "__DUPLICATES__") {
+        booksToDisplay = booksToDisplay.filter((book) => book.is_duplicate);
+    } else if (statusFilter) {
         booksToDisplay = booksToDisplay.filter((book) => book.status === statusFilter);
     }
 
