@@ -291,6 +291,15 @@ export function renderLibraryGrid() {
             break;
     }
 
+    // Prune the multi-select set to what's actually visible after search/filter,
+    // so the bulk bar count stays truthful and a bulk action can never touch a
+    // book the current view has hidden. Sort and view switches don't change
+    // membership, so a selection survives those unchanged.
+    const visibleAsins = new Set(booksToDisplay.map((book) => book.asin));
+    [...selectedAsins].forEach((asin) => {
+        if (!visibleAsins.has(asin)) selectedAsins.delete(asin);
+    });
+
     updateLibraryTable(booksToDisplay);
 }
 
