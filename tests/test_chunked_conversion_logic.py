@@ -99,6 +99,32 @@ class TestEmbedCoverArt:
             _embed_cover_art("B0X", 1, "/data/out.m4b", "/tmp/cover.jpg")  # should not raise
 
 
+class TestDownloadRegistration:
+    """M6 regression: the download Popen must be unregistered from the process
+    registry on every exit, including the SIGTERM (-15) cancel path — which
+    previously returned (None, None) without unregistering, leaking a dead
+    process reference into the registry."""
+
+    def test_cancelled_download_unregisters_process(self):
+        proc = mock.MagicMock()
+        proc.stderr.readline.return_value = ""  # no progress lines; the loop ends at once
+        proc.wait.return_value = -15  # SIGTERM: the job was cancelled mid-download
+        proc.stdout.read.return_value = ""
+
+        with (
+            mock.patch.object(ccl, "load_settings", return_value={}),
+            mock.patch.object(ccl.subprocess, "Popen", return_value=proc),
+            mock.patch.object(ccl.process_registry, "register") as register,
+            mock.patch.object(ccl.process_registry, "unregister") as unregister,
+            mock.patch.object(ccl, "_yield_progress"),
+        ):
+            result = ccl.prepare_book_assets("B0X", 1, "/tmp/x")
+
+        assert result == (None, None)  # cancellation signal, not a failure
+        register.assert_called_once_with(1, proc)
+        unregister.assert_called_once_with(1, proc)
+
+
 class TestRemuxLossless:
     """Phase 8 (FR12): no-re-encode finalize copies the audio straight through
     (-c copy) while muxing chapters/metadata, then embeds the cover — same

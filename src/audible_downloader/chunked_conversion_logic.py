@@ -187,29 +187,36 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             # its error messages here too, but this loop drains the stream to
             # EOF, so a later process.stderr.read() would come back empty — keep
             # a bounded tail so a failure can be explained instead of surfacing
-            # as a bare "non-zero exit status".
-            stderr_tail = deque(maxlen=50)
-            for line in iter(process.stderr.readline, ""):
-                stderr_tail.append(line)
-                match = re.search(r"(\d+)%", line)
-                if match:
-                    download_percent = int(match.group(1))
-                    overall_progress = 5 + int(download_percent * 0.20)
-                    _yield_progress(asin, f"Downloading... {download_percent}%", overall_progress, job_id)
+            # as a bare "non-zero exit status". Unregister in a finally so the
+            # dead Popen is dropped from the registry on every exit — success,
+            # failure (retry), and SIGTERM cancel alike (register/unregister must
+            # be paired, or a cancel leaves stale process references behind).
+            try:
+                stderr_tail = deque(maxlen=50)
+                for line in iter(process.stderr.readline, ""):
+                    stderr_tail.append(line)
+                    match = re.search(r"(\d+)%", line)
+                    if match:
+                        download_percent = int(match.group(1))
+                        overall_progress = 5 + int(download_percent * 0.20)
+                        _yield_progress(asin, f"Downloading... {download_percent}%", overall_progress, job_id)
 
-            if process.wait() != 0:
-                if process.returncode == -15:
-                    log.info(f"PREPARE ({asin}): Download cancelled.")
-                    return None, None
+                returncode = process.wait()
                 # audible-cli writes its user-facing error to stdout (e.g.
                 # "error: Asin ... not found in library."), which we never read
-                # for progress — grab it now so the failure can be explained.
+                # for progress — grab it now so a failure can be explained.
                 stdout_text = process.stdout.read() if process.stdout else ""
+            finally:
+                process_registry.unregister(job_id, process)
+
+            if returncode != 0:
+                if returncode == -15:
+                    log.info(f"PREPARE ({asin}): Download cancelled.")
+                    return None, None
                 raise subprocess.CalledProcessError(
-                    process.returncode, download_command, output=stdout_text, stderr="".join(stderr_tail)
+                    returncode, download_command, output=stdout_text, stderr="".join(stderr_tail)
                 )
 
-            process_registry.unregister(job_id, process)
             log.info(f"PREPARE ({asin}): Download finished.")
 
             # --- 2. Get Metadata & Detect Files ---
