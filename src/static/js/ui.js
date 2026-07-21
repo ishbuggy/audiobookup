@@ -80,8 +80,15 @@ document.addEventListener('DOMContentLoaded', () => {
         if (type === 'success') iconClass = 'fa-check-circle';
         if (type === 'error') iconClass = 'fa-exclamation-circle';
 
-        toast.innerHTML = `<i class="fas ${iconClass}"></i> <span>${message}</span>`;
-        
+        // Build the toast with textContent for the message so a caller passing an
+        // error string (e.g. `error.message`) can never inject markup — the icon is
+        // the only trusted-markup part.
+        const icon = document.createElement('i');
+        icon.className = `fas ${iconClass}`;
+        const messageSpan = document.createElement('span');
+        messageSpan.textContent = message;
+        toast.append(icon, document.createTextNode(' '), messageSpan);
+
         toastContainer.appendChild(toast);
 
         // Trigger reflow to enable transition

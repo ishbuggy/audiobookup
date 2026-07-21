@@ -10,9 +10,8 @@ let libraryData = [];
 // like the theme toggle, so a user's choice survives reloads.
 const VIEW_STORAGE_KEY = "libraryView";
 const VALID_VIEWS = ["grid", "list", "table"];
-let currentView = VALID_VIEWS.includes(localStorage.getItem(VIEW_STORAGE_KEY))
-    ? localStorage.getItem(VIEW_STORAGE_KEY)
-    : "grid";
+const storedView = localStorage.getItem(VIEW_STORAGE_KEY);
+let currentView = VALID_VIEWS.includes(storedView) ? storedView : "grid";
 
 // Multi-select (Phase 4 bulk rename). ASINs the user has checked in the list or
 // table view. Persists across search/sort/filter and view switches — the row
@@ -68,6 +67,16 @@ export function clearSelection() {
         const card = cb.closest(".book-card");
         if (card) card.classList.remove("is-selected");
     });
+    updateBulkBar();
+}
+
+// Replace the selection with a specific set of ASINs and refresh the bulk bar.
+// Used to keep only the rows that failed a bulk action selected, so the user can
+// retry them without re-picking. The row checkboxes are re-derived from the set
+// on the next render (callers re-render after calling this).
+export function setSelection(asins) {
+    selectedAsins.clear();
+    asins.forEach((asin) => selectedAsins.add(asin));
     updateBulkBar();
 }
 

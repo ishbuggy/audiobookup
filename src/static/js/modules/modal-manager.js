@@ -5,6 +5,7 @@ import {
     getLibraryData,
     getSelectedAsins,
     clearSelection,
+    setSelection,
     initializeLazyLoading,
     renderLibraryGrid,
 } from "./library-manager.js";
@@ -18,6 +19,20 @@ let currentDetailBook = null;
 // the first time the editor opens. When true, saving a title/author edit renames
 // the file on disk, so the editor shows a warning.
 let applyCustomToFilenames = null;
+
+// Cache-bust tokens for covers re-uploaded this session, keyed by ASIN. The
+// server reuses the same `/covers/<asin>_original.jpg` URL for a replacement, so
+// without a per-session buster the browser can serve the stale cached image when
+// the detail modal is reopened (it re-fetches the book and sets the src fresh).
+const coverCacheBusters = {};
+
+// Append this session's cache-buster to a cover URL when the book's cover was
+// re-uploaded, so a reopened modal shows the new art rather than the cached one.
+function bustCoverUrl(asin, url) {
+    if (!url) return "";
+    const token = coverCacheBusters[asin];
+    return token ? `${url}?t=${token}` : url;
+}
 
 // --- DOM Elements ---
 const bookDetailModal = document.getElementById("book-detail-modal");
@@ -106,7 +121,7 @@ async function handleBookClick(event) {
         document.getElementById("modal-resolve-duplicate-btn").style.display = isDuplicate ? "inline-block" : "none";
 
         // --- Populate Basic Metadata ---
-        document.getElementById("modal-book-cover").src = book.cover_url_original || "";
+        document.getElementById("modal-book-cover").src = bustCoverUrl(asin, book.cover_url_original);
         document.getElementById("modal-book-title").textContent = book.title || "N/A";
         document.getElementById("modal-book-author").textContent = book.author || "N/A";
         document.getElementById("modal-book-narrator").textContent = book.narrator || "N/A";
@@ -388,8 +403,11 @@ async function handleCoverUpload(event) {
         }
 
         // Bust the browser/image cache so the new art shows immediately in both
-        // the modal (full cover) and the grid (thumbnail).
-        const bust = `?t=${Date.now()}`;
+        // the modal (full cover) and the grid (thumbnail). The token is remembered
+        // per-ASIN so a later modal reopen (which re-fetches the book with the bare
+        // URL) still busts the cached original.
+        coverCacheBusters[asin] = Date.now();
+        const bust = `?t=${coverCacheBusters[asin]}`;
         document.getElementById("modal-book-cover").src = `${data.cover_url_original}${bust}`;
         currentDetailBook.cover_url_original = data.cover_url_original;
         applyEditToLibrary(asin, { cover_url: `${data.cover_url_thumb}${bust}` });
@@ -689,7 +707,7 @@ async function applyBulkRename() {
 
     const library = getLibraryData();
     let ok = 0;
-    let failed = 0;
+    const failedAsins = [];
 
     for (let i = 0; i < items.length; i++) {
         const item = items[i];
@@ -718,7 +736,7 @@ async function applyBulkRename() {
             ok++;
         } catch (error) {
             console.error(`Bulk rename failed for ${item.asin}:`, error);
-            failed++;
+            failedAsins.push(item.asin);
         }
     }
 
@@ -727,14 +745,17 @@ async function applyBulkRename() {
     cancelBtn.disabled = false;
 
     closeBulkRenameModal();
-    clearSelection();
+    // Keep only the failed rows selected so the user can retry them directly;
+    // clear entirely when everything succeeded.
+    if (failedAsins.length === 0) clearSelection();
+    else setSelection(failedAsins);
     renderLibraryGrid();
 
     if (window.showToast) {
-        if (failed === 0) {
+        if (failedAsins.length === 0) {
             window.showToast(`Renamed ${ok} book${ok === 1 ? "" : "s"}.`, "success");
         } else {
-            window.showToast(`Renamed ${ok}; ${failed} failed (see the log).`, "error");
+            window.showToast(`Renamed ${ok}; ${failedAsins.length} failed (still selected — see the log).`, "error");
         }
     }
 }
@@ -950,15 +971,19 @@ document.addEventListener("DOMContentLoaded", () => {
                   )}</strong> (a rough estimate — it often finishes sooner).`
                 : "";
 
-        window.showConfirmationModal(
-            '<i class="fas fa-clock" style="color: #ffc107;"></i> Large download',
-            `You've selected <strong>${selectedASINs.length}</strong> books. AudioBookup converts every ` +
-                `book to a DRM-free file, which takes time.${estimateHtml}<br><br>Downloads run in the ` +
-                `background — you can keep using the app while they process. Start now?`,
-            () => {
-                window.closeConfirmationModal();
-                startBulkDownload(selectedASINs);
-            },
-        );
+        // The confirmation modal closes itself once the callback runs, so the
+        // callback only needs to start the download. Fall back to a native confirm
+        // if the modal helper isn't present (mirrors the re-download path).
+        if (window.showConfirmationModal) {
+            window.showConfirmationModal(
+                '<i class="fas fa-clock" style="color: #ffc107;"></i> Large download',
+                `You've selected <strong>${selectedASINs.length}</strong> books. AudioBookup converts every ` +
+                    `book to a DRM-free file, which takes time.${estimateHtml}<br><br>Downloads run in the ` +
+                    `background — you can keep using the app while they process. Start now?`,
+                () => startBulkDownload(selectedASINs),
+            );
+        } else if (confirm(`Start downloading ${selectedASINs.length} books? This can take a while.`)) {
+            startBulkDownload(selectedASINs);
+        }
     };
 });
