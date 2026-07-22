@@ -447,6 +447,17 @@ export async function startJob(job_type, asins = [], clickedButton = null, job_p
         console.error(`Error starting ${job_type} job:`, error);
         window.showCustomAlert(`Could not start the ${job_type} job. Please check the application log.`);
         setActionsBusy(false);
+        // We may have optimistically populated the panel with the selection before
+        // the server refused the start (e.g. a 409 because another tab or the
+        // scheduler already has a job running). Reconcile with the server's real
+        // state rather than leaving the wrong panel and re-enabled actions: clear
+        // the optimistic panel, then checkForActiveJob rebuilds and re-locks for
+        // whatever is actually running, or leaves it cleared/unlocked if nothing is.
+        if (booksForPanel) {
+            processingList.innerHTML = "";
+            processingPanel.classList.remove("open");
+            await checkForActiveJob();
+        }
         return false;
     }
 }

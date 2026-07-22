@@ -1,6 +1,7 @@
 // src/static/js/modules/library-manager.js
 
 import { addLogLine } from "./job-manager.js";
+import { bustCoverUrl } from "./cover-cache.js";
 
 // --- State ---
 let libraryData = [];
@@ -317,7 +318,14 @@ export async function fetchUpdates() {
     try {
         const response = await fetch("/get_page_data");
         const data = await response.json();
-        libraryData = data.books;
+        // A refresh replaces every book object with the server's bare `cover_url`.
+        // Re-apply this session's per-ASIN cover cache-buster while normalizing so
+        // a cover re-uploaded in the detail modal doesn't revert to the stale
+        // cached thumbnail in the grid after a job completes / any fetchUpdates.
+        libraryData = (data.books || []).map((book) => ({
+            ...book,
+            cover_url: bustCoverUrl(book.asin, book.cover_url),
+        }));
         updateStats(data.stats);
         renderLibraryGrid();
     } catch (error) {

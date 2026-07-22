@@ -9,6 +9,7 @@ import {
     initializeLazyLoading,
     renderLibraryGrid,
 } from "./library-manager.js";
+import { setCoverBuster, bustCoverUrl } from "./cover-cache.js";
 
 // The book currently shown in the detail modal. The metadata editor and cover
 // upload handlers (attached once at load) read the active ASIN/values from here
@@ -20,19 +21,9 @@ let currentDetailBook = null;
 // the file on disk, so the editor shows a warning.
 let applyCustomToFilenames = null;
 
-// Cache-bust tokens for covers re-uploaded this session, keyed by ASIN. The
-// server reuses the same `/covers/<asin>_original.jpg` URL for a replacement, so
-// without a per-session buster the browser can serve the stale cached image when
-// the detail modal is reopened (it re-fetches the book and sets the src fresh).
-const coverCacheBusters = {};
-
-// Append this session's cache-buster to a cover URL when the book's cover was
-// re-uploaded, so a reopened modal shows the new art rather than the cached one.
-function bustCoverUrl(asin, url) {
-    if (!url) return "";
-    const token = coverCacheBusters[asin];
-    return token ? `${url}?t=${token}` : url;
-}
+// Cover cache-busting for images re-uploaded this session is shared with the
+// library grid via ./cover-cache.js (setCoverBuster / bustCoverUrl), so a cover
+// replaced here stays busted in the grid across refreshes too.
 
 // --- DOM Elements ---
 const bookDetailModal = document.getElementById("book-detail-modal");
@@ -406,8 +397,7 @@ async function handleCoverUpload(event) {
         // the modal (full cover) and the grid (thumbnail). The token is remembered
         // per-ASIN so a later modal reopen (which re-fetches the book with the bare
         // URL) still busts the cached original.
-        coverCacheBusters[asin] = Date.now();
-        const bust = `?t=${coverCacheBusters[asin]}`;
+        const bust = `?t=${setCoverBuster(asin)}`;
         document.getElementById("modal-book-cover").src = `${data.cover_url_original}${bust}`;
         currentDetailBook.cover_url_original = data.cover_url_original;
         applyEditToLibrary(asin, { cover_url: `${data.cover_url_thumb}${bust}` });
