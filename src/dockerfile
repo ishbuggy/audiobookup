@@ -33,8 +33,11 @@ RUN useradd --system --create-home appuser
 WORKDIR /config
 
 # Layer 4: Python Libraries - Copy requirements.txt first to leverage build cache
+# Upgrade the installer toolchain first so the image ships patched
+# pip/setuptools/wheel (the base image's bundled pip lags behind security fixes).
 COPY src/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+  pip install --no-cache-dir -r requirements.txt
 
 # Layer 5: Application Source Code
 # Copy all application files to a holding directory for the entrypoint to use
