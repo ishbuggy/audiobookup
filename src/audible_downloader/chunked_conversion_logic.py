@@ -344,11 +344,15 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
                 )
 
                 try:
-                    # Run Decryption
+                    # Run Decryption. Register/unregister must be paired in a
+                    # finally so an exceptional communicate() exit can't leak a
+                    # live Popen into the registry (house try/finally rule).
                     d_proc = subprocess.Popen(decrypt_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    process_registry.register(job_id, d_proc)
-                    _, d_stderr = d_proc.communicate()
-                    process_registry.unregister(job_id, d_proc)
+                    try:
+                        process_registry.register(job_id, d_proc)
+                        _, d_stderr = d_proc.communicate()
+                    finally:
+                        process_registry.unregister(job_id, d_proc)
 
                     if d_proc.returncode != 0:
                         if d_proc.returncode == -15:

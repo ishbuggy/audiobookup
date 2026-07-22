@@ -256,7 +256,10 @@ def get_book_details(asin):
             stat_info = os.stat(file_path)
             book_dict["file_size_hr"] = format_bytes(stat_info.st_size)
             book_dict["file_mtime_hr"] = datetime.fromtimestamp(stat_info.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-            book_dict["file_type"] = ".m4b Audiobook"
+            # Derive the label from the real on-disk extension so imported .m4a
+            # files (L8 preserves their extension) aren't mislabeled as ".m4b".
+            file_ext = os.path.splitext(file_path)[1].lower()
+            book_dict["file_type"] = f"{file_ext} Audiobook" if file_ext else "Audiobook"
         except Exception as e:
             log.warning(f"Could not get file stats for {file_path}: {e}")
             book_dict["file_size_hr"] = "Error"

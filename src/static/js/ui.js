@@ -4,17 +4,16 @@
 // crafted title can't inject markup or scripts. Defined outside the
 // DOMContentLoaded handler so ES modules can use it as soon as ui.js runs.
 window.escapeHtml = function (value) {
-    return String(value ?? '')
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#39;');
+    return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
 };
 
 // This ensures that the script does not run until the entire HTML document has been loaded and parsed.
-document.addEventListener('DOMContentLoaded', () => {
-
+document.addEventListener("DOMContentLoaded", () => {
     // --- Custom Alert Logic (Now safe) ---
     const customAlertModal = document.getElementById("custom-alert-modal");
     const customAlertMessage = document.getElementById("custom-alert-message");
@@ -29,9 +28,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const confirmationConfirmBtn = document.getElementById("confirmation-confirm-btn");
 
     let confirmCallback = null;
-    
+
     // --- Make Functions Globally Accessible ---
-    window.showCustomAlert = function(message, title = '<i class="fas fa-exclamation-triangle" style="color: #ffc107;"></i> Warning') {
+    window.showCustomAlert = function (
+        message,
+        title = '<i class="fas fa-exclamation-triangle" style="color: #ffc107;"></i> Warning',
+    ) {
         if (!customAlertModal || !customAlertTitle || !customAlertMessage) return;
         customAlertTitle.innerHTML = title;
         customAlertMessage.innerHTML = message;
@@ -39,23 +41,23 @@ document.addEventListener('DOMContentLoaded', () => {
         customAlertModal.style.display = "flex";
     };
 
-    window.closeCustomAlert = function() {
+    window.closeCustomAlert = function () {
         if (!customAlertModal) return;
         document.body.classList.remove("modal-open");
         customAlertModal.style.display = "none";
     };
 
-    window.showConfirmationModal = function(title, message, onConfirm) {
+    window.showConfirmationModal = function (title, message, onConfirm) {
         if (!confirmationModal) return;
         confirmationTitle.innerHTML = title;
         // Use innerHTML to allow <strong> tags
-        confirmationMessage.innerHTML = message; 
+        confirmationMessage.innerHTML = message;
         confirmCallback = onConfirm;
         document.body.classList.add("modal-open");
         confirmationModal.style.display = "flex";
     };
 
-    window.closeConfirmationModal = function() {
+    window.closeConfirmationModal = function () {
         if (!confirmationModal) return;
         document.body.classList.remove("modal-open");
         confirmationModal.style.display = "none";
@@ -63,48 +65,48 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     // --- Toast Notification Logic ---
-    
+
     // Create container if it doesn't exist
-    let toastContainer = document.getElementById('toast-container');
+    let toastContainer = document.getElementById("toast-container");
     if (!toastContainer) {
-        toastContainer = document.createElement('div');
-        toastContainer.id = 'toast-container';
+        toastContainer = document.createElement("div");
+        toastContainer.id = "toast-container";
         document.body.appendChild(toastContainer);
     }
 
-    window.showToast = function(message, type = 'info') {
-        const toast = document.createElement('div');
+    window.showToast = function (message, type = "info") {
+        const toast = document.createElement("div");
         toast.className = `toast ${type}`;
-        
-        let iconClass = 'fa-info-circle';
-        if (type === 'success') iconClass = 'fa-check-circle';
-        if (type === 'error') iconClass = 'fa-exclamation-circle';
+
+        let iconClass = "fa-info-circle";
+        if (type === "success") iconClass = "fa-check-circle";
+        if (type === "error") iconClass = "fa-exclamation-circle";
 
         // Build the toast with textContent for the message so a caller passing an
         // error string (e.g. `error.message`) can never inject markup — the icon is
         // the only trusted-markup part.
-        const icon = document.createElement('i');
+        const icon = document.createElement("i");
         icon.className = `fas ${iconClass}`;
-        const messageSpan = document.createElement('span');
+        const messageSpan = document.createElement("span");
         messageSpan.textContent = message;
-        toast.append(icon, document.createTextNode(' '), messageSpan);
+        toast.append(icon, document.createTextNode(" "), messageSpan);
 
         toastContainer.appendChild(toast);
 
         // Trigger reflow to enable transition
         void toast.offsetWidth;
-        toast.classList.add('show');
+        toast.classList.add("show");
 
         // Remove after 3 seconds
         setTimeout(() => {
-            toast.classList.remove('show');
+            toast.classList.remove("show");
             setTimeout(() => {
                 if (toastContainer.contains(toast)) {
                     toastContainer.removeChild(toast);
                 }
             }, 300); // Wait for fade out
         }, 4000);
-    };    
+    };
 
     // --- Function to handle the reset and shutdown sequence ---
     async function handleResetAuth() {
@@ -135,8 +137,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (error) {
             console.error("Reset authentication failed:", error);
             // Update the alert to show the error message.
-            document.getElementById("custom-alert-title").innerHTML =
-                '<i class="fas fa-times-circle"></i> Error';
+            document.getElementById("custom-alert-title").innerHTML = '<i class="fas fa-times-circle"></i> Error';
             document.getElementById("custom-alert-message").textContent =
                 `Could not reset authentication: ${error.message}`;
         }
@@ -167,17 +168,17 @@ document.addEventListener('DOMContentLoaded', () => {
     window.handleResetAuth = handleResetAuth;
 
     // --- Attach Event Listeners Safely ---
-    if(customAlertOkBtn) {
+    if (customAlertOkBtn) {
         customAlertOkBtn.onclick = window.closeCustomAlert;
     }
-    
+
     // --- NEW: Centralized Confirmation Modal Button Listeners ---
     // This is the critical fix. These listeners are now in the same scope
     // as the `confirmCallback` variable and will work on any page.
-    if(confirmationCancelBtn) {
+    if (confirmationCancelBtn) {
         confirmationCancelBtn.addEventListener("click", window.closeConfirmationModal);
     }
-    if(confirmationConfirmBtn) {
+    if (confirmationConfirmBtn) {
         confirmationConfirmBtn.addEventListener("click", () => {
             if (typeof confirmCallback === "function") {
                 confirmCallback();
@@ -187,7 +188,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // --- Auto Concurrency Detector (Now safe and global) ---
-    window.setupAutoConcurrencyDetector = function(buttonId, inputId, altInputId = null) {
+    window.setupAutoConcurrencyDetector = function (buttonId, inputId, altInputId = null) {
         const autoDetectBtn = document.getElementById(buttonId);
         const coresInput = document.getElementById(inputId);
         const altCoresInput = altInputId ? document.getElementById(altInputId) : null;
@@ -198,15 +199,15 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const handleAutoDetect = async () => {
-            const icon = autoDetectBtn.querySelector('i');
-            icon.classList.remove('fa-magic');
-            icon.classList.add('fa-spinner', 'fa-spin');
+            const icon = autoDetectBtn.querySelector("i");
+            icon.classList.remove("fa-magic");
+            icon.classList.add("fa-spinner", "fa-spin");
             autoDetectBtn.disabled = true;
             try {
-                const response = await fetch('/api/get_cpu_cores');
+                const response = await fetch("/api/get_cpu_cores");
                 const data = await response.json();
-                if (!response.ok) throw new Error(data.error || 'Server error.');
-                
+                if (!response.ok) throw new Error(data.error || "Server error.");
+
                 coresInput.value = data.recommended_concurrency;
                 if (altCoresInput) {
                     altCoresInput.value = data.recommended_concurrency;
@@ -214,19 +215,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 window.showCustomAlert(
                     `Detected ${data.total_cores} CPU cores.<br>Recommended concurrency has been set to <strong>${data.recommended_concurrency}</strong>.`,
-                    '<i class="fas fa-check-circle" style="color: #28a745;"></i> Success'
+                    '<i class="fas fa-check-circle" style="color: #28a745;"></i> Success',
                 );
-
             } catch (error) {
                 alert(`Could not auto-detect CPU cores: ${error.message}`);
             } finally {
-                icon.classList.add('fa-magic');
-                icon.classList.remove('fa-spinner', 'fa-spin');
+                icon.classList.add("fa-magic");
+                icon.classList.remove("fa-spinner", "fa-spin");
                 autoDetectBtn.disabled = false;
             }
         };
 
-        autoDetectBtn.addEventListener('click', handleAutoDetect);
+        autoDetectBtn.addEventListener("click", handleAutoDetect);
         return handleAutoDetect;
     };
 });
