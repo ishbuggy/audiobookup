@@ -21,11 +21,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   jq \
   coreutils \
   curl \
-  gosu \
   locales \
   && sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
   locale-gen \
   && rm -rf /var/lib/apt/lists/*
+
+# Layer 2b: gosu (privilege drop in entrypoint.sh)
+# Install the upstream release binary, GPG-verified, instead of Debian's `gosu`
+# package: Debian builds it against an old Go toolchain (go1.19.8), which drags
+# a cluster of Go stdlib CVEs into the image. The upstream 1.19 binary is built
+# on a current Go. gnupg is added only to verify the signature and removed again
+# in the same layer (the apt-mark dance restores the pre-existing manual packages
+# so curl/ffmpeg/etc. survive the purge); ca-certificates+curl come from Layer 2.
+ENV GOSU_VERSION=1.19
+RUN set -eux; \
+  savedAptMark="$(apt-mark showmanual)"; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends ca-certificates gnupg; \
+  dpkgArch="$(dpkg --print-architecture | awk -F- '{ print $NF }')"; \
+  curl -fsSL -o /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${dpkgArch}"; \
+  curl -fsSL -o /usr/local/bin/gosu.asc "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${dpkgArch}.asc"; \
+  GNUPGHOME="$(mktemp -d)"; export GNUPGHOME; \
+  gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys B42F6819007F00F88E364FD4036A9C25BF357DD4; \
+  gpg --batch --verify /usr/local/bin/gosu.asc /usr/local/bin/gosu; \
+  gpgconf --kill all; \
+  rm -rf "$GNUPGHOME" /usr/local/bin/gosu.asc; \
+  apt-mark auto '.*' > /dev/null; \
+  [ -z "$savedAptMark" ] || apt-mark manual $savedAptMark > /dev/null; \
+  apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
+  rm -rf /var/lib/apt/lists/*; \
+  chmod +x /usr/local/bin/gosu; \
+  gosu --version; \
+  gosu nobody true
 
 # Layer 3: Create a non-root user
 RUN useradd --system --create-home appuser
