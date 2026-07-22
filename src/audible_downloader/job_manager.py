@@ -208,6 +208,16 @@ def import_worker(job_id, app_context, stop_event):
                     log.error(f"WORKER ({job_id}): Failed to adopt '{path}': {e}", exc_info=True)
                     skipped += 1
 
+                # A cancel can arrive *during* an adoption (the loop-top check
+                # already ran for this iteration). Re-check after each file so a
+                # cancel on the last/only candidate — the common single-file scan —
+                # reports CANCELLED, not COMPLETED. The in-flight ffprobe/ffmpeg was
+                # already SIGTERM'd; this only corrects the final status.
+                if stop_event.is_set():
+                    log.info(f"WORKER ({job_id}): IMPORT job cancelled.")
+                    cancelled = True
+                    break
+
             final_status = "CANCELLED" if cancelled else "COMPLETED"
             counts = f"{imported} imported, {reconciled} reconciled, {skipped} skipped"
             if cancelled:

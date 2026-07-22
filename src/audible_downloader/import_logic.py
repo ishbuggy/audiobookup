@@ -332,6 +332,27 @@ def adopt_file(filepath, *, allow_reconcile=True, key=None, job_id=None):
     return {"action": action, "key": key, "title": title, "author": author}
 
 
+def _first_free_output_path(base_path, suffix):
+    """
+    Return the first path in the collision sequence that does NOT already exist on
+    disk, so a file placed there can never overwrite another: `base_path`, then
+    `<root>_<suffix><ext>`, then `<root>_<suffix>_2<ext>`, `_3`, ... `suffix` is the
+    (already-sanitized) adoption key, mirroring the download/rename ASIN-suffix
+    convention. In practice the first or second candidate is free; the loop only
+    guards the pathological case where both the template name and the key-suffixed
+    name are taken (e.g. a duplicate that was itself already downloaded there).
+    """
+    if not os.path.exists(base_path):
+        return base_path
+    root, ext = os.path.splitext(base_path)
+    candidate = f"{root}_{suffix}{ext}"
+    n = 2
+    while os.path.exists(candidate):
+        candidate = f"{root}_{suffix}_{n}{ext}"
+        n += 1
+    return candidate
+
+
 def adopt_upload(staging_path, original_filename, settings):
     """
     Place an already-staged upload into the managed library structure and adopt
@@ -350,6 +371,15 @@ def adopt_upload(staging_path, original_filename, settings):
     from .processing_logic import _sanitize_filename, build_base_output_path
 
     meta = _probe_metadata(staging_path)
+    # Reject non-media uploads before placing anything under /data. The endpoint
+    # already rejects an empty body, but a *non-empty* file can still be renamed
+    # junk (an importable extension over non-audio bytes): ffprobe finds no format
+    # and adopting it would create a bogus DOWNLOADED row (title=filename, Unknown
+    # Author, runtime 0). The scan path skips these via probe_ok; uploads get the
+    # same guard. The staging file is left unmoved for the endpoint to clean up.
+    if not meta.get("probe_ok", False):
+        log.info(f"IMPORT: rejecting unreadable upload '{original_filename}' (ffprobe found no media format).")
+        return {"action": "skipped", "reason": "unreadable-media", "key": None, "filepath": None}
     key = meta["embedded_asin"] or f"IMPORT-{uuid.uuid4().hex[:12]}"
     title = meta["title"] or os.path.splitext(os.path.basename(original_filename))[0] or "Unknown Title"
     author = meta["author"] or "Unknown Author"
@@ -358,12 +388,15 @@ def adopt_upload(staging_path, original_filename, settings):
     # than defaulting to .m4b, so the on-disk name reflects the actual content and
     # matches what scan-in-place would record for the same file.
     ext = os.path.splitext(staging_path)[1].lower() or ".m4b"
-    final_path = build_base_output_path(settings, key, author, title, "N/A", "N/A", ext=ext)
-    # Collision-safe: never overwrite an existing file (which may belong to
-    # another book) — suffix the key, matching the download/rename convention.
-    if os.path.exists(final_path):
-        root, ext = os.path.splitext(final_path)
-        final_path = f"{root}_{_sanitize_filename(key)}{ext}"
+    base_path = build_base_output_path(settings, key, author, title, "N/A", "N/A", ext=ext)
+    # Collision-safe: never overwrite an existing file. A SINGLE key suffix is not
+    # enough — the ASIN-suffixed name is exactly where this key's own prior
+    # duplicate download already lives, so a bare "_<key>" could land straight on a
+    # linked book's file and shutil.move would clobber it *before* adopt_file's
+    # reconcile guard runs. Walk suffixes until the target is genuinely free; the
+    # placed file is then adopted, and if the key belongs to an already-linked row
+    # adopt_file declines to repoint it and adopt_upload removes the redundant copy.
+    final_path = _first_free_output_path(base_path, _sanitize_filename(key))
 
     os.makedirs(os.path.dirname(final_path), exist_ok=True)
     shutil.move(staging_path, final_path)

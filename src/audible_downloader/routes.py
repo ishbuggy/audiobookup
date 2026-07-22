@@ -1027,6 +1027,11 @@ def import_upload():
             return jsonify(error="Uploaded file is empty."), 400
 
         result = adopt_upload(staging_path, filename, load_settings())
+        if result.get("reason") == "unreadable-media":
+            # adopt_upload rejected renamed junk before placing it and left the
+            # staging file for us to remove; surface a clear 400 to the client.
+            _safe_remove(staging_path)
+            return jsonify(error="The uploaded file could not be read as an audio file."), 400
     except Exception as e:
         log.error(f"IMPORT: upload adoption failed for '{filename}': {e}", exc_info=True)
         _safe_remove(staging_path)

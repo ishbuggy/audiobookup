@@ -54,7 +54,15 @@ def _rows(db):
 
 def _patch_meta(**over):
     """Patch _probe_metadata (and stub cover extraction) with the given fields."""
-    meta = {"embedded_asin": None, "title": None, "author": None, "release_date": None, "runtime_min": 0}
+    meta = {
+        "embedded_asin": None,
+        "title": None,
+        "author": None,
+        "release_date": None,
+        "runtime_min": 0,
+        # Default to "probed as valid media"; the unprobeable/junk cases override.
+        "probe_ok": True,
+    }
     meta.update(over)
     return (
         mock.patch.object(import_logic, "_probe_metadata", return_value=meta),
@@ -202,7 +210,7 @@ class TestAdoptFile:
 
     def test_zero_byte_file_is_skipped_on_scan(self, db, tmp_path):
         # L11: a 0-byte file under /data must not become a junk row. The size guard
-        # fires even though the (mocked) probe returns no explicit probe_ok flag.
+        # fires regardless of the probe result (probe_ok is True by default here).
         full = tmp_path / "empty.m4b"
         full.write_bytes(b"")
         m_meta, m_cover = _patch_meta()
@@ -367,6 +375,45 @@ class TestAdoptUpload:
         assert result["key"] in result["filepath"]
         assert target.read_bytes() == b"existing"
 
+    def test_upload_does_not_overwrite_a_linked_duplicate_at_the_suffixed_path(self, db, tmp_path):
+        # H1 (blocking regression): the "_<ASIN>" name is exactly where a duplicate's
+        # own prior download lives. Uploading a file carrying that ASIN when BOTH the
+        # template name AND the "_<ASIN>" name are already occupied must NOT clobber
+        # the linked duplicate's real file. adopt_upload walks to a further-suffixed
+        # free path; adopt_file then declines to repoint the linked row and the
+        # redundant copy is removed. A single unchecked suffix would overwrite `dup`.
+        lib = tmp_path / "lib"
+        lib.mkdir(parents=True)
+        # The primary edition occupies the plain template name...
+        primary = lib / "Known.m4b"
+        primary.write_bytes(b"primary")
+        # ...and the duplicate's real download occupies the "_<ASIN>" name.
+        dup = lib / "Known_B0DUP123456.m4b"
+        dup.write_bytes(b"real-dup")
+        _seed(db, asin="B0DUP123456", title="Known", status="DOWNLOADED", filepath=str(dup), source="audible")
+
+        staging = tmp_path / "stage.m4b"
+        staging.write_bytes(b"uploaded")
+        m_meta, m_cover = _patch_meta(embedded_asin="B0DUP123456", title="Known")
+        with (
+            m_meta,
+            m_cover,
+            mock.patch("audible_downloader.processing_logic.build_base_output_path", return_value=str(primary)),
+        ):
+            result = import_logic.adopt_upload(str(staging), "orig.m4b", {})
+
+        # The linked duplicate's real file is intact — not overwritten by the upload.
+        assert dup.read_bytes() == b"real-dup"
+        assert primary.read_bytes() == b"primary"
+        # adopt_file refused to repoint the linked row; the redundant copy is gone.
+        assert result["action"] == "skipped"
+        assert result["reason"] == "asin-already-linked"
+        assert result["filepath"] is None
+        assert not os.path.exists(lib / "Known_B0DUP123456_2.m4b")
+        rows = _rows(db)
+        assert len(rows) == 1
+        assert rows[0]["filepath"] == str(dup)  # canonical row untouched
+
     def test_duplicate_upload_is_skipped_and_orphan_removed(self, db, tmp_path):
         # Uploading a file whose ASIN matches a book already linked to a live file
         # must not clobber the row (H1); adopt_upload also removes the redundant
@@ -393,6 +440,28 @@ class TestAdoptUpload:
         rows = _rows(db)
         assert len(rows) == 1
         assert rows[0]["filepath"] == str(existing)  # canonical row untouched
+
+    def test_unreadable_upload_is_rejected_before_placement(self, db, tmp_path):
+        # WF#6: a non-empty but unprobeable upload (renamed junk — importable
+        # extension over non-audio bytes) must be rejected before anything is
+        # placed under /data, not adopted as a bogus DOWNLOADED row. The staging
+        # file is left unmoved for the endpoint to clean up.
+        staging = tmp_path / "stage.m4b"
+        staging.write_bytes(b"not really audio")
+        m_meta, m_cover = _patch_meta(probe_ok=False)
+        with (
+            m_meta,
+            m_cover,
+            mock.patch("audible_downloader.processing_logic.build_base_output_path") as build,
+        ):
+            result = import_logic.adopt_upload(str(staging), "orig.m4b", {})
+
+        assert result["action"] == "skipped"
+        assert result["reason"] == "unreadable-media"
+        assert result["filepath"] is None
+        build.assert_not_called()  # bailed before computing a destination
+        assert staging.exists()  # left unmoved for the endpoint to remove
+        assert _rows(db) == []  # no DB row created
 
     def test_upload_preserves_m4a_extension(self, db, tmp_path):
         # L8: an uploaded .m4a keeps its real container extension instead of being

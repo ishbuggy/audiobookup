@@ -496,6 +496,24 @@ class TestImportUpload:
         assert captured["staging_exists"] is True  # the body was streamed to disk before adoption
         assert captured["filename"] == "Book.m4b"
 
+    def test_unreadable_media_returns_400_and_cleans_up(self, client, completed_setup, import_env, monkeypatch):
+        # WF#6: adopt_upload rejects renamed junk (non-empty, importable ext, no
+        # media) with the "unreadable-media" skip *before* placing it; the endpoint
+        # surfaces a 400 and removes the leftover staging file rather than reporting
+        # success for a book that was never adopted.
+        _login_session(client)
+
+        def reject_unreadable(staging_path, filename, settings):
+            return {"action": "skipped", "reason": "unreadable-media", "key": None, "filepath": None}
+
+        monkeypatch.setattr("audible_downloader.routes.adopt_upload", reject_unreadable)
+        response = self._upload(client)
+        assert response.status_code == 400
+        assert response.get_json().get("success") is not True
+        staging = import_env / ".import_staging"
+        leftovers = list(staging.iterdir()) if staging.exists() else []
+        assert leftovers == []  # staging file cleaned up
+
     def test_adoption_failure_returns_500_and_cleans_up(self, client, completed_setup, import_env, monkeypatch):
         _login_session(client)
 
