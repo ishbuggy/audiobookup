@@ -613,6 +613,19 @@ class BookProcessor:
         # actually on disk and complete before declaring the book DOWNLOADED.
         output_ok, reason = self._verify_output_file()
         if not output_ok:
+            # A cancel firing during the final verification probe surfaces here as
+            # a verification failure: SIGTERM (-15) makes the registered ffprobe
+            # return no duration, so _verify_output_file reports the file "could
+            # not be read back." That is a cancellation, not corruption — the file
+            # on disk is a valid, just-produced audiobook. Treat it like the other
+            # cancel paths (_fail_or_cancel): leave the finished file in place and
+            # the book's status untouched (it stays NEW/MISSING and is retried)
+            # rather than deleting a good file and marking it ERROR.
+            if self.stop_event is not None and self.stop_event.is_set():
+                log.info(
+                    f"PROCESSOR ({self.asin}): Verification cancelled; leaving finished file and status unchanged."
+                )
+                return
             log.error(f"PROCESSOR ({self.asin}): Output verification failed: {reason}")
             # Delete the failed artifact so a truncated/corrupt file isn't left
             # sitting at the final path masquerading as a real book. It would

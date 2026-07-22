@@ -125,6 +125,74 @@ class TestDownloadRegistration:
         unregister.assert_called_once_with(1, proc)
 
 
+class _FakeDirEntry:
+    """Minimal os.scandir entry stand-in for the download's file-detection step."""
+
+    def __init__(self, path):
+        self.path = path
+        self.name = path.rsplit("/", 1)[-1]
+
+    def is_file(self):
+        return True
+
+
+class TestCancelDuringPrepProbe:
+    """WF#2 (adversarial review): a cancel (-15) arriving during the check=False
+    prep probes (the post-decrypt duration probe) must be treated as cancellation
+    — return (None, None) — NOT let the empty-output ValueError fall through to the
+    inner decryption `except`, which would `continue` into a full (and equally
+    cancelled) FLAC decode that kill_job_processes can no longer reach."""
+
+    def _drive_to_probe(self, probe_returncode):
+        # Download Popen succeeds; the stderr loop ends immediately and wait()==0.
+        download_proc = mock.MagicMock()
+        download_proc.stderr.readline.return_value = ""
+        download_proc.stdout.read.return_value = ""
+        download_proc.wait.return_value = 0
+        # The AAC-copy decrypt Popen succeeds (-c copy master produced).
+        decrypt_proc = mock.MagicMock()
+        decrypt_proc.returncode = 0
+        decrypt_proc.communicate.return_value = (b"", b"")
+
+        temp_dir = "/tmp/x"
+        entries = [
+            _FakeDirEntry(f"{temp_dir}/book.aaxc"),
+            _FakeDirEntry(f"{temp_dir}/book.voucher"),
+            _FakeDirEntry(f"{temp_dir}/cover.jpg"),
+            _FakeDirEntry(f"{temp_dir}/chapters.json"),
+        ]
+
+        # _run_registered is called for the metadata fetch, then the duration
+        # probe. The AAXC+voucher path skips the AAX activation-bytes call.
+        metadata_result = subprocess.CompletedProcess(["audible", "api"], 0, '{"item": {"runtime_length_min": 60}}', "")
+        probe_result = subprocess.CompletedProcess(["ffprobe"], probe_returncode, "", "")
+
+        voucher_json = '{"content_license": {"license_response": {"key": "K", "iv": "IV"}}}'
+
+        with (
+            mock.patch.object(ccl, "load_settings", return_value={}),
+            mock.patch.object(ccl.subprocess, "Popen", side_effect=[download_proc, decrypt_proc]) as popen,
+            mock.patch.object(ccl, "_run_registered", side_effect=[metadata_result, probe_result]) as run_registered,
+            mock.patch.object(ccl.process_registry, "register"),
+            mock.patch.object(ccl.process_registry, "unregister"),
+            mock.patch.object(ccl.os, "scandir", side_effect=lambda _d: iter(entries)),
+            mock.patch("builtins.open", mock.mock_open(read_data=voucher_json)),
+            mock.patch.object(ccl, "_yield_progress"),
+        ):
+            result = ccl.prepare_book_assets("B0X", 1, temp_dir)
+        return result, popen, run_registered
+
+    def test_cancel_at_duration_probe_returns_cancel_without_flac_fallback(self):
+        result, popen, run_registered = self._drive_to_probe(probe_returncode=-15)
+        # Cancellation signal, not a failure.
+        assert result == (None, None)
+        # Exactly two Popens (download + the single AAC-copy decrypt): the FLAC
+        # fallback strategy's decrypt was NOT started after the cancel.
+        assert popen.call_count == 2
+        # Only the metadata fetch and the (cancelled) duration probe ran.
+        assert run_registered.call_count == 2
+
+
 class TestRunRegistered:
     """L3: short probe/metadata subprocesses run registered so a job cancel can
     SIGTERM them, while preserving subprocess.run's check=True semantics so the

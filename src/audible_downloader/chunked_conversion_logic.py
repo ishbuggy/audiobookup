@@ -368,6 +368,14 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
                         decrypted_master_file,
                     ]
                     dur_res = _run_registered(dur_cmd, job_id)
+                    # A SIGTERM (-15) here is a cancel, not a corrupt file. Bail
+                    # cleanly like the decrypt SIGTERM above rather than letting the
+                    # empty-stdout ValueError below be caught by the inner
+                    # `except` (which would `continue` into a full — and equally
+                    # cancelled — FLAC decode that kill_job_processes won't reach).
+                    if dur_res.returncode == -15:
+                        log.info(f"PREPARE ({asin}): Cancelled during duration probe.")
+                        return None, None
                     try:
                         actual_dur_sec = float(dur_res.stdout.strip())
                     except ValueError:
@@ -413,6 +421,12 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
                         ]
 
                         v_proc = _run_registered(verify_cmd, job_id)
+                        # Same as the duration probe: a -15 is cancellation, so
+                        # return the cancel signal instead of raising into the
+                        # inner except and falling back to FLAC after cancel.
+                        if v_proc.returncode == -15:
+                            log.info(f"PREPARE ({asin}): Cancelled during seek verification.")
+                            return None, None
                         if v_proc.returncode != 0:
                             log.warning(f"PREPARE ({asin}): Verification failed for {dec_name}. Seek error detected.")
                             raise ValueError("Verification failed: File is not seekable.")

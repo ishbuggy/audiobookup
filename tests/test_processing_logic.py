@@ -777,6 +777,52 @@ class TestFailedVerificationCleanup:
         fail.assert_called_once_with("truncated")
 
 
+class TestVerificationCancelPreservesFile:
+    """WF#1 (adversarial review): a cancel firing during the final verification
+    probe surfaces as a verification failure — the SIGTERM'd ffprobe returns no
+    duration, so verification reports the file 'could not be read back.' That is a
+    cancel, not corruption: the finished file must be left on disk and the book's
+    status left untouched, NOT deleted and marked ERROR."""
+
+    def test_cancel_during_verification_keeps_file_and_status(self):
+        processor = BookProcessor(asin="B0OURS", job_id=1, stop_event=Event())
+        processor.final_output_path = "/data/A/Title/Title.m4b"
+
+        def _cancel_then_fail_verify(*_a, **_k):
+            # The cancel fires while the verification probe runs.
+            processor.stop_event.set()
+            return (False, "Output file could not be read back (corrupt or unreadable).")
+
+        with (
+            mock.patch.object(processing_logic, "merge_book_chunks", return_value=True),
+            mock.patch.object(processor, "_verify_output_file", side_effect=_cancel_then_fail_verify),
+            mock.patch.object(processor, "_update_db_on_failure") as fail,
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("os.remove") as remove,
+        ):
+            processor._merge_and_finalize()
+        remove.assert_not_called()
+        fail.assert_not_called()
+        assert processor._completion_event.is_set()
+
+    def test_verification_failure_without_cancel_still_removes_and_errors(self):
+        # Contrast: with the stop_event UNSET a genuine verification failure still
+        # deletes the bad artifact and marks the book ERROR (the new cancel branch
+        # doesn't swallow real corruption).
+        processor = BookProcessor(asin="B0OURS", job_id=1, stop_event=Event())
+        processor.final_output_path = "/data/A/Title/Title.m4b"
+        with (
+            mock.patch.object(processing_logic, "merge_book_chunks", return_value=True),
+            mock.patch.object(processor, "_verify_output_file", return_value=(False, "truncated")),
+            mock.patch.object(processor, "_update_db_on_failure") as fail,
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("os.remove") as remove,
+        ):
+            processor._merge_and_finalize()
+        remove.assert_called_once_with("/data/A/Title/Title.m4b")
+        fail.assert_called_once_with("truncated")
+
+
 class TestProbeDurationRegistration:
     """L3: the output-verification duration probe runs as a registered
     subprocess so a job cancel can SIGTERM it."""
