@@ -56,6 +56,24 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     /**
+     * Shows/hides the format-dependent controls in the Audio & Output Format
+     * section: the AAC-quality row appears only for the "m4b" format, and the
+     * MP3/LAME options block appears only for "mp3". Advanced-mode gating still
+     * applies independently to the individual controls inside the MP3 block.
+     */
+    function updateFormatVisibility() {
+        const formatSelect = document.getElementById("output-format-select");
+        if (!formatSelect) return;
+        const fmt = formatSelect.value;
+        const mp3Block = document.getElementById("mp3-options");
+        const aacRow = document.getElementById("aac-quality-row");
+        if (mp3Block) mp3Block.classList.toggle("hidden", fmt !== "mp3");
+        if (aacRow) aacRow.classList.toggle("hidden", fmt !== "m4b");
+        // The open accordion's fixed maxHeight must grow/shrink with the change.
+        updateParentAccordionHeight(formatSelect);
+    }
+
+    /**
      * Handles the API call and UI updates for the manual authentication check.
      * @param {HTMLButtonElement} btn - The "Run Authentication Check" button.
      */
@@ -362,6 +380,21 @@ document.addEventListener("DOMContentLoaded", () => {
     };
     advancedModeToggle.addEventListener("change", () => setAdvancedMode(advancedModeToggle.checked));
 
+    // Output-format select: toggle the AAC-quality row and MP3 options block.
+    const outputFormatSelect = document.getElementById("output-format-select");
+    if (outputFormatSelect) {
+        outputFormatSelect.addEventListener("change", updateFormatVisibility);
+    }
+
+    // Live-update the numeric readout next to the VBR quality slider.
+    const vbrSlider = document.getElementById("mp3-vbr-quality");
+    const vbrValue = document.getElementById("mp3-vbr-quality-value");
+    if (vbrSlider && vbrValue) {
+        vbrSlider.addEventListener("input", () => {
+            vbrValue.textContent = vbrSlider.value;
+        });
+    }
+
     // Accordions
     accordions.forEach((acc) => {
         acc.addEventListener("click", function () {
@@ -415,6 +448,9 @@ document.addEventListener("DOMContentLoaded", () => {
             const settingsToSave = {};
             // Gather all standard settings using the data-path attribute.
             document.querySelectorAll(".setting-input").forEach((input) => {
+                // Radio groups share one data-path; only the selected radio should
+                // contribute its value (otherwise the last one iterated would win).
+                if (input.type === "radio" && !input.checked) return;
                 const path = input.dataset.path.split(".");
                 let current = settingsToSave;
                 for (let i = 0; i < path.length - 1; i++) {
@@ -423,7 +459,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 const value =
                     input.type === "checkbox"
                         ? input.checked
-                        : input.type === "number"
+                        : input.type === "number" || input.type === "range"
                           ? Number(input.value)
                           : input.value;
                 current[path[path.length - 1]] = value;
@@ -640,6 +676,10 @@ document.addEventListener("DOMContentLoaded", () => {
     toggleOptionsGroup(autoFastSyncToggle, autoFastSyncOptions);
     toggleOptionsGroup(autoDeepSyncToggle, autoDeepSyncOptions);
     toggleOptionsGroup(autoProcessToggle, autoProcessOptions);
+
+    // Set the initial visibility of the format-dependent controls (AAC quality
+    // row / MP3 block) from the server-rendered output-format value.
+    updateFormatVisibility();
 
     // Fetch settings to determine the initial state of Advanced Mode and populate scheduler widgets.
     fetch("/api/settings")

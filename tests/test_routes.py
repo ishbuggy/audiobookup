@@ -650,3 +650,34 @@ class TestClearJobs:
         assert response.status_code == 200
         data = response.get_json()
         assert data == {"success": True, "deleted_jobs": 0, "deleted_items": 0}
+
+
+class TestSettingsOutputFormatMirror:
+    """Phase 0: POST /api/settings mirrors the legacy no_reencode flag from the
+    new output_format enum so code still reading the old flag stays correct."""
+
+    def test_original_sets_no_reencode_true(self, client, completed_setup):
+        _login_session(client)
+        response = client.post("/api/settings", json={"conversion": {"output_format": "original"}})
+        assert response.status_code == 200
+        settings = client.get("/api/settings").get_json()
+        assert settings["conversion"]["output_format"] == "original"
+        assert settings["conversion"]["no_reencode"] is True
+
+    def test_m4b_sets_no_reencode_false(self, client, completed_setup):
+        _login_session(client)
+        # Flip to original first, then back to m4b, proving the mirror updates.
+        client.post("/api/settings", json={"conversion": {"output_format": "original"}})
+        response = client.post("/api/settings", json={"conversion": {"output_format": "m4b"}})
+        assert response.status_code == 200
+        settings = client.get("/api/settings").get_json()
+        assert settings["conversion"]["no_reencode"] is False
+
+    def test_mp3_sets_no_reencode_false(self, client, completed_setup):
+        _login_session(client)
+        client.post("/api/settings", json={"conversion": {"output_format": "original"}})
+        response = client.post("/api/settings", json={"conversion": {"output_format": "mp3"}})
+        assert response.status_code == 200
+        settings = client.get("/api/settings").get_json()
+        assert settings["conversion"]["output_format"] == "mp3"
+        assert settings["conversion"]["no_reencode"] is False

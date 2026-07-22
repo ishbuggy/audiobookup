@@ -1703,6 +1703,17 @@ input:checked + .slider:before {
     justify-content: flex-end;
 }
 
+/* Format-dependent visibility toggle (JS-driven, e.g. the MP3 options block and
+   the AAC-quality row in Audio & Output Format). Kept strong enough to win over
+   the advanced-mode reveal rule below so a hidden block stays hidden even in
+   advanced mode. */
+.hidden {
+    display: none !important;
+}
+body.advanced-mode .advanced-setting.hidden {
+    display: none !important;
+}
+
 /* Advanced Mode & Cron Inputs */
 .advanced-setting {
     display: none !important;

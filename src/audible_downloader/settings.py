@@ -36,13 +36,37 @@ DEFAULT_SETTINGS = {
         # book's metadata renames its existing file. Default off (overrides
         # affect only displayed metadata and embedded tags).
         "apply_custom_to_filenames": False,
+        # Stretch (Phase 9) only. When BOTH are non-empty they compose as
+        # "<folder_template>/<file_template>" and win over `template`. Empty by
+        # default so the single `template` above stays authoritative.
+        "folder_template": "",
+        "file_template": "",
     },
     "conversion": {
+        # Primary output control (Phase 5 consumer). Enum: "original" | "m4b" |
+        # "mp3". "original" = DRM-strip + remux Audible's AAC untouched; "m4b" =
+        # per-chapter AAC re-encode at `quality`; "mp3" = single-pass LAME encode
+        # using the `mp3` block below. Mirrored to/from the legacy `no_reencode`
+        # flag via resolve_output_format() so old settings.json files keep working.
+        "output_format": "m4b",
         "quality": "High",
         "is_chunked_conversion_enabled": False,
+        # Requested download quality tier passed to `audible download --quality`
+        # ("best"|"high"|"normal"). Distinct axis from the output encode above:
+        # this is what we ask Audible for, `output_format`/`quality` is what we
+        # produce locally. Phase 1 consumer.
+        "download_quality": "best",
         # Download a companion PDF (booklet/supplementary material) alongside
         # the audiobook when Audible ships one, placed next to the .m4b.
         "download_supplementary_pdf": True,
+        # Sidecar outputs written next to the finished audiobook (Phase 2). Each
+        # is best-effort and off by default so today's single-file output is
+        # unchanged: cover image, curated metadata.json, .cue chapter sheet, and
+        # retaining the raw AAX/AAXC (+voucher) that would otherwise be deleted.
+        "save_cover_alongside": False,
+        "save_metadata_json": False,
+        "create_cue_sheet": False,
+        "retain_aax": False,
         # When true, strip DRM only and keep Audible's original audio: mux
         # chapters/metadata/cover onto the decrypted AAC master with -c copy,
         # skipping the per-chapter re-encode (much faster, no quality loss).
@@ -50,7 +74,45 @@ DEFAULT_SETTINGS = {
         # setting above is ignored while this is on (no encode happens). If the
         # fast AAC-copy decrypt fails and a title falls back to FLAC, that one
         # book quietly re-encodes since FLAC can't be copied into an .m4b.
+        # KEPT as a derived legacy mirror of output_format == "original".
         "no_reencode": False,
+        # LAME/MP3 encode options (Phase 5 consumer). Used only when
+        # output_format == "mp3"; ignored otherwise.
+        "mp3": {
+            # "quality" = VBR via -q:a; "bitrate" = CBR/ABR via -b:a.
+            "target": "quality",
+            # ffmpeg -q:a 0..9 (0 = best quality, 9 = smallest file).
+            "vbr_quality": 2,
+            # CBR/ABR target in kbps when target == "bitrate".
+            "bitrate_kbps": 128,
+            # True = CBR; False = ABR (adds -abr 1).
+            "constant_bitrate": False,
+            # When target == "bitrate": derive kbps from the source master rather
+            # than the fixed bitrate_kbps above.
+            "match_source_bitrate": True,
+            # Force mono (adds -ac 1).
+            "downsample_mono": False,
+            # Cap the sample rate (adds -ar N only when the source exceeds it).
+            "max_sample_rate": 44100,
+            # LAME effort: High|Standard|Fast -> -compression_level 0|2|7.
+            "encoder_quality": "High",
+        },
+        # Chapter/metadata processing (Phase 4 & 6 consumers). All default off/
+        # identity so the shipped chapter output is byte-for-byte unchanged.
+        "chapters": {
+            # Flatten nested chapter trees, joining parent/child titles with ": ".
+            "combine_nested_titles": False,
+            # Fold Opening/End Credits chapters into their neighbors.
+            "merge_credit_chapters": False,
+            # Trim Audible brand intro/outro (AAC/MP3 re-encodes only, never
+            # Original remux).
+            "strip_audible_branding": False,
+            # Drop "(Unabridged)" from the title/album tags.
+            "strip_unabridged": False,
+            # Per-chapter title template: {ch} {ch_total} {ch_title} {title}.
+            # The default reproduces today's output exactly.
+            "chapter_title_template": "{ch_title}",
+        },
     },
     "import": {
         # Upper bound (in GB) on a single manual-import upload. Enforced as the
@@ -94,6 +156,32 @@ def deep_update(source, overrides):
     return source
 
 
+def _normalize_output_format(settings, loaded_settings):
+    """Back-fill conversion.output_format from the legacy no_reencode flag.
+
+    Old settings.json files predate the output_format enum and only carry
+    no_reencode. When the *raw loaded file* has no output_format key but its
+    no_reencode is truthy, the user's intent was "keep Audible's original
+    audio", so map that to output_format == "original". We inspect
+    loaded_settings (the raw file) rather than the merged dict, because the
+    merged dict always carries the default "m4b" and would hide the omission.
+    """
+    conv_loaded = loaded_settings.get("conversion", {})
+    if not isinstance(conv_loaded, dict):
+        return
+    if "output_format" not in conv_loaded and conv_loaded.get("no_reencode"):
+        settings["conversion"]["output_format"] = "original"
+
+
+def resolve_output_format(settings):
+    """The one place that decides the output format, honoring the legacy flag."""
+    conv = settings.get("conversion", {})
+    fmt = conv.get("output_format")
+    if fmt in ("original", "m4b", "mp3"):
+        return fmt
+    return "original" if conv.get("no_reencode") else "m4b"
+
+
 def load_settings():
     """Securely loads settings from settings.json, falling back to defaults."""
     # Always hand out a deep copy: callers mutate the returned dict (e.g. the
@@ -110,6 +198,7 @@ def load_settings():
             # to ensure all keys are present.
             settings = copy.deepcopy(DEFAULT_SETTINGS)
             deep_update(settings, loaded_settings)
+            _normalize_output_format(settings, loaded_settings)
             return settings
         except (OSError, json.JSONDecodeError) as e:
             print(f"Error loading settings.json: {e}. Using default settings.")

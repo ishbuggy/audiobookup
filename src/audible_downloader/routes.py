@@ -65,7 +65,7 @@ from audible_downloader.job_manager import cancel_active_job, start_new_job
 from audible_downloader.logger import log
 
 # Import the settings functions from the settings module
-from audible_downloader.settings import deep_update, load_settings, save_settings
+from audible_downloader.settings import deep_update, load_settings, resolve_output_format, save_settings
 
 # Import the global task_runner instance
 from audible_downloader.task_runner import task_runner
@@ -204,6 +204,13 @@ def post_settings():
 
     # --- Merge the rest of the settings ---
     updated_settings = deep_update(current_settings, new_settings)
+
+    # Keep the legacy no_reencode flag mirrored to the new output_format enum so
+    # any code still reading it (the pipeline, until Phase 5) stays correct after
+    # every save. resolve_output_format also honors a payload that only sends the
+    # old flag, so legacy clients round-trip consistently.
+    conversion = updated_settings.setdefault("conversion", {})
+    conversion["no_reencode"] = resolve_output_format(updated_settings) == "original"
 
     if save_settings(updated_settings):
         log.info("SETTINGS: Application settings have been updated via the API.")

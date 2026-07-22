@@ -133,15 +133,554 @@
                     </div>
                 </div>
 
+                <!-- START: DOWNLOADING ACCORDION -->
                 <div class="accordion-item">
                     <button class="accordion-header">
-                        <!-- START: Simplified Structure -->
+                        <div>
+                            <span class="accordion-title"><i class="fas fa-download"></i> Downloading</span>
+                            <span class="accordion-description">Control what is requested and kept from Audible</span>
+                        </div>
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
+                    <div class="accordion-panel">
+                        <!-- Download quality is the axis of what we REQUEST from Audible, distinct
+                             from the output encode below (what we PRODUCE locally). Advanced only. -->
+                        <div class="form-group advanced-setting">
+                            <label for="download-quality">
+                                Download Quality
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    What we request from Audible. "Best" fetches the highest tier available for the
+                                    title; "High"/"Normal" request smaller source files. This is separate from the
+                                    output format/quality below (what we encode).
+                                </small>
+                            </label>
+                            <!-- prettier-ignore -->
+                            <select id="download-quality" class="setting-input" data-path="conversion.download_quality">
+                                <option value="best" {% if settings.conversion.download_quality == 'best' %}selected{% endif %}>Best (highest available)</option>
+                                <option value="high" {% if settings.conversion.download_quality == 'high' %}selected{% endif %}>High</option>
+                                <option value="normal" {% if settings.conversion.download_quality == 'normal' %}selected{% endif %}>Normal (smallest)</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="download-supplementary-pdf">
+                                Download Companion PDF
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    When Audible ships a booklet or supplementary PDF, save it next to the audiobook.
+                                </small>
+                            </label>
+                            <label class="switch">
+                                <input
+                                    type="checkbox"
+                                    id="download-supplementary-pdf"
+                                    class="setting-input"
+                                    data-path="conversion.download_supplementary_pdf"
+                                    {%
+                                    if
+                                    settings.conversion.download_supplementary_pdf
+                                    %}checked{%
+                                    endif
+                                    %}
+                                />
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+
+                        <div class="form-group advanced-setting">
+                            <label for="retain-aax">
+                                Keep Raw Download (AAX/AAXC)
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Keep the original encrypted AAX/AAXC file (and its .voucher, for AAXC) next to the
+                                    finished audiobook instead of deleting it after conversion. Uses extra disk space.
+                                </small>
+                            </label>
+                            <label class="switch">
+                                <input
+                                    type="checkbox"
+                                    id="retain-aax"
+                                    class="setting-input"
+                                    data-path="conversion.retain_aax"
+                                    {%
+                                    if
+                                    settings.conversion.retain_aax
+                                    %}checked{%
+                                    endif
+                                    %}
+                                />
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                <!-- END: DOWNLOADING ACCORDION -->
+
+                <!-- START: AUDIO & OUTPUT FORMAT ACCORDION -->
+                <div class="accordion-item">
+                    <button class="accordion-header">
+                        <div>
+                            <span class="accordion-title"><i class="fas fa-sliders-h"></i> Audio & Output Format</span>
+                            <span class="accordion-description">Choose the output format and audio quality</span>
+                        </div>
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
+                    <div class="accordion-panel">
+                        <div class="form-group">
+                            <label for="output-format-select">
+                                Output Format
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    <strong>Original</strong> strips DRM only and keeps Audible's audio untouched
+                                    (fastest, no quality loss). <strong>AAC (.m4b)</strong> re-encodes at the quality
+                                    below. <strong>MP3</strong> produces a single MP3 with chapters, using the LAME
+                                    options below.
+                                </small>
+                            </label>
+                            <!-- prettier-ignore -->
+                            <select id="output-format-select" class="setting-input" data-path="conversion.output_format">
+                                <option value="original" {% if settings.conversion.output_format == 'original' %}selected{% endif %}>Original (remux, no re-encode)</option>
+                                <option value="m4b" {% if settings.conversion.output_format == 'm4b' %}selected{% endif %}>AAC (.m4b)</option>
+                                <option value="mp3" {% if settings.conversion.output_format == 'mp3' %}selected{% endif %}>MP3</option>
+                            </select>
+                        </div>
+
+                        <!-- AAC quality: shown by JS only when Output Format == "m4b". -->
+                        <div class="form-group" id="aac-quality-row">
+                            <label for="conversion-quality">AAC Quality:</label>
+                            <!-- prettier-ignore -->
+                            <select id="conversion-quality" class="setting-input" data-path="conversion.quality">
+                                <option value="High" {% if settings.conversion.quality == 'High' %}selected{% endif %}>High (AAC, ~128 kbps)</option>
+                                <option value="Standard" {% if settings.conversion.quality == 'Standard' %}selected{% endif %}>Standard (AAC, ~96 kbps)</option>
+                                <option value="Low" {% if settings.conversion.quality == 'Low' %}selected{% endif %}>Low (AAC, ~64 kbps)</option>
+                            </select>
+                        </div>
+
+                        <!-- MP3/LAME block: shown by JS only when Output Format == "mp3".
+                             Every control inside is advanced-only per the plan. -->
+                        <div id="mp3-options">
+                            <div class="form-group advanced-setting schedule-type-group" style="gap: 2em">
+                                <label>MP3 Target:</label>
+                                <div class="radio-buttons-wrapper">
+                                    <div style="flex-grow: 1"></div>
+                                    <label class="radio-group-item">
+                                        <input
+                                            type="radio"
+                                            name="mp3_target"
+                                            value="quality"
+                                            class="setting-input"
+                                            data-path="conversion.mp3.target"
+                                            {%
+                                            if
+                                            settings.conversion.mp3.target=""
+                                            ="quality"
+                                            %}checked{%
+                                            endif
+                                            %}
+                                        />
+                                        <span class="radio-circle"><span class="radio-dot"></span></span>
+                                        Quality (VBR)
+                                    </label>
+                                    <label class="radio-group-item">
+                                        <input
+                                            type="radio"
+                                            name="mp3_target"
+                                            value="bitrate"
+                                            class="setting-input"
+                                            data-path="conversion.mp3.target"
+                                            {%
+                                            if
+                                            settings.conversion.mp3.target=""
+                                            ="bitrate"
+                                            %}checked{%
+                                            endif
+                                            %}
+                                        />
+                                        <span class="radio-circle"><span class="radio-dot"></span></span>
+                                        Bitrate
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div
+                                class="form-group advanced-setting"
+                                style="flex-direction: column; align-items: flex-start"
+                            >
+                                <label for="mp3-vbr-quality" style="margin-bottom: 0.5em">
+                                    VBR Quality (<span id="mp3-vbr-quality-value"
+                                        >{{ settings.conversion.mp3.vbr_quality | default(2) }}</span
+                                    >)
+                                    <small style="display: block; font-weight: normal; color: #6c757d">
+                                        0 = best quality · 9 = smallest file. Used when Target is "Quality (VBR)".
+                                    </small>
+                                </label>
+                                <input
+                                    type="range"
+                                    id="mp3-vbr-quality"
+                                    class="setting-input"
+                                    data-path="conversion.mp3.vbr_quality"
+                                    min="0"
+                                    max="9"
+                                    step="1"
+                                    value="{{ settings.conversion.mp3.vbr_quality | default(2) }}"
+                                    style="width: 100%"
+                                />
+                            </div>
+
+                            <div class="form-group advanced-setting">
+                                <label for="mp3-bitrate">
+                                    Bitrate (kbps)
+                                    <small style="display: block; font-weight: normal; color: #6c757d">
+                                        CBR/ABR target when Target is "Bitrate".
+                                    </small>
+                                </label>
+                                <input
+                                    type="number"
+                                    id="mp3-bitrate"
+                                    class="setting-input"
+                                    data-path="conversion.mp3.bitrate_kbps"
+                                    value="{{ settings.conversion.mp3.bitrate_kbps | default(128) }}"
+                                    min="32"
+                                    max="320"
+                                />
+                            </div>
+
+                            <div class="form-group advanced-setting">
+                                <label for="mp3-constant-bitrate">
+                                    Constant Bitrate (CBR)
+                                    <small style="display: block; font-weight: normal; color: #6c757d">
+                                        On = true CBR. Off = ABR (average bitrate). Applies when Target is "Bitrate".
+                                    </small>
+                                </label>
+                                <label class="switch">
+                                    <input
+                                        type="checkbox"
+                                        id="mp3-constant-bitrate"
+                                        class="setting-input"
+                                        data-path="conversion.mp3.constant_bitrate"
+                                        {%
+                                        if
+                                        settings.conversion.mp3.constant_bitrate
+                                        %}checked{%
+                                        endif
+                                        %}
+                                    />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+
+                            <div class="form-group advanced-setting">
+                                <label for="mp3-match-source">
+                                    Match Source Bitrate
+                                    <small style="display: block; font-weight: normal; color: #6c757d">
+                                        When Target is "Bitrate", derive the bitrate from the source instead of the
+                                        fixed value above.
+                                    </small>
+                                </label>
+                                <label class="switch">
+                                    <input
+                                        type="checkbox"
+                                        id="mp3-match-source"
+                                        class="setting-input"
+                                        data-path="conversion.mp3.match_source_bitrate"
+                                        {%
+                                        if
+                                        settings.conversion.mp3.match_source_bitrate
+                                        %}checked{%
+                                        endif
+                                        %}
+                                    />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+
+                            <div class="form-group advanced-setting">
+                                <label for="mp3-downsample-mono">
+                                    Downsample to Mono
+                                    <small style="display: block; font-weight: normal; color: #6c757d">
+                                        Mix down to a single channel (smaller files; fine for most spoken-word audio).
+                                    </small>
+                                </label>
+                                <label class="switch">
+                                    <input
+                                        type="checkbox"
+                                        id="mp3-downsample-mono"
+                                        class="setting-input"
+                                        data-path="conversion.mp3.downsample_mono"
+                                        {%
+                                        if
+                                        settings.conversion.mp3.downsample_mono
+                                        %}checked{%
+                                        endif
+                                        %}
+                                    />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+
+                            <div class="form-group advanced-setting">
+                                <label for="mp3-max-sample-rate">
+                                    Max Sample Rate (Hz)
+                                    <small style="display: block; font-weight: normal; color: #6c757d">
+                                        Cap the sample rate; only applied when the source exceeds it (e.g. 44100).
+                                    </small>
+                                </label>
+                                <input
+                                    type="number"
+                                    id="mp3-max-sample-rate"
+                                    class="setting-input"
+                                    data-path="conversion.mp3.max_sample_rate"
+                                    value="{{ settings.conversion.mp3.max_sample_rate | default(44100) }}"
+                                    min="8000"
+                                    max="48000"
+                                    step="50"
+                                />
+                            </div>
+
+                            <div class="form-group advanced-setting">
+                                <label for="mp3-encoder-quality">
+                                    Encoder Quality
+                                    <small style="display: block; font-weight: normal; color: #6c757d">
+                                        LAME effort: High is slowest/best, Fast is quickest.
+                                    </small>
+                                </label>
+                                <!-- prettier-ignore -->
+                                <select id="mp3-encoder-quality" class="setting-input" data-path="conversion.mp3.encoder_quality">
+                                    <option value="High" {% if settings.conversion.mp3.encoder_quality == 'High' %}selected{% endif %}>High</option>
+                                    <option value="Standard" {% if settings.conversion.mp3.encoder_quality == 'Standard' %}selected{% endif %}>Standard</option>
+                                    <option value="Fast" {% if settings.conversion.mp3.encoder_quality == 'Fast' %}selected{% endif %}>Fast</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <!-- END: AUDIO & OUTPUT FORMAT ACCORDION -->
+
+                <!-- START: CHAPTERS & METADATA ACCORDION -->
+                <div class="accordion-item">
+                    <button class="accordion-header">
+                        <div>
+                            <span class="accordion-title"><i class="fas fa-list-ol"></i> Chapters & Metadata</span>
+                            <span class="accordion-description">Clean up chapter titles and tags</span>
+                        </div>
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
+                    <div class="accordion-panel">
+                        <div class="form-group">
+                            <label for="strip-unabridged">
+                                Strip "(Unabridged)"
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Remove the "(Unabridged)" marker from the title/album tags.
+                                </small>
+                            </label>
+                            <label class="switch">
+                                <input
+                                    type="checkbox"
+                                    id="strip-unabridged"
+                                    class="setting-input"
+                                    data-path="conversion.chapters.strip_unabridged"
+                                    {%
+                                    if
+                                    settings.conversion.chapters.strip_unabridged
+                                    %}checked{%
+                                    endif
+                                    %}
+                                />
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+
+                        <div class="form-group advanced-setting">
+                            <label for="combine-nested-titles">
+                                Combine Nested Chapter Titles
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Flatten nested chapter trees (e.g. Part / Chapter) into a single list, joining the
+                                    parent and child titles with ": ". Off keeps today's top-level chapters only.
+                                </small>
+                            </label>
+                            <label class="switch">
+                                <input
+                                    type="checkbox"
+                                    id="combine-nested-titles"
+                                    class="setting-input"
+                                    data-path="conversion.chapters.combine_nested_titles"
+                                    {%
+                                    if
+                                    settings.conversion.chapters.combine_nested_titles
+                                    %}checked{%
+                                    endif
+                                    %}
+                                />
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+
+                        <div class="form-group advanced-setting">
+                            <label for="merge-credit-chapters">
+                                Merge Credit Chapters
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Fold "Opening Credits"/"End Credits" chapters into their neighbors so they don't
+                                    appear as separate entries.
+                                </small>
+                            </label>
+                            <label class="switch">
+                                <input
+                                    type="checkbox"
+                                    id="merge-credit-chapters"
+                                    class="setting-input"
+                                    data-path="conversion.chapters.merge_credit_chapters"
+                                    {%
+                                    if
+                                    settings.conversion.chapters.merge_credit_chapters
+                                    %}checked{%
+                                    endif
+                                    %}
+                                />
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+
+                        <div class="form-group advanced-setting">
+                            <label for="strip-audible-branding">
+                                Strip Audible Branding
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Trim the "This is Audible" intro/outro. Applies only to AAC/MP3 re-encodes —
+                                    Original-format files are never trimmed.
+                                </small>
+                            </label>
+                            <label class="switch">
+                                <input
+                                    type="checkbox"
+                                    id="strip-audible-branding"
+                                    class="setting-input"
+                                    data-path="conversion.chapters.strip_audible_branding"
+                                    {%
+                                    if
+                                    settings.conversion.chapters.strip_audible_branding
+                                    %}checked{%
+                                    endif
+                                    %}
+                                />
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+
+                        <div
+                            class="form-group advanced-setting"
+                            style="flex-direction: column; align-items: flex-start"
+                        >
+                            <label for="chapter-title-template" style="margin-bottom: 0.5em">
+                                Chapter Title Template
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Placeholders: <code>{ch}</code> (number), <code>{ch_total}</code>,
+                                    <code>{ch_title}</code>, <code>{title}</code> (book title). The default
+                                    <code>{ch_title}</code> keeps the original chapter names.
+                                </small>
+                            </label>
+                            <input
+                                type="text"
+                                id="chapter-title-template"
+                                class="setting-input"
+                                data-path="conversion.chapters.chapter_title_template"
+                                style="width: 100%; box-sizing: border-box"
+                                value="{{ settings.conversion.chapters.chapter_title_template | default('{ch_title}') }}"
+                            />
+                        </div>
+                    </div>
+                </div>
+                <!-- END: CHAPTERS & METADATA ACCORDION -->
+
+                <!-- START: SIDECAR FILES ACCORDION -->
+                <div class="accordion-item">
+                    <button class="accordion-header">
+                        <div>
+                            <span class="accordion-title"><i class="fas fa-file-alt"></i> Sidecar Files</span>
+                            <span class="accordion-description">Extra files saved next to each audiobook</span>
+                        </div>
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
+                    <div class="accordion-panel">
+                        <div class="form-group">
+                            <label for="save-cover-alongside">
+                                Save Cover Alongside
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Save the cover image as a separate file next to the audiobook (in addition to
+                                    embedding it).
+                                </small>
+                            </label>
+                            <label class="switch">
+                                <input
+                                    type="checkbox"
+                                    id="save-cover-alongside"
+                                    class="setting-input"
+                                    data-path="conversion.save_cover_alongside"
+                                    {%
+                                    if
+                                    settings.conversion.save_cover_alongside
+                                    %}checked{%
+                                    endif
+                                    %}
+                                />
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+
+                        <div class="form-group advanced-setting">
+                            <label for="save-metadata-json">
+                                Save metadata.json
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Write a curated <code>.metadata.json</code> sidecar with the book's details.
+                                </small>
+                            </label>
+                            <label class="switch">
+                                <input
+                                    type="checkbox"
+                                    id="save-metadata-json"
+                                    class="setting-input"
+                                    data-path="conversion.save_metadata_json"
+                                    {%
+                                    if
+                                    settings.conversion.save_metadata_json
+                                    %}checked{%
+                                    endif
+                                    %}
+                                />
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+
+                        <div class="form-group advanced-setting">
+                            <label for="create-cue-sheet">
+                                Create .cue Sheet
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Write a <code>.cue</code> chapter sheet next to the audiobook.
+                                </small>
+                            </label>
+                            <label class="switch">
+                                <input
+                                    type="checkbox"
+                                    id="create-cue-sheet"
+                                    class="setting-input"
+                                    data-path="conversion.create_cue_sheet"
+                                    {%
+                                    if
+                                    settings.conversion.create_cue_sheet
+                                    %}checked{%
+                                    endif
+                                    %}
+                                />
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                <!-- END: SIDECAR FILES ACCORDION -->
+
+                <!-- START: FILE & FOLDER NAMING ACCORDION -->
+                <div class="accordion-item">
+                    <button class="accordion-header">
                         <div>
                             <span class="accordion-title"><i class="fas fa-folder"></i> File & Folder Naming</span>
                             <span class="accordion-description">Define the output file path and name</span>
                         </div>
                         <i class="fas fa-chevron-down"></i>
-                        <!-- END: Simplified Structure -->
                     </button>
                     <div class="accordion-panel">
                         <div class="form-group" style="flex-direction: column; align-items: flex-start">
@@ -157,33 +696,101 @@
                             <small style="margin-top: 0.75em; color: #6c757d">
                                 Placeholders: <code>{author}</code>, <code>{title}</code>, <code>{series}</code>,
                                 <code>{series_part}</code>, <code>{narrator}</code>, <code>{publisher}</code>,
-                                <code>{asin}</code>
+                                <code>{asin}</code>, <code>{year}</code>, <code>{language}</code>. Empty values (e.g. a
+                                standalone book's series) drop their folder level cleanly — no "N/A" folders.
                             </small>
                         </div>
-                    </div>
-                </div>
-                <div class="accordion-item">
-                    <button class="accordion-header">
-                        <!-- START: Simplified Structure -->
-                        <div>
-                            <span class="accordion-title"><i class="fas fa-sliders-h"></i> Conversion Settings</span>
-                            <span class="accordion-description">Control audio quality and format</span>
-                        </div>
-                        <i class="fas fa-chevron-down"></i>
-                        <!-- END: Simplified Structure -->
-                    </button>
-                    <div class="accordion-panel">
+
                         <div class="form-group">
-                            <label for="conversion-quality">Audio Quality:</label>
-                            <!-- prettier-ignore -->
-                            <select id="conversion-quality" class="setting-input" data-path="conversion.quality">
-                                <option value="High" {% if settings.conversion.quality == 'High' %}selected{% endif %}>High (AAC, ~128 kbps)</option>
-                                <option value="Standard" {% if settings.conversion.quality == 'Standard' %}selected{% endif %}>Standard (AAC, ~96 kbps)</option>
-                                <option value="Low" {% if settings.conversion.quality == 'Low' %}selected{% endif %}>Low (AAC, ~64 kbps)</option>
-                            </select>
+                            <label for="truncate-subtitle">
+                                Truncate Subtitle in Filenames
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Drop a trailing "Main Title: Subtitle" subtitle from the title used in filenames.
+                                    Embedded metadata keeps the full title.
+                                </small>
+                            </label>
+                            <label class="switch">
+                                <input
+                                    type="checkbox"
+                                    id="truncate-subtitle"
+                                    class="setting-input"
+                                    data-path="naming.truncate_subtitle"
+                                    {%
+                                    if
+                                    settings.naming.truncate_subtitle
+                                    %}checked{%
+                                    endif
+                                    %}
+                                />
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+
+                        <div class="form-group advanced-setting">
+                            <label for="apply-custom-to-filenames">
+                                Apply Custom Metadata to Filenames
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    When you override a book's title/author, also rename its file/folder to match. Off =
+                                    overrides affect displayed metadata and embedded tags only.
+                                </small>
+                            </label>
+                            <label class="switch">
+                                <input
+                                    type="checkbox"
+                                    id="apply-custom-to-filenames"
+                                    class="setting-input"
+                                    data-path="naming.apply_custom_to_filenames"
+                                    {%
+                                    if
+                                    settings.naming.apply_custom_to_filenames
+                                    %}checked{%
+                                    endif
+                                    %}
+                                />
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+
+                        <!-- Folder/file split is a Phase 9 stretch. Empty templates fall back to the
+                             single template above; both must be non-empty to take effect. Advanced only. -->
+                        <div
+                            class="form-group advanced-setting"
+                            style="flex-direction: column; align-items: flex-start"
+                        >
+                            <label for="folder-template" style="margin-bottom: 0.5em">
+                                Folder Template (optional)
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Advanced: when both Folder and File templates are set, they compose as "folder/file"
+                                    and override the single template above. Leave blank to use the template above.
+                                </small>
+                            </label>
+                            <input
+                                type="text"
+                                id="folder-template"
+                                class="setting-input"
+                                data-path="naming.folder_template"
+                                style="width: 100%; box-sizing: border-box"
+                                value="{{ settings.naming.folder_template | default('') }}"
+                            />
+                        </div>
+
+                        <div
+                            class="form-group advanced-setting"
+                            style="flex-direction: column; align-items: flex-start"
+                        >
+                            <label for="file-template" style="margin-bottom: 0.5em">File Template (optional)</label>
+                            <input
+                                type="text"
+                                id="file-template"
+                                class="setting-input"
+                                data-path="naming.file_template"
+                                style="width: 100%; box-sizing: border-box"
+                                value="{{ settings.naming.file_template | default('') }}"
+                            />
                         </div>
                     </div>
                 </div>
+                <!-- END: FILE & FOLDER NAMING ACCORDION -->
                 <div class="accordion-item">
                     <button class="accordion-header">
                         <!-- START: Simplified Structure -->
