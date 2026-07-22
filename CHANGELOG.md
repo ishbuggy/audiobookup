@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **CI:** Bumped the GitHub Actions used by the image-publish workflow to their current major versions (checkout v7, docker setup-qemu/setup-buildx/login v4, metadata v6, build-push v7) so they run on Node.js 24, clearing the runner's Node 20 deprecation warnings. Build-only change; the published image is unaffected.
+
 ## [0.21.0] - 2026-07-22
 
 This is an **image-hardening** release with **no functional changes**. It rebuilds the container to clear as many vulnerabilities as possible from a security scan of the published image, while keeping the application's behavior identical. A combined Grype + Trivy scan of the image drops from **31 / 12 Critical** and **146 / 83 High** (Grype / Trivy) down to **26 / 9 Critical** and **76 / 78 High** — Grype's total falls 684 → 457 and Trivy's 592 → 490.
