@@ -168,7 +168,16 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
     env = os.environ.copy()
     env["HOME"] = DATABASE_DIR
 
-    want_pdf = load_settings().get("conversion", {}).get("download_supplementary_pdf", True)
+    settings = load_settings()
+    want_pdf = settings.get("conversion", {}).get("download_supplementary_pdf", True)
+
+    # Download-quality request: what we ask Audible to serve (a distinct axis from
+    # the output encode quality). Validate against the flag values audible-cli's
+    # `download --quality` accepts; anything unexpected in an old/hand-edited
+    # settings.json falls back to the audible-cli default of "best".
+    download_quality = settings.get("conversion", {}).get("download_quality", "best")
+    if download_quality not in ("best", "high", "normal"):
+        download_quality = "best"
 
     # Variables to hold state across the retry loops
     audio_file = None
@@ -197,6 +206,8 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
                 "--cover-size",
                 "1215",
                 "--chapter",
+                "--quality",
+                download_quality,
                 "-o",
                 temp_dir,
             ]
