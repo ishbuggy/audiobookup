@@ -5,7 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.21.0] - 2026-07-22
+
+This is an **image-hardening** release with **no functional changes**. It rebuilds the container to clear as many vulnerabilities as possible from a security scan of the published image, while keeping the application's behavior identical. A combined Grype + Trivy scan of the image drops from **31 / 12 Critical** and **146 / 83 High** (Grype / Trivy) down to **26 / 9 Critical** and **76 / 78 High** — Grype's total falls 684 → 457 and Trivy's 592 → 490.
+
+### Security
+- **Rebuilt on Debian 13 (trixie).** The container's base image moved from Debian 12 (bookworm) to Debian 13, which ships a much newer and more thoroughly patched set of system libraries (ffmpeg, glibc, expat, libtiff, curl, and many more). This clears the large majority of the operating-system CVEs that simply had no fix available on the older base. Python stays on 3.11, so `audible-cli` and the setup wizard are unaffected, and conversions were verified end-to-end (multi-chapter and single-chapter downloads) on the new ffmpeg 7.
+- **Refreshed the privilege-drop helper (gosu).** The image now installs the current upstream `gosu` release (its signature verified at build time) instead of the distribution package, which was compiled with an out-of-date Go toolchain and carried a cluster of Go standard-library CVEs. All of them are removed.
+- **Updated Python dependencies and build tooling.** Flask, Werkzeug, and requests are bumped to their latest patched releases, and the image's `pip`/`setuptools`/`wheel` are upgraded during the build, clearing their known advisories.
+
+### Removed
+- **Trimmed the image.** Dropped the unused `jq` tool and a redundant explicit `coreutils` install to reduce attack surface. No behavior change (`coreutils` remains present as part of the Debian base).
+
+### Note
+- Some vulnerabilities remain because they are unfixed upstream — chiefly `ffmpeg`/`libav*`, which is essential to the app and cannot be removed. The remaining scanner-"fixable" findings are all the CPython 3.11 interpreter, which the scanners map to fixes on the 3.13+ line; staying on 3.11 is deliberate for `audible-cli` compatibility.
+
+## [0.20.0] - 2026-07-22
 
 ### Added
 - **Large-Download Heads-Up:** Kicking off a bulk download of 10 or more books now shows a brief confirmation first, explaining that AudioBookup converts every book to a DRM-free file (so a big batch takes real time) and offering a rough time estimate based on your recent conversion speeds. Smaller selections start immediately as before, and the estimate is intentionally conservative — downloads run in the background and usually finish sooner.
