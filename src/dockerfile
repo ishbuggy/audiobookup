@@ -1,5 +1,9 @@
 # Layer 1: Base Image
-FROM python:3.11-slim-bookworm
+# Debian 13 (trixie), still Python 3.11 so audible-cli and the pexpect-driven
+# setup wizard are unaffected. Trixie carries a much newer, more-patched system
+# package set than bookworm (ffmpeg 7.x, updated glibc/expat/tiff/curl/...), which
+# resolves a large share of the CVEs that had no fix available on bookworm.
+FROM python:3.11-slim-trixie
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
@@ -13,8 +17,9 @@ ARG APP_VERSION
 ENV APP_VERSION=${APP_VERSION}
 
 # Layer 2: System Dependencies
-# ADDED: 'locales' package is now installed to generate the UTF-8 locale.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 'locales' generates the UTF-8 locale. apt-get upgrade pulls any security
+# patches issued since the base image was built.
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
   ffmpeg \
   atomicparsley \
   sqlite3 \
