@@ -49,6 +49,10 @@ BOOK_ROW = {
     "publisher": "Audible Studios",
     "custom_title": None,
     "custom_author": None,
+    "series": "N/A",
+    "series_sequence": "N/A",
+    "release_date": "N/A",
+    "language": "N/A",
 }
 
 
@@ -117,14 +121,106 @@ class TestNamingTemplate:
         assert path == "/data/Bram Stoker/Dracula/Simon Vance/Audible Studios/B0OURS.m4b"
 
     def test_metadata_is_sanitized_before_expansion(self):
+        # "Who? Me*" sanitizes to "Who_ Me_"; the drop-segment cleanup (§4) then
+        # strips the trailing underscore left by sanitizing the forbidden '*'.
         row = dict(BOOK_ROW, author="AC/DC: Band", title="Who? Me*")
         path = _resolve_output_path(template="{author} - {title}", book_row=row)
-        assert path == "/data/AC_DC_ Band - Who_ Me_.m4b"
+        assert path == "/data/AC_DC_ Band - Who_ Me.m4b"
 
     def test_missing_metadata_uses_fallbacks(self):
-        row = {"author": None, "title": None, "narrator": None, "publisher": None}
+        row = {
+            "author": None,
+            "title": None,
+            "narrator": None,
+            "publisher": None,
+            "custom_title": None,
+            "custom_author": None,
+            "series": "N/A",
+            "series_sequence": "N/A",
+            "release_date": "N/A",
+            "language": "N/A",
+        }
         path = _resolve_output_path(template="{author}/{title}", book_row=row)
         assert path == "/data/Unknown Author/Unknown Title.m4b"
+
+
+class TestNamingPlaceholderExpansion:
+    """v0.22.0 Phase 3: the new {series} {series_part} {year} {language} tags,
+    the missing-value rule (None/""/"N/A" render empty), and the drop-segment
+    path cleanup that removes folder levels and trailing separators left behind."""
+
+    # A book that is part of a series, with a real release date and language.
+    SERIES_ROW = dict(
+        BOOK_ROW,
+        series="Dune",
+        series_sequence="1",
+        release_date="2019-06-04",
+        language="English",
+    )
+
+    def test_series_tag_renders(self):
+        path = _resolve_output_path(template="{series}", book_row=self.SERIES_ROW)
+        assert path == "/data/Dune.m4b"
+
+    def test_series_part_tag_renders(self):
+        path = _resolve_output_path(template="{series_part}", book_row=self.SERIES_ROW)
+        assert path == "/data/1.m4b"
+
+    def test_language_tag_renders(self):
+        path = _resolve_output_path(template="{language}", book_row=self.SERIES_ROW)
+        assert path == "/data/English.m4b"
+
+    def test_year_derived_from_release_date(self):
+        path = _resolve_output_path(template="{year}/{title}", book_row=self.SERIES_ROW)
+        assert path == "/data/2019/Dracula.m4b"
+
+    def test_full_series_template(self):
+        path = _resolve_output_path(template="{author}/{series}/{series_part} - {title}", book_row=self.SERIES_ROW)
+        assert path == "/data/Bram Stoker/Dune/1 - Dracula.m4b"
+
+    @pytest.mark.parametrize("missing", ["N/A", "", None])
+    def test_missing_series_drops_folder_level(self, missing):
+        row = dict(BOOK_ROW, series=missing)
+        path = _resolve_output_path(template="{author}/{series}/{title}", book_row=row)
+        assert path == "/data/Bram Stoker/Dracula.m4b"
+
+    def test_missing_trailing_tag_strips_separator(self):
+        # "{author} - {series}" with no series -> "Bram Stoker - " -> "Bram Stoker".
+        row = dict(BOOK_ROW, series="N/A")
+        path = _resolve_output_path(template="{author} - {series}", book_row=row)
+        assert path == "/data/Bram Stoker.m4b"
+
+    def test_empty_filename_falls_back_to_author_title(self):
+        # Filename segment renders empty (missing series) -> "<author> - <title>".
+        row = dict(BOOK_ROW, series="N/A")
+        path = _resolve_output_path(template="{author}/{series}", book_row=row)
+        assert path == "/data/Bram Stoker/Bram Stoker - Dracula.m4b"
+
+    @pytest.mark.parametrize(
+        ("release_date", "expected"),
+        [
+            ("2019-06-04", "/data/2019.m4b"),  # valid ISO date
+            ("2019", "/data/2019.m4b"),  # bare year
+            ("N/A", "/data/Bram Stoker - Dracula.m4b"),  # missing -> empty -> fallback
+            ("Mar 2019", "/data/Bram Stoker - Dracula.m4b"),  # non-numeric first 4 chars
+            ("19-06", "/data/Bram Stoker - Dracula.m4b"),  # fewer than 4 leading digits
+        ],
+    )
+    def test_year_extraction_rules(self, release_date, expected):
+        row = dict(BOOK_ROW, release_date=release_date)
+        path = _resolve_output_path(template="{year}", book_row=row)
+        assert path == expected
+
+    def test_series_value_cannot_create_directories(self):
+        # A '/' inside a value is sanitized so it can't inject a folder level.
+        row = dict(BOOK_ROW, series="Book 1/2")
+        path = _resolve_output_path(template="{series}", book_row=row)
+        assert path == "/data/Book 1_2.m4b"
+
+    def test_existing_tags_unaffected_by_new_params(self):
+        # Regression: with all new tags missing the default template is unchanged.
+        path = _resolve_output_path(book_row=BOOK_ROW)
+        assert path == "/data/Bram Stoker/Dracula/Bram Stoker - Dracula.m4b"
 
 
 class TestSubtitleTruncation:
@@ -193,6 +289,10 @@ class TestRenameToMatchMetadata:
             "custom_author": None,
             "filepath": self.CURRENT,
             "status": "DOWNLOADED",
+            "series": "N/A",
+            "series_sequence": "N/A",
+            "release_date": "N/A",
+            "language": "N/A",
         }
         row.update(over)
         return row

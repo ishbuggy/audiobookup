@@ -103,7 +103,35 @@ def _strip_subtitle(title):
     return main or title
 
 
-def build_base_output_path(settings, asin, author, title, narrator, publisher, ext=".m4b"):
+def _resolve_optional_tag(value):
+    """
+    Missing-value rule for the *new* naming placeholders ({series}, {series_part},
+    {language}). Sync stores the literal string "N/A" when Audible omits a field,
+    so None, "", and "N/A" all count as missing and render as the empty string;
+    a present value is sanitized like every other tag. The existing five tags
+    keep their "Unknown ..." fallbacks and do NOT go through here.
+    """
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text == "" or text == "N/A":
+        return ""
+    return _sanitize_filename(text)
+
+
+def build_base_output_path(
+    settings,
+    asin,
+    author,
+    title,
+    narrator,
+    publisher,
+    ext=".m4b",
+    series=None,
+    series_sequence=None,
+    release_date=None,
+    language=None,
+):
     """
     Compute the base output path (`/data/.../Name.m4b`) for a book from the
     naming template and settings, applying optional subtitle trimming and
@@ -114,6 +142,12 @@ def build_base_output_path(settings, asin, author, title, narrator, publisher, e
     `ext` defaults to '.m4b' (every conversion output); the import path passes the
     uploaded file's real extension so an adopted `.m4a` keeps its true extension
     instead of being mislabeled `.m4b`.
+
+    Placeholders: the original {author} {title} {narrator} {publisher} {asin} keep
+    their "Unknown ..." fallbacks; the new {series} {series_part} {year} {language}
+    render empty when the value is missing (None/""/"N/A"). After substitution the
+    rendered path is cleaned segment-by-segment so a missing tag drops its folder
+    level cleanly instead of leaving an "N/A" or dangling-separator directory.
     """
     template = settings.get("naming", {}).get("template", "{author}/{title}/{author} - {title}")
 
@@ -122,13 +156,51 @@ def build_base_output_path(settings, asin, author, title, narrator, publisher, e
     if settings.get("naming", {}).get("truncate_subtitle", False):
         raw_title = _strip_subtitle(raw_title)
 
+    # Existing tags: always present, always sanitized, "Unknown ..." on missing.
+    author_val = _sanitize_filename(author or "Unknown Author")
+    title_val = _sanitize_filename(raw_title)
+
+    # {year}: first four characters of release_date, but only when they are all
+    # digits (sync's "N/A" fallback and malformed dates render empty).
+    year = ""
+    if release_date:
+        candidate = str(release_date)[:4]
+        if len(candidate) == 4 and candidate.isdigit():
+            year = candidate
+
     relative_path = (
-        template.replace("{author}", _sanitize_filename(author or "Unknown Author"))
-        .replace("{title}", _sanitize_filename(raw_title))
+        template.replace("{author}", author_val)
+        .replace("{title}", title_val)
         .replace("{narrator}", _sanitize_filename(narrator or "Unknown Narrator"))
         .replace("{publisher}", _sanitize_filename(publisher or "Unknown Publisher"))
         .replace("{asin}", _sanitize_filename(asin))
+        .replace("{series}", _resolve_optional_tag(series))
+        .replace("{series_part}", _resolve_optional_tag(series_sequence))
+        .replace("{year}", year)
+        .replace("{language}", _resolve_optional_tag(language))
     )
+
+    # Drop-segment cleanup. Split on '/'; the last segment is the filename and the
+    # rest are directory levels. For each segment collapse whitespace runs and
+    # strip leading/trailing spaces, dots, hyphens, underscores, and commas — so
+    # "Author - " left by a missing trailing tag becomes "Author". Directory
+    # segments that collapse to empty are dropped entirely (no "N/A" folders); if
+    # the filename segment collapses to empty, fall back to "<author> - <title>".
+    segments = relative_path.split("/")
+    filename = segments[-1]
+    directories = segments[:-1]
+
+    cleaned_dirs = []
+    for seg in directories:
+        seg = re.sub(r"\s+", " ", seg).strip(" .-_,")
+        if seg:
+            cleaned_dirs.append(seg)
+
+    filename = re.sub(r"\s+", " ", filename).strip(" .-_,")
+    if not filename:
+        filename = f"{author_val} - {title_val}"
+
+    relative_path = os.path.join(*cleaned_dirs, filename) if cleaned_dirs else filename
     return os.path.join("/data", f"{relative_path}{ext}")
 
 
@@ -160,7 +232,8 @@ def rename_book_to_match_metadata(asin):
 
     with get_db_connection() as con:
         row = con.execute(
-            "SELECT author, title, narrator, publisher, custom_title, custom_author, filepath, status "
+            "SELECT author, title, narrator, publisher, custom_title, custom_author, filepath, status, "
+            "series, series_sequence, release_date, language "
             "FROM audiobooks WHERE asin = ?",
             (asin,),
         ).fetchone()
@@ -174,7 +247,18 @@ def rename_book_to_match_metadata(asin):
 
     author = row["custom_author"] or row["author"] or "Unknown Author"
     title = row["custom_title"] or row["title"] or "Unknown Title"
-    target = build_base_output_path(settings, asin, author, title, row["narrator"], row["publisher"])
+    target = build_base_output_path(
+        settings,
+        asin,
+        author,
+        title,
+        row["narrator"],
+        row["publisher"],
+        series=row["series"],
+        series_sequence=row["series_sequence"],
+        release_date=row["release_date"],
+        language=row["language"],
+    )
 
     if os.path.abspath(target) == os.path.abspath(current_path):
         return None  # Name already matches.
@@ -509,7 +593,8 @@ class BookProcessor:
             with get_db_connection() as con:
                 # Fetch metadata columns for the naming template plus the custom overrides.
                 book_details = con.execute(
-                    "SELECT author, title, narrator, publisher, custom_title, custom_author "
+                    "SELECT author, title, narrator, publisher, custom_title, custom_author, "
+                    "series, series_sequence, release_date, language "
                     "FROM audiobooks WHERE asin = ?",
                     (self.asin,),
                 ).fetchone()
@@ -526,7 +611,16 @@ class BookProcessor:
                 title = book_details["custom_title"] or title
 
             base_output_path = build_base_output_path(
-                settings, self.asin, author, title, book_details["narrator"], book_details["publisher"]
+                settings,
+                self.asin,
+                author,
+                title,
+                book_details["narrator"],
+                book_details["publisher"],
+                series=book_details["series"],
+                series_sequence=book_details["series_sequence"],
+                release_date=book_details["release_date"],
+                language=book_details["language"],
             )
 
             # Collision Detection Logic ("The Dracula Problem"). Reserve a

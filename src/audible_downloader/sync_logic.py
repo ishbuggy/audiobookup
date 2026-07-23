@@ -143,6 +143,7 @@ def _fetch_and_update_from_audible(job_id, sync_mode="DEEP"):
             author = authors_list[0].get("name", "N/A") if authors_list else "N/A"
             series_list = item.get("series")
             series = series_list[0].get("title", "N/A") if series_list else "N/A"
+            series_sequence = series_list[0].get("sequence", "N/A") if series_list else "N/A"
             narrators_list = item.get("narrators")
             narrator = narrators_list[0].get("name", "N/A") if narrators_list else "N/A"
             runtime_min, release_date, publisher, language, purchase_date = (
@@ -164,9 +165,9 @@ def _fetch_and_update_from_audible(job_id, sync_mode="DEEP"):
                 new_from_audible += 1
                 cur.execute(
                     (
-                        "INSERT INTO audiobooks (asin, author, title, status, series, narrator, "
+                        "INSERT INTO audiobooks (asin, author, title, status, series, series_sequence, narrator, "
                         "runtime_min, release_date, publisher, language, purchase_date, summary, date_added) "
-                        "VALUES (?, ?, ?, 'NEW', ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        "VALUES (?, ?, ?, 'NEW', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     ),
                     # Ruff E501: Break long tuple of arguments into multiple lines
                     (
@@ -174,6 +175,7 @@ def _fetch_and_update_from_audible(job_id, sync_mode="DEEP"):
                         author,
                         title,
                         series,
+                        series_sequence,
                         narrator,
                         runtime_min,
                         release_date,
@@ -188,7 +190,8 @@ def _fetch_and_update_from_audible(job_id, sync_mode="DEEP"):
                 updated_in_db += 1
                 cur.execute(
                     (
-                        "UPDATE audiobooks SET author = ?, title = ?, series = ?, narrator = ?, runtime_min = ?, "
+                        "UPDATE audiobooks SET author = ?, title = ?, series = ?, series_sequence = ?, "
+                        "narrator = ?, runtime_min = ?, "
                         "release_date = ?, publisher = ?, language = ?, purchase_date = ?, date_added = ?, "
                         "summary = CASE WHEN is_summary_full = 1 THEN summary ELSE ? END "
                         "WHERE asin = ?"
@@ -198,6 +201,7 @@ def _fetch_and_update_from_audible(job_id, sync_mode="DEEP"):
                         author,
                         title,
                         series,
+                        series_sequence,
                         narrator,
                         runtime_min,
                         release_date,

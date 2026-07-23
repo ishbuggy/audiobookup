@@ -30,6 +30,7 @@ DB_SCHEMA["author"]="author TEXT"
 DB_SCHEMA["title"]="title TEXT"
 DB_SCHEMA["status"]="status TEXT"
 DB_SCHEMA["series"]="series TEXT"
+DB_SCHEMA["series_sequence"]="series_sequence TEXT"
 DB_SCHEMA["narrator"]="narrator TEXT"
 DB_SCHEMA["runtime_min"]="runtime_min INTEGER"
 DB_SCHEMA["release_date"]="release_date TEXT"
@@ -52,7 +53,7 @@ DB_SCHEMA["source"]="source TEXT DEFAULT 'audible'"
 
 # Bash associative arrays have no defined iteration order, so CREATE TABLE
 # and the rebuild migration below use this explicit column order.
-DB_COLUMN_ORDER=(asin author title status series narrator runtime_min release_date filepath error_message publisher language purchase_date summary is_summary_full date_added retry_count is_duplicate custom_title custom_author custom_cover source)
+DB_COLUMN_ORDER=(asin author title status series narrator runtime_min release_date filepath error_message publisher language purchase_date summary is_summary_full date_added retry_count is_duplicate custom_title custom_author custom_cover source series_sequence)
 
 # Build the full column-definition list plus the column/select lists used
 # by the rebuild migration. Columns with a DEFAULT get a COALESCE so rows
