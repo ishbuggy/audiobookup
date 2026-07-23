@@ -1,12 +1,18 @@
 # tests/test_processing_logic.py
 
+import json
 from threading import Event
 from unittest import mock
 
 import pytest
 
 from audible_downloader import processing_logic
-from audible_downloader.processing_logic import BookProcessor, _sanitize_filename
+from audible_downloader.processing_logic import (
+    BookProcessor,
+    _sanitize_filename,
+    build_metadata_json,
+    generate_cue_sheet,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -840,3 +846,225 @@ class TestProbeDurationRegistration:
         assert result == 3600.0
         register.assert_called_once_with(7, proc)
         unregister.assert_called_once_with(7, proc)
+
+
+class TestBuildMetadataJson:
+    """Phase 2: the curated metadata.json sidecar shaping (pure function)."""
+
+    FULL_BOOK_INFO = {
+        "asin": "B0OURS",
+        "title": "Dracula",
+        "subtitle": "The Original Classic",
+        "authors": [{"name": "Bram Stoker"}, {"name": "Ghost Writer"}],
+        "narrators": [{"name": "Simon Vance"}],
+        "series": [{"title": "Gothic Classics", "sequence": "3"}],
+        "release_date": "1897-05-26",
+        "purchase_date": "2020-01-02",
+        "publisher_name": "Audible Studios",
+        "language": "english",
+        "category_ladders": [
+            {"ladder": [{"name": "Fiction"}, {"name": "Horror"}]},
+            {"ladder": [{"name": "Classics"}]},
+        ],
+        "runtime_length_min": 950,
+        "merchandising_summary": "<p>A <br />vampire tale.</p>",
+        "copy_right": "Public Domain",
+    }
+
+    def test_full_mapping(self):
+        result = build_metadata_json(self.FULL_BOOK_INFO)
+        assert result == {
+            "asin": "B0OURS",
+            "title": "Dracula",
+            "subtitle": "The Original Classic",
+            "authors": ["Bram Stoker", "Ghost Writer"],
+            "narrators": ["Simon Vance"],
+            "series": {"title": "Gothic Classics", "sequence": "3"},
+            "release_date": "1897-05-26",
+            "purchase_date": "2020-01-02",
+            "publisher": "Audible Studios",
+            "language": "english",
+            "genres": ["Horror", "Classics"],  # last (most specific) rung of each ladder
+            "runtime_length_min": 950,
+            "description": "A \nvampire tale.",  # <p>/<br /> stripped, </p> -> newline, trimmed
+            "copyright": "Public Domain",
+        }
+
+    def test_missing_keys_default_cleanly(self):
+        # A sparse item (no series, authors, ladders, summary) still produces the
+        # full key set with None / empty-list defaults — no KeyError.
+        result = build_metadata_json({"asin": "B1", "title": "Bare"})
+        assert result["asin"] == "B1"
+        assert result["title"] == "Bare"
+        assert result["authors"] == []
+        assert result["narrators"] == []
+        assert result["series"] is None
+        assert result["genres"] == []
+        assert result["description"] == ""
+        assert result["publisher"] is None
+        assert result["copyright"] is None
+
+    def test_none_book_info_is_safe(self):
+        # Defensive: a None book_info must not raise (best-effort sidecar).
+        result = build_metadata_json(None)
+        assert result["asin"] is None
+        assert result["authors"] == []
+        assert result["series"] is None
+
+    def test_author_entries_without_name_are_dropped(self):
+        result = build_metadata_json({"authors": [{"name": "A"}, {}, {"name": ""}]})
+        assert result["authors"] == ["A"]
+
+    def test_is_json_serializable(self):
+        # The whole point is a file on disk: the dict must round-trip through json.
+        text = json.dumps(build_metadata_json(self.FULL_BOOK_INFO))
+        assert "Dracula" in text
+
+
+class TestGenerateCueSheet:
+    """Phase 2: the .cue sidecar renderer (pure function)."""
+
+    CHAPTERS = [
+        {"title": "Opening", "start_offset_ms": 0},
+        {"title": "Chapter 1", "start_offset_ms": 65_500},  # 1:05 and 500ms -> 37 frames
+        {"title": "Chapter 2", "start_offset_ms": 3_600_000},  # exactly 60:00:00
+    ]
+
+    def test_header_and_file_type_m4b(self):
+        cue = generate_cue_sheet(self.CHAPTERS, "Dracula.m4b", "Dracula", "Bram Stoker", "B0OURS")
+        assert cue.startswith("REM ASIN B0OURS\n")
+        assert 'PERFORMER "Bram Stoker"' in cue
+        assert 'TITLE "Dracula"' in cue
+        assert 'FILE "Dracula.m4b" WAVE' in cue
+        assert cue.endswith("\n")
+
+    def test_mp3_declares_mp3_file_type(self):
+        cue = generate_cue_sheet(self.CHAPTERS, "Dracula.mp3", "Dracula", "Bram Stoker", "B0OURS")
+        assert 'FILE "Dracula.mp3" MP3' in cue
+
+    def test_track_numbering_and_index_times(self):
+        cue = generate_cue_sheet(self.CHAPTERS, "x.m4b", "T", "A", "B0")
+        assert "TRACK 01 AUDIO" in cue
+        assert "TRACK 02 AUDIO" in cue
+        assert "TRACK 03 AUDIO" in cue
+        # 0 ms -> 00:00:00
+        assert "INDEX 01 00:00:00" in cue
+        # 65_500 ms -> 1 min, 5 sec, int(500 * 75 / 1000) = 37 frames
+        assert "INDEX 01 01:05:37" in cue
+        # 3_600_000 ms -> exactly 60 minutes (MM allowed to exceed 99 range)
+        assert "INDEX 01 60:00:00" in cue
+
+    def test_minutes_exceed_99(self):
+        # A long book: 2h 5m 3s -> MM = 125, rendered as-is (not wrapped).
+        chapters = [{"title": "Late", "start_offset_ms": (125 * 60 + 3) * 1000}]
+        cue = generate_cue_sheet(chapters, "x.m4b", "T", "A", "B0")
+        assert "INDEX 01 125:03:00" in cue
+
+    def test_track_numbers_past_99_use_three_digits(self):
+        chapters = [{"title": f"Ch {n}", "start_offset_ms": n * 1000} for n in range(105)]
+        cue = generate_cue_sheet(chapters, "x.m4b", "T", "A", "B0")
+        assert "TRACK 99 AUDIO" in cue
+        assert "TRACK 100 AUDIO" in cue
+        assert "TRACK 105 AUDIO" in cue
+
+    def test_embedded_quotes_are_escaped(self):
+        chapters = [{"title": 'The "Big" Chapter', "start_offset_ms": 0}]
+        cue = generate_cue_sheet(chapters, "x.m4b", 'A "Quoted" Title', 'Au "thor"', "B0")
+        assert 'TITLE "The \\"Big\\" Chapter"' in cue
+        assert 'TITLE "A \\"Quoted\\" Title"' in cue
+        assert 'PERFORMER "Au \\"thor\\""' in cue
+
+    def test_missing_chapter_title_falls_back(self):
+        cue = generate_cue_sheet([{"start_offset_ms": 0}], "x.m4b", "T", "A", "B0")
+        assert 'TITLE "Chapter"' in cue
+
+
+class TestPlaceSidecarFiles:
+    """Phase 2: BookProcessor._place_sidecar_files wiring — best-effort placement
+    gated on the four sidecar settings, next to the finished audiobook."""
+
+    def _processor(self, tmp_path, context):
+        processor = BookProcessor(asin="B0OURS", job_id=1, stop_event=Event())
+        processor.final_output_path = str(tmp_path / "out" / "Dracula.m4b")
+        (tmp_path / "out").mkdir()
+        processor.context = context
+        return processor
+
+    def _settings(self, **conv):
+        base = {
+            "save_cover_alongside": False,
+            "save_metadata_json": False,
+            "create_cue_sheet": False,
+            "retain_aax": False,
+        }
+        base.update(conv)
+        return {"conversion": base}
+
+    def test_all_off_writes_nothing(self, tmp_path):
+        cover = tmp_path / "cover.jpg"
+        cover.write_bytes(b"img")
+        processor = self._processor(tmp_path, {"cover_file": str(cover), "book_info": {"title": "X"}})
+        with mock.patch.object(processing_logic, "load_settings", return_value=self._settings()):
+            processor._place_sidecar_files()
+        assert list((tmp_path / "out").iterdir()) == []
+
+    def test_all_on_writes_four_sidecars(self, tmp_path):
+        cover = tmp_path / "cover.png"
+        cover.write_bytes(b"img")
+        raw = tmp_path / "book.aaxc"
+        raw.write_bytes(b"raw")
+        voucher = tmp_path / "book.voucher"
+        voucher.write_bytes(b"{}")
+        context = {
+            "cover_file": str(cover),
+            "raw_audio_file": str(raw),
+            "voucher_file": str(voucher),
+            "book_info": {"title": "Dracula", "authors": [{"name": "Bram Stoker"}]},
+            "chapters": [{"title": "One", "start_offset_ms": 0}],
+        }
+        processor = self._processor(tmp_path, context)
+        settings = self._settings(
+            save_cover_alongside=True,
+            save_metadata_json=True,
+            create_cue_sheet=True,
+            retain_aax=True,
+        )
+        with mock.patch.object(processing_logic, "load_settings", return_value=settings):
+            processor._place_sidecar_files()
+        out = tmp_path / "out"
+        assert (out / "Dracula.png").exists()  # cover keeps its real extension
+        assert (out / "Dracula.metadata.json").exists()
+        assert (out / "Dracula.cue").exists()
+        assert (out / "Dracula.aaxc").exists()  # raw master keeps its real extension
+        assert (out / "Dracula.voucher").exists()
+        # The metadata sidecar is the curated JSON.
+        saved = json.loads((out / "Dracula.metadata.json").read_text(encoding="utf-8"))
+        assert saved["title"] == "Dracula"
+        assert saved["authors"] == ["Bram Stoker"]
+
+    def test_retain_without_voucher_is_fine(self, tmp_path):
+        # AAX titles have no voucher: raw is copied, no .voucher is produced.
+        raw = tmp_path / "book.aax"
+        raw.write_bytes(b"raw")
+        context = {"raw_audio_file": str(raw), "voucher_file": None}
+        processor = self._processor(tmp_path, context)
+        with mock.patch.object(processing_logic, "load_settings", return_value=self._settings(retain_aax=True)):
+            processor._place_sidecar_files()
+        out = tmp_path / "out"
+        assert (out / "Dracula.aax").exists()
+        assert not (out / "Dracula.voucher").exists()
+
+    def test_one_failure_does_not_block_others(self, tmp_path):
+        # A missing cover file (enabled but absent) must not stop the cue sheet.
+        context = {
+            "cover_file": str(tmp_path / "does-not-exist.jpg"),
+            "book_info": {"title": "Dracula", "authors": [{"name": "Bram Stoker"}]},
+            "chapters": [{"title": "One", "start_offset_ms": 0}],
+        }
+        processor = self._processor(tmp_path, context)
+        settings = self._settings(save_cover_alongside=True, create_cue_sheet=True)
+        with mock.patch.object(processing_logic, "load_settings", return_value=settings):
+            processor._place_sidecar_files()
+        out = tmp_path / "out"
+        assert not (out / "Dracula.jpg").exists()
+        assert (out / "Dracula.cue").exists()

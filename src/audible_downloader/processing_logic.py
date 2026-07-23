@@ -7,6 +7,7 @@
 # License: MIT (included in the project's LICENSE.txt file)
 # --- End Attribution ---
 
+import json
 import os
 import re
 import shutil
@@ -202,6 +203,101 @@ def rename_book_to_match_metadata(asin):
     except OSError as e:
         log.warning(f"RENAME ({asin}): Could not rename file(s): {e}")
         return None
+
+
+def build_metadata_json(book_info):
+    """
+    Curated, JSON-serializable subset of Audible's API `item` for the optional
+    metadata.json sidecar. Pure (no I/O) so it's unit-testable without a
+    processor. Every field is pulled defensively with .get() because the API
+    omits keys for some titles; missing values become None (or an empty list).
+
+    The `description` cleanup mirrors the FFMETADATA writer in
+    chunked_conversion_logic.prepare_book_assets so the sidecar text matches the
+    embedded tag.
+    """
+    book_info = book_info or {}
+
+    authors = [a.get("name") for a in book_info.get("authors") or [] if a.get("name")]
+    narrators = [n.get("name") for n in book_info.get("narrators") or [] if n.get("name")]
+
+    series = None
+    series_list = book_info.get("series")
+    if series_list:
+        first = series_list[0]
+        series = {"title": first.get("title"), "sequence": first.get("sequence")}
+
+    # Last (most specific) rung of each category ladder, dropping empties.
+    genres = []
+    for ladder in book_info.get("category_ladders") or []:
+        rungs = ladder.get("ladder")
+        if rungs:
+            name = rungs[-1].get("name")
+            if name:
+                genres.append(name)
+
+    description = (
+        (book_info.get("merchandising_summary") or "")
+        .replace("</p>", "\n")
+        .replace("<p>", "")
+        .replace("<br />", "\n")
+        .strip()
+    )
+
+    return {
+        "asin": book_info.get("asin"),
+        "title": book_info.get("title"),
+        "subtitle": book_info.get("subtitle"),
+        "authors": authors,
+        "narrators": narrators,
+        "series": series,
+        "release_date": book_info.get("release_date"),
+        "purchase_date": book_info.get("purchase_date"),
+        "publisher": book_info.get("publisher_name"),
+        "language": book_info.get("language"),
+        "genres": genres,
+        "runtime_length_min": book_info.get("runtime_length_min"),
+        "description": description,
+        "copyright": book_info.get("copy_right"),
+    }
+
+
+def generate_cue_sheet(chapters, audio_filename, title, author, asin):
+    """
+    Render a .cue sheet for the finished audiobook from its (post-transform,
+    output-timeline) chapter list. Pure so it's unit-testable.
+
+    CUE INDEX times are MM:SS:FF, where FF counts 1/75-second frames. MM is the
+    total minute count and may exceed 99 on long books; SS is 0..59; FF is
+    derived from the millisecond remainder. Track numbers are zero-padded to at
+    least two digits (three past track 99). Embedded double quotes in any quoted
+    field are escaped so a stray quote in a title can't break the CUE syntax.
+    """
+
+    def _q(text):
+        return (text or "").replace('"', '\\"')
+
+    # MP3 output declares FILE ... MP3; every mp4-family container is WAVE.
+    ext = os.path.splitext(audio_filename)[1].lower()
+    file_type = "MP3" if ext == ".mp3" else "WAVE"
+
+    lines = [
+        f"REM ASIN {asin}",
+        f'PERFORMER "{_q(author)}"',
+        f'TITLE "{_q(title)}"',
+        f'FILE "{_q(audio_filename)}" {file_type}',
+    ]
+
+    for i, chapter in enumerate(chapters, start=1):
+        start_ms = chapter.get("start_offset_ms", 0)
+        total_seconds, ms = divmod(int(start_ms), 1000)
+        minutes, seconds = divmod(total_seconds, 60)
+        frames = int(ms * 75 / 1000)
+        lines.append(f"  TRACK {i:02d} AUDIO")
+        lines.append(f'    TITLE "{_q(chapter.get("title", "Chapter"))}"')
+        lines.append(f"    INDEX 01 {minutes:02d}:{seconds:02d}:{frames:02d}")
+
+    return "\n".join(lines) + "\n"
 
 
 class BookProcessor:
@@ -596,6 +692,83 @@ class BookProcessor:
         except OSError as e:
             log.warning(f"PROCESSOR ({self.asin}): Could not save companion PDF: {e}")
 
+    def _place_sidecar_files(self):
+        """
+        Write the optional sidecar files next to the finished audiobook, each
+        sharing its base name. Best-effort like _place_supplementary_pdf: every
+        item is independently guarded so one failure never blocks the others or
+        the book's success, and all are off by default (Phase 2 settings) so a
+        default install still produces exactly today's single-file output.
+        """
+        context = self.context or {}
+        conv = load_settings().get("conversion", {})
+        base = os.path.splitext(self.final_output_path)[0]
+
+        # 1. Cover image alongside the audiobook, keeping the cover's real ext.
+        if conv.get("save_cover_alongside", False):
+            cover_file = context.get("cover_file")
+            if cover_file and os.path.exists(cover_file):
+                cover_target = base + os.path.splitext(cover_file)[1]
+                try:
+                    shutil.copy2(cover_file, cover_target)
+                    log.info(f"PROCESSOR ({self.asin}): Saved cover image to {cover_target}")
+                except OSError as e:
+                    log.warning(f"PROCESSOR ({self.asin}): Could not save cover image: {e}")
+
+        # 2. Curated metadata.json.
+        if conv.get("save_metadata_json", False):
+            book_info = context.get("book_info")
+            if book_info:
+                json_target = base + ".metadata.json"
+                try:
+                    with open(json_target, "w", encoding="utf-8") as f:
+                        json.dump(build_metadata_json(book_info), f, indent=2, ensure_ascii=False)
+                    log.info(f"PROCESSOR ({self.asin}): Saved metadata JSON to {json_target}")
+                except OSError as e:
+                    log.warning(f"PROCESSOR ({self.asin}): Could not save metadata JSON: {e}")
+
+        # 3. .cue chapter sheet from the post-transform, output-timeline chapters.
+        if conv.get("create_cue_sheet", False):
+            chapters = context.get("chapters")
+            if chapters:
+                book_info = context.get("book_info") or {}
+                author = (
+                    ", ".join(a.get("name", "") for a in book_info.get("authors", []) if a.get("name"))
+                    or "Unknown Author"
+                )
+                title = book_info.get("title") or "Unknown Title"
+                cue_target = base + ".cue"
+                try:
+                    cue_text = generate_cue_sheet(
+                        chapters, os.path.basename(self.final_output_path), title, author, self.asin
+                    )
+                    with open(cue_target, "w", encoding="utf-8") as f:
+                        f.write(cue_text)
+                    log.info(f"PROCESSOR ({self.asin}): Saved cue sheet to {cue_target}")
+                except OSError as e:
+                    log.warning(f"PROCESSOR ({self.asin}): Could not save cue sheet: {e}")
+
+        # 4. Retain the raw AAX/AAXC master (+ voucher) prepare would have deleted.
+        if conv.get("retain_aax", False):
+            raw_audio_file = context.get("raw_audio_file")
+            if raw_audio_file and os.path.exists(raw_audio_file):
+                raw_target = base + os.path.splitext(raw_audio_file)[1]
+                try:
+                    shutil.copy2(raw_audio_file, raw_target)
+                    log.info(f"PROCESSOR ({self.asin}): Retained raw audio to {raw_target}")
+                except OSError as e:
+                    log.warning(f"PROCESSOR ({self.asin}): Could not retain raw audio: {e}")
+            # The voucher holds the AAXC decryption keys; retained beside the raw
+            # AAXC so the pair stays usable. AAX titles have no voucher (None).
+            voucher_file = context.get("voucher_file")
+            if voucher_file and os.path.exists(voucher_file):
+                voucher_target = base + ".voucher"
+                try:
+                    shutil.copy2(voucher_file, voucher_target)
+                    log.info(f"PROCESSOR ({self.asin}): Retained voucher to {voucher_target}")
+                except OSError as e:
+                    log.warning(f"PROCESSOR ({self.asin}): Could not retain voucher: {e}")
+
     def _finalize_success(self, conversion_start_time, record_eta=True):
         """
         Shared post-conversion handling for both the re-encode merge and the
@@ -657,8 +830,10 @@ class BookProcessor:
                 "error_message = '', retry_count = 0, is_duplicate = ? WHERE asin = ?",
                 (self.final_output_path, int(self.is_duplicate), self.asin),
             )
-        # Place any companion PDF before the temp dir is torn down.
+        # Place any companion PDF and optional sidecars before the temp dir is
+        # torn down (the raw master, cover, and metadata all live there).
         self._place_supplementary_pdf()
+        self._place_sidecar_files()
         _yield_progress(self.asin, "Complete!", 100, self.job_id)
 
     def _merge_and_finalize(self):

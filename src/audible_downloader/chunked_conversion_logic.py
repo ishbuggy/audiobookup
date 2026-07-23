@@ -179,6 +179,11 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
     if download_quality not in ("best", "high", "normal"):
         download_quality = "best"
 
+    # Retain the raw AAX/AAXC master (+ voucher) next to the finished book instead
+    # of deleting it after decrypt. Read once here; consumed at the delete site
+    # below and threaded into the returned context for the sidecar placement.
+    retain_aax = settings.get("conversion", {}).get("retain_aax", False)
+
     # Variables to hold state across the retry loops
     audio_file = None
     cover_file = None
@@ -186,6 +191,11 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
     book_info = None
     chapters_list = None
     decryption_args = []
+    # When retain_aax is on, these carry the raw encrypted master and its AAXC
+    # voucher out to the context (both None otherwise). Initialized before the
+    # retry loop so they're always defined at the return statement in Phase 2.
+    retained_raw_audio_file = None
+    retained_voucher_file = None
 
     # Strategy Definition: (Flag, Name)
     download_strategies = [("--aaxc", "AAXC (Fast)"), ("--aax-fallback", "AAX (Reliable)")]
@@ -464,11 +474,19 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
                 raise RuntimeError("All decryption strategies failed.")
 
             # --- END SUCCESS ---
-            # Clean up the raw encrypted file
-            try:
-                os.remove(raw_audio_file)
-            except OSError:
-                pass
+            # Clean up the raw encrypted file — unless the user asked to retain
+            # it. When retained we skip the delete and carry the raw master (and
+            # its AAXC voucher, if any — an AAXC is useless without it) in the
+            # context; _place_sidecar_files copies both next to the finished book
+            # at finalize time, the same best-effort pattern as the companion PDF.
+            if retain_aax:
+                retained_raw_audio_file = raw_audio_file
+                retained_voucher_file = voucher_file
+            else:
+                try:
+                    os.remove(raw_audio_file)
+                except OSError:
+                    pass
 
             decryption_args = []  # Clear args as file is now clean
 
@@ -653,6 +671,10 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             "chapter_file": chapter_txt_path,
             "chapters": chapters_list,
             "book_info": book_info,
+            # Populated only when retain_aax is on (both None otherwise); copied
+            # next to the finished book by BookProcessor._place_sidecar_files.
+            "raw_audio_file": retained_raw_audio_file,
+            "voucher_file": retained_voucher_file,
         }, None
 
     except Exception as e:
