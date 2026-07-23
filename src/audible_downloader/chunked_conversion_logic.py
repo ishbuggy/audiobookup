@@ -18,6 +18,12 @@ from . import (
     DATABASE_DIR,
     announcer,  # Import announcer for progress updates
 )
+from .chapter_transforms import (
+    flatten_chapter_tree,
+    merge_credit_chapters,
+    render_chapter_title,
+    strip_unabridged,
+)
 from .db import get_db_connection
 from .logger import log
 from .process_registry import process_registry
@@ -543,6 +549,26 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
         total_duration_sec = float(probe_result.stdout.strip())
         total_duration_ms = int(total_duration_sec * 1000)
 
+        # Chapter-processing options (Phase 4), from the settings already loaded
+        # at the top of this function. All default off/identity, so with a
+        # stock settings.json the chapter list below is untouched.
+        chapter_settings = settings.get("conversion", {}).get("chapters", {})
+        combine_nested = chapter_settings.get("combine_nested_titles", False)
+        merge_credits = chapter_settings.get("merge_credit_chapters", False)
+
+        # 0a. Flatten nested chapter trees (joining parent/child titles with
+        # ": "). Runs BEFORE the sanitize recompute so lengths are derived from
+        # the flat list. When off, today's top-level-only list is kept exactly.
+        if chapters_list and combine_nested:
+            log.info(f"PREPARE ({asin}): Flattening nested chapter tree (combine_nested_titles).")
+            chapters_list = flatten_chapter_tree(chapters_list, join_titles=True)
+
+        # 0b. Fold Opening/End Credits chapters into their neighbors on the flat
+        # list. Also runs before sanitize, which then recomputes the lengths.
+        if chapters_list and merge_credits:
+            log.info(f"PREPARE ({asin}): Merging credit chapters.")
+            chapters_list = merge_credit_chapters(chapters_list)
+
         # 1. Sanitize Chapter Durations
         if chapters_list:
             log.info(f"PREPARE ({asin}): Sanitizing chapter durations...")
@@ -591,7 +617,14 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             f.write(";FFMETADATA1\n")
 
             # --- Standard Tags ---
-            title = custom_title or book_info.get("title", "N/A")
+            # strip_unabridged applies ONLY to the Audible-derived title, never
+            # to a user's custom_title (we never mangle explicit user input).
+            strip_unabridged_flag = chapter_settings.get("strip_unabridged", False)
+            if custom_title:
+                title = custom_title
+            else:
+                raw_title = book_info.get("title", "N/A")
+                title = strip_unabridged(raw_title) if strip_unabridged_flag else raw_title
             f.write(f"title={title}\n")
             f.write(f"album={title}\n")  # Players often treat Audiobooks as Albums
 
@@ -656,12 +689,23 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
                 f.write(f"series={book_info['series'][0].get('title', 'N/A')}\n")
                 f.write(f"series-part={book_info['series'][0].get('sequence', 'N/A')}\n")
 
-            # Write chapters
-            for chapter in chapters_list:
+            # Write chapters. Each chapter title is rendered through the
+            # per-chapter template; the default "{ch_title}" reproduces the raw
+            # chapter title (today's byte-for-byte output).
+            chapter_title_template = chapter_settings.get("chapter_title_template", "{ch_title}")
+            ch_total = len(chapters_list)
+            for idx, chapter in enumerate(chapters_list):
                 f.write("[CHAPTER]\nTIMEBASE=1/1000\n")
                 f.write(f"START={chapter.get('start_offset_ms', 0)}\n")
                 f.write(f"END={chapter.get('start_offset_ms', 0) + chapter.get('length_ms', 0)}\n")
-                f.write(f"title={chapter.get('title', 'Chapter')}\n")
+                rendered_title = render_chapter_title(
+                    chapter_title_template,
+                    ch_num=idx + 1,
+                    ch_total=ch_total,
+                    ch_title=chapter.get("title", "Chapter"),
+                    book_title=title,
+                )
+                f.write(f"title={rendered_title}\n")
 
         return {
             "decryption_args": decryption_args,

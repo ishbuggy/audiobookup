@@ -1,0 +1,192 @@
+# tests/test_chapter_transforms.py
+
+# Unit tests for the pure chapter transforms (PLAN v0.22.0 Phase 4). Every
+# function here is I/O-free, so these run on the host with no container.
+
+import pytest
+
+from audible_downloader.chapter_transforms import (
+    flatten_chapter_tree,
+    merge_credit_chapters,
+    render_chapter_title,
+    strip_unabridged,
+)
+
+
+def _ch(title, start, length, children=None):
+    """Build a chapter dict in the shape prepare_book_assets works with."""
+    d = {"title": title, "start_offset_ms": start, "length_ms": length}
+    if children is not None:
+        d["chapters"] = children
+    return d
+
+
+class TestFlattenChapterTree:
+    def test_flat_list_without_children_is_unchanged_content(self):
+        chapters = [_ch("One", 0, 1000), _ch("Two", 1000, 1000)]
+        out = flatten_chapter_tree(chapters, join_titles=True)
+        assert [c["title"] for c in out] == ["One", "Two"]
+        assert [c["start_offset_ms"] for c in out] == [0, 1000]
+
+    def test_two_level_depth_first_order_no_join(self):
+        chapters = [
+            _ch("Part 1", 0, 500, children=[_ch("Ch A", 500, 500), _ch("Ch B", 1000, 500)]),
+            _ch("Part 2", 1500, 500, children=[_ch("Ch C", 2000, 500)]),
+        ]
+        out = flatten_chapter_tree(chapters, join_titles=False)
+        assert [c["title"] for c in out] == ["Part 1", "Ch A", "Ch B", "Part 2", "Ch C"]
+        # Parents keep their own offsets; children keep theirs.
+        assert [c["start_offset_ms"] for c in out] == [0, 500, 1000, 1500, 2000]
+
+    def test_two_level_with_title_join(self):
+        chapters = [
+            _ch("Part 1", 0, 500, children=[_ch("Ch A", 500, 500), _ch("Ch B", 1000, 500)]),
+            _ch("Part 2", 1500, 500, children=[_ch("Ch C", 2000, 500)]),
+        ]
+        out = flatten_chapter_tree(chapters, join_titles=True)
+        assert [c["title"] for c in out] == [
+            "Part 1",
+            "Part 1: Ch A",
+            "Part 1: Ch B",
+            "Part 2",
+            "Part 2: Ch C",
+        ]
+
+    def test_three_level_join_accumulates_through_depth(self):
+        chapters = [
+            _ch(
+                "Part 1",
+                0,
+                100,
+                children=[_ch("Ch A", 100, 100, children=[_ch("Section 1", 200, 100)])],
+            ),
+        ]
+        out = flatten_chapter_tree(chapters, join_titles=True)
+        assert [c["title"] for c in out] == ["Part 1", "Part 1: Ch A", "Part 1: Ch A: Section 1"]
+
+    def test_custom_separator(self):
+        chapters = [_ch("P", 0, 100, children=[_ch("C", 100, 100)])]
+        out = flatten_chapter_tree(chapters, join_titles=True, separator=" - ")
+        assert [c["title"] for c in out] == ["P", "P - C"]
+
+    def test_children_key_is_dropped_from_output(self):
+        chapters = [_ch("P", 0, 100, children=[_ch("C", 100, 100)])]
+        out = flatten_chapter_tree(chapters, join_titles=True)
+        assert all("chapters" not in c for c in out)
+
+    def test_does_not_mutate_input(self):
+        child = _ch("C", 100, 100)
+        chapters = [_ch("P", 0, 100, children=[child])]
+        flatten_chapter_tree(chapters, join_titles=True)
+        # Original dicts untouched (title not joined, children key intact).
+        assert child["title"] == "C"
+        assert chapters[0]["chapters"] is not None
+
+    def test_preserves_extra_keys_on_emitted_nodes(self):
+        chapters = [_ch("P", 0, 100, children=[{"title": "C", "start_offset_ms": 100, "extra": 7}])]
+        out = flatten_chapter_tree(chapters, join_titles=False)
+        assert out[1]["extra"] == 7
+
+
+class TestMergeCreditChapters:
+    def test_leading_opening_credits_folds_into_following(self):
+        chapters = [_ch("Opening Credits", 0, 500), _ch("Chapter 1", 500, 1000)]
+        out = merge_credit_chapters(chapters)
+        assert [c["title"] for c in out] == ["Chapter 1"]
+        # Following chapter now begins where the credits began, absorbing the span.
+        assert out[0]["start_offset_ms"] == 0
+        assert out[0]["length_ms"] == 1500
+
+    def test_trailing_end_credits_folds_into_preceding(self):
+        chapters = [_ch("Chapter 1", 0, 1000), _ch("End Credits", 1000, 500)]
+        out = merge_credit_chapters(chapters)
+        assert [c["title"] for c in out] == ["Chapter 1"]
+        assert out[0]["start_offset_ms"] == 0
+        assert out[0]["length_ms"] == 1500
+
+    def test_both_credits(self):
+        chapters = [
+            _ch("Opening Credits", 0, 300),
+            _ch("Chapter 1", 300, 1000),
+            _ch("End Credits", 1300, 400),
+        ]
+        out = merge_credit_chapters(chapters)
+        assert [c["title"] for c in out] == ["Chapter 1"]
+        assert out[0]["start_offset_ms"] == 0
+        assert out[0]["length_ms"] == 1700
+
+    def test_absent_credits_is_noop(self):
+        chapters = [_ch("Chapter 1", 0, 1000), _ch("Chapter 2", 1000, 1000)]
+        out = merge_credit_chapters(chapters)
+        assert [c["title"] for c in out] == ["Chapter 1", "Chapter 2"]
+        assert out == chapters
+
+    def test_credit_only_book_leaves_lonely_opening_in_place(self):
+        chapters = [_ch("Opening Credits", 0, 500)]
+        out = merge_credit_chapters(chapters)
+        assert [c["title"] for c in out] == ["Opening Credits"]
+
+    def test_credit_only_book_leaves_lonely_end_in_place(self):
+        chapters = [_ch("End Credits", 0, 500)]
+        out = merge_credit_chapters(chapters)
+        assert [c["title"] for c in out] == ["End Credits"]
+
+    def test_case_insensitive_and_whitespace_tolerant(self):
+        chapters = [_ch("  opening CREDITS ", 0, 500), _ch("Chapter 1", 500, 1000)]
+        out = merge_credit_chapters(chapters)
+        assert [c["title"] for c in out] == ["Chapter 1"]
+
+    def test_partial_title_match_is_not_treated_as_credits(self):
+        # A real chapter that merely contains the words must survive untouched.
+        chapters = [_ch("The Opening Credits Heist", 0, 500), _ch("Chapter 1", 500, 1000)]
+        out = merge_credit_chapters(chapters)
+        assert [c["title"] for c in out] == ["The Opening Credits Heist", "Chapter 1"]
+
+    def test_does_not_mutate_input(self):
+        chapters = [_ch("Opening Credits", 0, 500), _ch("Chapter 1", 500, 1000)]
+        merge_credit_chapters(chapters)
+        assert [c["title"] for c in chapters] == ["Opening Credits", "Chapter 1"]
+        assert chapters[1]["start_offset_ms"] == 500
+
+
+class TestStripUnabridged:
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("The Book (Unabridged)", "The Book"),
+            ("The Book (unabridged)", "The Book"),
+            ("The Book (UNABRIDGED)", "The Book"),
+            ("The Book (Unabridged): Subtitle", "The Book: Subtitle"),
+            ("Book (Unabridged) Two", "Book Two"),
+            ("No tag here", "No tag here"),
+            ("", ""),
+            (None, None),
+        ],
+    )
+    def test_variants(self, text, expected):
+        assert strip_unabridged(text) == expected
+
+    def test_collapses_doubled_spaces_left_behind(self):
+        # A mid-string removal that would otherwise leave two spaces.
+        assert strip_unabridged("Book  (Unabridged)  Two") == "Book Two"
+
+
+class TestRenderChapterTitle:
+    def test_default_template_reproduces_chapter_title(self):
+        assert render_chapter_title("{ch_title}", 1, 10, "Chapter One", "My Book") == "Chapter One"
+
+    def test_number_and_total(self):
+        assert render_chapter_title("{ch} of {ch_total}", 3, 10, "X", "Y") == "3 of 10"
+
+    def test_ch_not_corrupting_ch_total_or_ch_title(self):
+        # {ch} is a prefix of the longer tags; ordering must not mangle them.
+        assert render_chapter_title("{ch} {ch_total} {ch_title}", 2, 5, "Intro", "Book") == "2 5 Intro"
+
+    def test_book_title_tag(self):
+        assert render_chapter_title("{title} - {ch}", 4, 12, "Ch", "Dune") == "Dune - 4"
+
+    def test_unknown_braces_pass_through(self):
+        assert render_chapter_title("{ch} {unknown}", 1, 2, "t", "b") == "1 {unknown}"
+
+    def test_none_values_render_empty(self):
+        assert render_chapter_title("[{ch_title}][{title}]", 1, 1, None, None) == "[][]"
