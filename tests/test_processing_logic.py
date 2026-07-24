@@ -364,6 +364,81 @@ class TestRenameToMatchMetadata:
         assert result == "/data/New/New_B0OURS.m4b"
         move.assert_any_call(self.CURRENT, "/data/New/New_B0OURS.m4b")
 
+    def test_preserves_mp3_extension(self):
+        # Phase 5: an .mp3 book must be renamed to an .mp3 target, so the file's
+        # real extension is passed through to build_base_output_path (not the
+        # default .m4b).
+        current = "/data/Old/Old.mp3"
+        row = self._row(filepath=current)
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+
+        def execute(query, params=None):
+            cursor = mock.MagicMock()
+            cursor.fetchone.return_value = None if "WHERE filepath" in query else row
+            return cursor
+
+        con.execute.side_effect = execute
+        bbop = mock.MagicMock(return_value="/data/New/New.mp3")
+        with (
+            mock.patch.object(
+                processing_logic, "load_settings", return_value={"naming": {"apply_custom_to_filenames": True}}
+            ),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "build_base_output_path", bbop),
+            mock.patch("os.path.exists", side_effect=lambda p: p == current),
+            mock.patch("os.makedirs"),
+            mock.patch.object(processing_logic.shutil, "move"),
+            mock.patch.object(processing_logic, "_cleanup_empty_dirs"),
+        ):
+            processing_logic.rename_book_to_match_metadata("B0OURS")
+        assert bbop.call_args.kwargs["ext"] == ".mp3"
+
+    def test_moves_all_present_sidecars(self):
+        # Phase 5: a rename carries every sidecar sharing the old base name to the
+        # new base name; sidecars that aren't on disk are skipped.
+        target = "/data/New/New.m4b"
+        old_base = "/data/Bram Stoker/Dracula/Bram Stoker - Dracula"
+        new_base = "/data/New/New"
+        present = {
+            self.CURRENT,
+            old_base + ".pdf",
+            old_base + ".jpg",
+            old_base + ".cue",
+            old_base + ".metadata.json",
+            old_base + ".voucher",
+        }
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+
+        def execute(query, params=None):
+            cursor = mock.MagicMock()
+            cursor.fetchone.return_value = None if "WHERE filepath" in query else self._row()
+            return cursor
+
+        con.execute.side_effect = execute
+        with (
+            mock.patch.object(
+                processing_logic, "load_settings", return_value={"naming": {"apply_custom_to_filenames": True}}
+            ),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "build_base_output_path", return_value=target),
+            mock.patch("os.path.exists", side_effect=lambda p: p in present),
+            mock.patch("os.makedirs"),
+            mock.patch.object(processing_logic.shutil, "move") as move,
+            mock.patch.object(processing_logic, "_cleanup_empty_dirs"),
+        ):
+            processing_logic.rename_book_to_match_metadata("B0OURS")
+
+        moved = {call.args for call in move.call_args_list}
+        # The audiobook itself plus each present sidecar moved to the new base.
+        assert (self.CURRENT, target) in moved
+        for suffix in (".pdf", ".jpg", ".cue", ".metadata.json", ".voucher"):
+            assert (old_base + suffix, new_base + suffix) in moved
+        # Absent sidecars (.png, .aax, .aaxc) are never moved.
+        for suffix in (".png", ".aax", ".aaxc"):
+            assert (old_base + suffix, new_base + suffix) not in moved
+
     """H5 regression: an existing file at the target path must only be
     overwritten when it verifiably belongs to the same book."""
 
@@ -530,6 +605,75 @@ class TestNoReencodePathSelection:
         assert all(t.func == processor._encode_and_track_chunk for t in submitted)
 
 
+class TestOutputFormatPathSelection:
+    """Phase 5: resolve_output_format routes the finalize path. "mp3" submits a
+    single MP3 encode task (no chunk/merge) and builds a .mp3 target; "original"
+    still remuxes; "m4b" still chunk-encodes."""
+
+    def _run(self, output_format, audio_file="/tmp/x/master_intermediate.m4b", chapters=None):
+        chapters = chapters if chapters is not None else [{"start_offset_ms": 0, "length_ms": 1000}]
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.download_complete_event = Event()
+
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = BOOK_ROW
+
+        context = {"audio_file": audio_file, "chapters": chapters}
+        submitted = []
+
+        with (
+            mock.patch.object(
+                processing_logic,
+                "load_settings",
+                return_value={"naming": {}, "conversion": {"output_format": output_format}},
+            ),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "prepare_book_assets", return_value=(context, None)) as prepare,
+            mock.patch.object(processing_logic, "build_base_output_path", return_value="/data/A/T/T") as bbop,
+            mock.patch("os.path.exists", return_value=False),
+            mock.patch("os.makedirs"),
+            mock.patch.object(processing_logic, "_yield_progress"),
+            mock.patch.object(processing_logic.task_runner, "submit_task", side_effect=submitted.append),
+        ):
+            processor._prepare_and_spawn_encode_tasks()
+
+        return processor, submitted, prepare, bbop
+
+    def test_mp3_submits_single_encode_task(self):
+        processor, submitted, prepare, _ = self._run(
+            "mp3",
+            chapters=[{"start_offset_ms": 0, "length_ms": 1000}, {"start_offset_ms": 1000, "length_ms": 1000}],
+        )
+        assert len(submitted) == 1
+        assert submitted[0].func == processor._encode_mp3_and_finalize
+        # It runs at ENCODE_CHAPTER priority (it *is* the encode work).
+        assert submitted[0].priority == processing_logic.TaskPriority.ENCODE_CHAPTER
+        # No per-chapter chunking was set up.
+        assert processor.total_chunks == 0
+        # MP3 is a re-encode, so prepare is NOT told to skip auto-chunking.
+        assert prepare.call_args.kwargs.get("lossless") is False
+
+    def test_mp3_builds_mp3_extension_path(self):
+        _, _, _, bbop = self._run("mp3")
+        assert bbop.call_args.kwargs["ext"] == ".mp3"
+
+    def test_m4b_builds_m4b_extension_path(self):
+        _, _, _, bbop = self._run("m4b")
+        assert bbop.call_args.kwargs["ext"] == ".m4b"
+
+    def test_original_builds_m4b_extension_path(self):
+        # Original remux still lands in an .m4b container.
+        _, _, _, bbop = self._run("original")
+        assert bbop.call_args.kwargs["ext"] == ".m4b"
+
+    def test_original_with_aac_master_remuxes(self):
+        processor, submitted, prepare, _ = self._run("original")
+        assert len(submitted) == 1
+        assert submitted[0].func == processor._remux_and_finalize
+        assert prepare.call_args.kwargs.get("lossless") is True
+
+
 class TestRemuxFinalize:
     """The lossless remux task shares the same success finalization (verify +
     DOWNLOADED + PDF) as the merge task, and reports a distinct failure."""
@@ -598,6 +742,57 @@ class TestRemuxFinalize:
         ):
             processor._merge_and_finalize()
         record_eta.assert_called_once()
+
+
+class TestMp3Finalize:
+    """Phase 5: the single-pass MP3 encode task shares the same success
+    finalization (verify + DOWNLOADED + PDF) as the other paths, reports a
+    distinct failure, and — like the remux — keeps its (single-threaded LAME)
+    duration out of the shared re-encode ETA model."""
+
+    def _run(self, encode_success, verify_result=(True, None)):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = "/data/A/Title/Title.mp3"
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = {"runtime_min": 60}
+        with (
+            mock.patch.object(processing_logic, "encode_book_mp3", return_value=encode_success),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "record_conversion_time") as record_eta,
+            mock.patch.object(processing_logic, "_yield_progress"),
+            mock.patch.object(processor, "_verify_output_file", return_value=verify_result),
+            mock.patch.object(processor, "_place_supplementary_pdf") as pdf,
+            mock.patch.object(processor, "_place_sidecar_files"),
+            mock.patch.object(processor, "_update_db_on_failure") as fail,
+        ):
+            processor._encode_mp3_and_finalize()
+        downloaded = [c for c in con.execute.call_args_list if "status = 'DOWNLOADED'" in c.args[0]]
+        return downloaded, fail, pdf, record_eta, processor
+
+    def test_success_marks_downloaded(self):
+        downloaded, fail, pdf, _record_eta, processor = self._run(encode_success=True)
+        fail.assert_not_called()
+        assert len(downloaded) == 1
+        pdf.assert_called_once()
+        assert processor._completion_event.is_set()
+
+    def test_success_does_not_pollute_eta_history(self):
+        _downloaded, _fail, _pdf, record_eta, _processor = self._run(encode_success=True)
+        record_eta.assert_not_called()
+
+    def test_encode_failure_reports_distinct_reason(self):
+        downloaded, fail, _pdf, _record_eta, processor = self._run(encode_success=False)
+        fail.assert_called_once_with("MP3 encode failed.")
+        assert downloaded == []
+        assert processor._completion_event.is_set()
+
+    def test_failed_verification_blocks_downloaded(self):
+        downloaded, fail, _pdf, _record_eta, _processor = self._run(
+            encode_success=True, verify_result=(False, "truncated")
+        )
+        fail.assert_called_once_with("truncated")
+        assert downloaded == []
 
 
 class TestFailureReporting:

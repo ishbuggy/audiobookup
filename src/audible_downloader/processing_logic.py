@@ -21,6 +21,7 @@ from . import TEMP_DIR
 # Import the task-oriented functions and the global announcer
 from .chunked_conversion_logic import (
     _yield_progress,
+    encode_book_mp3,
     encode_chapter_chunk,
     merge_book_chunks,
     prepare_book_assets,
@@ -30,7 +31,7 @@ from .db import get_db_connection
 from .eta_estimator import estimate_conversion_time, record_conversion_time
 from .logger import log
 from .process_registry import process_registry
-from .settings import load_settings
+from .settings import load_settings, resolve_output_format
 
 # Import the task runner and task objects
 from .task_runner import Task, TaskPriority, task_runner
@@ -247,6 +248,9 @@ def rename_book_to_match_metadata(asin):
 
     author = row["custom_author"] or row["author"] or "Unknown Author"
     title = row["custom_title"] or row["title"] or "Unknown Title"
+    # Preserve the file's real extension (an MP3 book must stay ".mp3", not be
+    # relabeled ".m4b" by build_base_output_path's default).
+    ext = os.path.splitext(current_path)[1] or ".m4b"
     target = build_base_output_path(
         settings,
         asin,
@@ -254,6 +258,7 @@ def rename_book_to_match_metadata(asin):
         title,
         row["narrator"],
         row["publisher"],
+        ext=ext,
         series=row["series"],
         series_sequence=row["series_sequence"],
         release_date=row["release_date"],
@@ -274,10 +279,18 @@ def rename_book_to_match_metadata(asin):
     try:
         os.makedirs(os.path.dirname(target), exist_ok=True)
         shutil.move(current_path, target)
-        # Move a companion PDF alongside the audiobook, if present.
-        old_pdf = f"{os.path.splitext(current_path)[0]}.pdf"
-        if os.path.exists(old_pdf):
-            shutil.move(old_pdf, f"{os.path.splitext(target)[0]}.pdf")
+        # Move every sidecar sharing the old base name alongside the audiobook,
+        # so a rename keeps the companion PDF, cover, cue sheet, metadata JSON,
+        # and any retained raw master (+voucher) matched to the new file name.
+        old_base = os.path.splitext(current_path)[0]
+        new_base = os.path.splitext(target)[0]
+        for suffix in (".pdf", ".jpg", ".png", ".cue", ".metadata.json", ".aax", ".aaxc", ".voucher"):
+            old_sidecar = f"{old_base}{suffix}"
+            if os.path.exists(old_sidecar):
+                try:
+                    shutil.move(old_sidecar, f"{new_base}{suffix}")
+                except OSError as e:
+                    log.warning(f"RENAME ({asin}): Could not move sidecar '{old_sidecar}': {e}")
         with get_db_connection() as con:
             con.execute("UPDATE audiobooks SET filepath = ? WHERE asin = ?", (target, asin))
             con.commit()
@@ -610,6 +623,13 @@ class BookProcessor:
                 author = book_details["custom_author"] or author
                 title = book_details["custom_title"] or title
 
+            # The output format is the single axis that decides the container:
+            # "mp3" writes a .mp3, everything else ("original" remux / "m4b"
+            # re-encode) writes a .m4b. resolve_output_format() honors the legacy
+            # no_reencode flag, so old settings.json files still route correctly.
+            fmt = resolve_output_format(settings)
+            ext = ".mp3" if fmt == "mp3" else ".m4b"
+
             base_output_path = build_base_output_path(
                 settings,
                 self.asin,
@@ -617,6 +637,7 @@ class BookProcessor:
                 title,
                 book_details["narrator"],
                 book_details["publisher"],
+                ext=ext,
                 series=book_details["series"],
                 series_sequence=book_details["series_sequence"],
                 release_date=book_details["release_date"],
@@ -636,10 +657,13 @@ class BookProcessor:
             return
 
         # --- 2. Call the asset preparation logic ---
-        # In no-re-encode mode, tell PREPARE to skip the synthetic single-chapter
-        # auto-chunking (it only serves the re-encode we're about to skip).
-        no_reencode = settings.get("conversion", {}).get("no_reencode", False)
-        self.context, prepare_error = prepare_book_assets(self.asin, self.job_id, self.temp_dir, lossless=no_reencode)
+        # Only the "original" (lossless remux) format skips the synthetic
+        # single-chapter auto-chunking, since that chunking exists purely to
+        # parallelize the re-encode it doesn't do. AAC and MP3 both re-encode, so
+        # they keep the chunking. (MP3 encodes in a single pass but still wants
+        # the synthetic "Part N" navigation markers on a chapterless title.)
+        lossless = fmt == "original"
+        self.context, prepare_error = prepare_book_assets(self.asin, self.job_id, self.temp_dir, lossless=lossless)
 
         # Signal that the download/prepare phase is complete.
         # This will unblock the main worker in job_manager.py, allowing it
@@ -662,12 +686,15 @@ class BookProcessor:
             return
 
         # --- 3. Choose the conversion path ---
-        # Lossless (no-re-encode) requires the fast AAC-copy master (a ".m4b").
-        # If the decrypt fell back to FLAC, that codec can't be copied into an
-        # .m4b, so this one book quietly takes the normal re-encode path instead.
+        # The output format picks the finalize path:
+        #   original -> lossless remux (requires the fast AAC-copy ".m4b" master;
+        #               a FLAC fallback can't be -c copy'd into .m4b, so that one
+        #               book quietly re-encodes to .m4b via the chunk path below)
+        #   mp3      -> single-pass LAME encode (one task, no chunk/merge)
+        #   m4b      -> the per-chapter AAC re-encode + merge (default)
         master_is_aac = str(self.context.get("audio_file", "")).lower().endswith(".m4b")
-        if no_reencode and master_is_aac:
-            log.info(f"TASK-PREPARE ({self.asin}): No-re-encode mode — skipping encode, submitting remux task.")
+        if fmt == "original" and master_is_aac:
+            log.info(f"TASK-PREPARE ({self.asin}): Original format — skipping encode, submitting remux task.")
             _yield_progress(self.asin, "Finalizing (lossless)...", 90, self.job_id)
             remux_task = Task(
                 priority=TaskPriority.MERGE_BOOK,
@@ -676,10 +703,23 @@ class BookProcessor:
             )
             task_runner.submit_task(remux_task)
             return
-        if no_reencode:
+        if fmt == "mp3":
+            log.info(f"TASK-PREPARE ({self.asin}): MP3 format — submitting single-pass MP3 encode task.")
+            _yield_progress(self.asin, "Encoding MP3...", 30, self.job_id)
+            # One task per book at ENCODE_CHAPTER priority: it *is* the encode
+            # work, and per-book parallelism across a bulk job emerges from having
+            # one such task per book competing in the shared worker pool.
+            mp3_task = Task(
+                priority=TaskPriority.ENCODE_CHAPTER,
+                job_id=self.job_id,
+                func=self._encode_mp3_and_finalize,
+            )
+            task_runner.submit_task(mp3_task)
+            return
+        if fmt == "original":
             log.info(
-                f"TASK-PREPARE ({self.asin}): No-re-encode requested but the fast decrypt fell back to FLAC; "
-                f"re-encoding this title."
+                f"TASK-PREPARE ({self.asin}): Original format requested but the fast decrypt fell back to FLAC; "
+                f"re-encoding this title to .m4b."
             )
 
         # --- Spawn all the ENCODE_CHAPTER tasks ---
@@ -973,6 +1013,31 @@ class BookProcessor:
         # This is the final step, so we signal the main `run` method to unblock.
         self._completion_event.set()
         log.info(f"TASK-REMUX ({self.asin}): Finalization complete.")
+
+    def _encode_mp3_and_finalize(self):
+        """
+        ENCODE_CHAPTER task for MP3 output: single-pass LAME encode of the whole
+        book, then the same output verification and success finalization as the
+        other paths. Mirrors _remux_and_finalize (one task, no merge stage).
+        """
+        if self._cancelled():
+            return
+        log.info(f"TASK-MP3 ({self.asin}): Starting.")
+        conversion_start_time = time.time()
+
+        success = encode_book_mp3(self.asin, self.job_id, self.temp_dir, self.final_output_path, self.context)
+
+        if not success:
+            self._fail_or_cancel("MP3 encode failed.")
+        else:
+            # Single-threaded LAME rates aren't comparable to the parallel
+            # chunked-AAC encode, so keep them out of the shared ETA model
+            # (same reasoning as the remux path's record_eta=False).
+            self._finalize_success(conversion_start_time, record_eta=False)
+
+        # This is the final step, so we signal the main `run` method to unblock.
+        self._completion_event.set()
+        log.info(f"TASK-MP3 ({self.asin}): Finalization complete.")
 
     def _fail_or_cancel(self, error_message):
         """

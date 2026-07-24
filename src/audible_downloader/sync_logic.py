@@ -219,12 +219,12 @@ def _fetch_and_update_from_audible(job_id, sync_mode="DEEP"):
     return total_books
 
 
-# --- Private Helper 2: Scan the local filesystem for .m4b files ---
+# --- Private Helper 2: Scan the local filesystem for .m4b/.mp3 files ---
 def _scan_local_filesystem(job_id):
     """
-    Generator that scans the /data directory for .m4b files, using a cache
-    to speed up the process. Yields progress updates and returns a dictionary
-    mapping ASINs to file paths.
+    Generator that scans the /data directory for audiobook files (.m4b and
+    .mp3), using a cache to speed up the process. Yields progress updates and
+    returns a dictionary mapping ASINs to file paths.
     """
     yield from _yield_progress("Scanning local files...", 50, stage_text="Phase 2/3: Scanning Filesystem")
     AUDIOBOOK_LIBRARY_PATH = "/data"
@@ -245,7 +245,9 @@ def _scan_local_filesystem(job_id):
     files_to_scan = []
     for r, _, fs in os.walk(AUDIOBOOK_LIBRARY_PATH):
         for f in fs:
-            if f.endswith(".m4b"):
+            # MP3 output (Phase 5) produces .mp3 books, so the deep scan must
+            # match them too or MP3 titles stay invisible to filesystem sync.
+            if f.endswith((".m4b", ".mp3")):
                 files_to_scan.append(os.path.join(r, f))
 
     total_files_to_scan = len(files_to_scan)

@@ -10,6 +10,7 @@ from audible_downloader.chunked_conversion_logic import (
     _embed_cover_art,
     _should_auto_chunk,
     _summarize_subprocess_error,
+    build_mp3_flags,
     remux_book_lossless,
 )
 
@@ -315,3 +316,97 @@ class TestShouldAutoChunk:
     def test_short_single_chapter_book_is_not_chunked(self):
         # Below the duration trigger, even the re-encode path leaves it alone.
         assert _should_auto_chunk(False, "/t/master_intermediate.m4b", [{}], self.SHORT) is False
+
+
+class TestBuildMp3Flags:
+    """Phase 5: resolve the libmp3lame quality/rate flags from the mp3 settings
+    block. Pure function; the source bitrate/sample rate are probed by the caller
+    and passed in (either may be None)."""
+
+    def test_vbr_default(self):
+        # target == "quality" -> -q:a from vbr_quality; High -> level 0.
+        flags = build_mp3_flags({"target": "quality", "vbr_quality": 2, "encoder_quality": "High"}, None, None)
+        assert flags == ["-q:a", "2", "-compression_level", "0"]
+
+    def test_vbr_custom_quality(self):
+        flags = build_mp3_flags({"target": "quality", "vbr_quality": 5}, None, None)
+        assert flags[:2] == ["-q:a", "5"]
+
+    def test_cbr_no_abr_flag(self):
+        # constant_bitrate True -> true CBR, no -abr; match off keeps fixed kbps.
+        flags = build_mp3_flags(
+            {"target": "bitrate", "bitrate_kbps": 192, "constant_bitrate": True, "match_source_bitrate": False},
+            None,
+            None,
+        )
+        assert flags == ["-b:a", "192k", "-compression_level", "0"]
+        assert "-abr" not in flags
+
+    def test_abr_adds_abr_flag(self):
+        # constant_bitrate False -> ABR (adds -abr 1).
+        flags = build_mp3_flags(
+            {"target": "bitrate", "bitrate_kbps": 128, "constant_bitrate": False, "match_source_bitrate": False},
+            None,
+            None,
+        )
+        assert flags[:4] == ["-b:a", "128k", "-abr", "1"]
+
+    def test_match_source_rounds_up_to_next_standard(self):
+        # 130 kbps source -> next standard >= 130 is 160.
+        flags = build_mp3_flags(
+            {"target": "bitrate", "match_source_bitrate": True, "constant_bitrate": True}, 130000, None
+        )
+        assert flags[:2] == ["-b:a", "160k"]
+
+    def test_match_source_exact_standard_kept(self):
+        # 128 kbps source -> exactly 128 (>= itself), not bumped up.
+        flags = build_mp3_flags(
+            {"target": "bitrate", "match_source_bitrate": True, "constant_bitrate": True}, 128000, None
+        )
+        assert flags[:2] == ["-b:a", "128k"]
+
+    def test_match_source_caps_at_320(self):
+        # A source above the LAME ceiling clamps to 320.
+        flags = build_mp3_flags(
+            {"target": "bitrate", "match_source_bitrate": True, "constant_bitrate": True}, 400000, None
+        )
+        assert flags[:2] == ["-b:a", "320k"]
+
+    def test_match_source_unknown_falls_back_to_fixed(self):
+        # source bitrate None -> use the fixed bitrate_kbps as-is.
+        flags = build_mp3_flags(
+            {"target": "bitrate", "bitrate_kbps": 256, "match_source_bitrate": True, "constant_bitrate": True},
+            None,
+            None,
+        )
+        assert flags[:2] == ["-b:a", "256k"]
+
+    def test_downsample_mono_adds_ac(self):
+        flags = build_mp3_flags({"target": "quality", "downsample_mono": True}, None, None)
+        assert "-ac" in flags and flags[flags.index("-ac") + 1] == "1"
+
+    def test_sample_rate_gate_downsamples_when_source_exceeds(self):
+        flags = build_mp3_flags({"target": "quality", "max_sample_rate": 44100}, None, 48000)
+        assert "-ar" in flags and flags[flags.index("-ar") + 1] == "44100"
+
+    def test_sample_rate_gate_no_upsample_at_or_below_cap(self):
+        # Equal to the cap and below it both leave -ar off (never upsample).
+        assert "-ar" not in build_mp3_flags({"target": "quality", "max_sample_rate": 44100}, None, 44100)
+        assert "-ar" not in build_mp3_flags({"target": "quality", "max_sample_rate": 44100}, None, 22050)
+
+    def test_sample_rate_gate_unknown_source_no_ar(self):
+        assert "-ar" not in build_mp3_flags({"target": "quality", "max_sample_rate": 44100}, None, None)
+
+    @pytest.mark.parametrize(
+        ("encoder_quality", "level"),
+        [("High", "0"), ("Standard", "2"), ("Fast", "7"), ("Nonsense", "0")],
+    )
+    def test_compression_level_mapping(self, encoder_quality, level):
+        flags = build_mp3_flags({"target": "quality", "encoder_quality": encoder_quality}, None, None)
+        assert flags[flags.index("-compression_level") + 1] == level
+
+    def test_empty_settings_use_defaults(self):
+        # A missing/empty mp3 block resolves to the documented defaults: VBR q2,
+        # High effort, no mono, no sample-rate cap change.
+        flags = build_mp3_flags({}, None, None)
+        assert flags == ["-q:a", "2", "-compression_level", "0"]

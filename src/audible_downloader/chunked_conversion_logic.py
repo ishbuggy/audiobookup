@@ -38,6 +38,11 @@ progress_lock = Lock()
 AUTO_CHUNK_TRIGGER_SEC = 1800
 AUTO_CHUNK_SIZE_SEC = 900
 
+# The MP3 (LAME) frame bitrates, ascending. When "match source bitrate" is on we
+# round the master's bitrate UP to the smallest of these that isn't lower, so a
+# re-encode never throws away bits the source had (capped at 320, LAME's ceiling).
+MP3_STANDARD_BITRATES_KBPS = [32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320]
+
 
 def _should_auto_chunk(lossless, audio_file, chapters_list, total_duration_sec):
     """
@@ -715,6 +720,11 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             "chapter_file": chapter_txt_path,
             "chapters": chapters_list,
             "book_info": book_info,
+            # Master duration in seconds, carried so the single-pass MP3 encode
+            # (Phase 5) has a denominator for its -progress percentage without a
+            # second ffprobe. (Phase 6's branding trim will store the trimmed
+            # length here instead.)
+            "total_duration_sec": total_duration_sec,
             # Populated only when retain_aax is on (both None otherwise); copied
             # next to the finished book by BookProcessor._place_sidecar_files.
             "raw_audio_file": retained_raw_audio_file,
@@ -936,6 +946,213 @@ def remux_book_lossless(asin, job_id, temp_dir, final_output_path, context):
 
     except subprocess.CalledProcessError as e:
         log.error(f"REMUX ({asin}): Lossless remux failed. Stderr:\n{e.stderr}")
+        return False
+    finally:
+        if process:
+            process_registry.unregister(job_id, process)
+
+
+def build_mp3_flags(mp3_settings, source_bitrate_bps, source_sample_rate):
+    """
+    Resolve the ffmpeg libmp3lame quality/rate flags from the `conversion.mp3`
+    settings block. Pure (no I/O) so the whole matrix is unit-testable; the
+    source bitrate/sample rate are probed once by the caller and passed in
+    (either may be None when the probe couldn't read them).
+
+    Order of the emitted flags:
+      1. Quality axis — VBR (`-q:a N`) when target == "quality", else CBR/ABR
+         (`-b:a Nk`, plus `-abr 1` for ABR when not constant_bitrate). With
+         match_source_bitrate on and a known source bitrate, the target kbps is
+         rounded up to the nearest standard LAME bitrate (>= source, capped 320).
+      2. `-compression_level` from encoder_quality (LAME effort; 0 = best).
+      3. `-ac 1` when downsample_mono.
+      4. `-ar N` ONLY when the source sample rate exceeds max_sample_rate (never
+         upsample a source that's already at/below the cap).
+    """
+    mp3 = mp3_settings or {}
+    flags = []
+
+    target = mp3.get("target", "quality")
+    if target == "bitrate":
+        kbps = mp3.get("bitrate_kbps", 128)
+        if mp3.get("match_source_bitrate", True) and source_bitrate_bps:
+            needed_kbps = source_bitrate_bps / 1000
+            kbps = next((b for b in MP3_STANDARD_BITRATES_KBPS if b >= needed_kbps), 320)
+        flags += ["-b:a", f"{kbps}k"]
+        # ABR (variable around a target) unless the user asked for true CBR.
+        if not mp3.get("constant_bitrate", False):
+            flags += ["-abr", "1"]
+    else:
+        flags += ["-q:a", str(mp3.get("vbr_quality", 2))]
+
+    # LAME effort. "High" spends the most CPU for the best quality (level 0).
+    compression = {"High": "0", "Standard": "2", "Fast": "7"}.get(mp3.get("encoder_quality", "High"), "0")
+    flags += ["-compression_level", compression]
+
+    if mp3.get("downsample_mono", False):
+        flags += ["-ac", "1"]
+
+    max_sample_rate = mp3.get("max_sample_rate", 44100)
+    if source_sample_rate and max_sample_rate and source_sample_rate > max_sample_rate:
+        flags += ["-ar", str(max_sample_rate)]
+
+    return flags
+
+
+def _probe_source_audio_params(master_file, job_id):
+    """
+    Read the master audio stream's bit_rate and sample_rate via one ffprobe.
+    Returns (bit_rate_bps, sample_rate_hz) as ints, each None when the value is
+    absent (e.g. a FLAC master often reports no stream bit_rate) or the probe
+    fails. Registered with process_registry so a cancel can reach it; a None
+    result is acceptable — build_mp3_flags falls back per its spec.
+    """
+    probe_cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=bit_rate,sample_rate",
+        "-of",
+        "default=noprint_wrappers=1",
+        master_file,
+    ]
+    res = _run_registered(probe_cmd, job_id, encoding="utf-8", errors="replace")
+    if res.returncode != 0:
+        return None, None
+
+    def _parse_int(raw):
+        raw = (raw or "").strip()
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    values = {}
+    for line in res.stdout.splitlines():
+        if "=" in line:
+            key, _, val = line.partition("=")
+            values[key.strip()] = val.strip()
+
+    return _parse_int(values.get("bit_rate")), _parse_int(values.get("sample_rate"))
+
+
+def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context):
+    """
+    Single-pass MP3 (LAME) encode of the whole book: one ffmpeg run muxes the
+    decrypted master's audio, the FFMETADATA chapters/tags, and (when present)
+    the cover as an id3v2 APIC attached picture straight into the final .mp3.
+
+    Deliberately NOT chunked-parallel like the AAC path: concatenating
+    independently-encoded MP3 chunks accumulates LAME encoder-delay/padding gaps
+    and chapter drift, so the whole title is encoded in one gapless pass. There
+    is no `-movflags` and no AtomicParsley here (both are mp4-only) — MP3 carries
+    chapters as id3v2 CHAP frames and the cover as APIC in the same pass.
+
+    Structured like remux_book_lossless (Popen + process_registry in try/finally,
+    -15 -> cancelled/False, stderr summarized on failure). Progress is driven by
+    ffmpeg's `-progress pipe:1` stream, occupying the 30..90 band; the final
+    verify/finalize takes it to 100.
+
+    Returns True on success, False on failure or cancellation.
+    """
+    log.info(f"MP3 ({asin}): Starting single-pass MP3 encode...")
+    _yield_progress(asin, "Encoding MP3...", 30, job_id)
+
+    settings = load_settings()
+    mp3_settings = settings.get("conversion", {}).get("mp3", {})
+
+    master = context["audio_file"]
+    chapter_file = context["chapter_file"]
+    cover_file = context.get("cover_file")
+    total_duration_sec = context.get("total_duration_sec")
+    have_cover = bool(cover_file and os.path.exists(cover_file))
+
+    source_bitrate_bps, source_sample_rate = _probe_source_audio_params(master, job_id)
+    quality_flags = build_mp3_flags(mp3_settings, source_bitrate_bps, source_sample_rate)
+
+    # Input order: 0 = audio master, 1 = FFMETADATA, 2 = cover (when present).
+    command = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1"]
+    command += ["-i", master, "-i", chapter_file]
+    if have_cover:
+        command += ["-i", cover_file]
+    command += ["-map", "0:a", "-map_metadata", "1", "-map_chapters", "1"]
+    if have_cover:
+        command += [
+            "-map",
+            "2:v",
+            "-c:v",
+            "copy",
+            "-disposition:v",
+            "attached_pic",
+            "-metadata:s:v",
+            "title=Album cover",
+            "-metadata:s:v",
+            "comment=Cover (front)",
+        ]
+    command += ["-c:a", "libmp3lame"] + quality_flags + ["-id3v2_version", "3", final_output_path]
+
+    process = None
+    stderr_chunks = []
+    try:
+        log.debug(f"MP3 ({asin}): Command: {' '.join(command)}")
+        process = subprocess.Popen(
+            command,
+            cwd=temp_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        process_registry.register(job_id, process)
+
+        # ffmpeg writes progress to stdout (pipe:1) and errors to stderr. Drain
+        # stderr concurrently so a full stderr pipe can't deadlock the child
+        # while we read progress; keep it for the failure summary.
+        def _drain_stderr():
+            if process.stderr:
+                stderr_chunks.append(process.stderr.read())
+
+        stderr_thread = Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
+
+        last_percent = -1
+        for line in iter(process.stdout.readline, ""):
+            line = line.strip()
+            # ffmpeg's out_time_ms is actually MICROSECONDS (long-standing quirk).
+            if line.startswith("out_time_ms=") and total_duration_sec:
+                try:
+                    out_sec = int(line.split("=", 1)[1]) / 1_000_000
+                except ValueError:
+                    continue
+                progress = 30 + min(60, int(out_sec / total_duration_sec * 60))
+                if progress != last_percent:
+                    last_percent = progress
+                    _yield_progress(asin, "Encoding MP3...", progress, job_id)
+
+        returncode = process.wait()
+        stderr_thread.join()
+
+        if returncode != 0:
+            if returncode == -15:
+                log.info(f"MP3 ({asin}): Encode cancelled.")
+                return False
+            stderr_text = "".join(stderr_chunks)
+            reason = _summarize_subprocess_error(
+                subprocess.CalledProcessError(returncode, command, stderr=stderr_text),
+                "MP3 encode failed.",
+            )
+            log.error(f"MP3 ({asin}): Encode failed: {reason}")
+            return False
+
+        log.info(f"MP3 ({asin}): Successfully encoded MP3 at {final_output_path}")
+        return True
+
+    except OSError as e:
+        log.error(f"MP3 ({asin}): Could not run ffmpeg for MP3 encode: {e}")
         return False
     finally:
         if process:
