@@ -39,7 +39,7 @@ Every book in your library shows one of four statuses:
 
 - **Downloaded:** The book has been successfully converted and is on disk.
 - **New:** The book is in your Audible library but hasn't been downloaded yet.
-- **Missing:** The book was downloaded previously, but its file can no longer be found (for example, it was moved or deleted outside the app). A Deep Sync or the Verify Files tool will catch this.
+- **Missing:** The book was downloaded previously, but its file can no longer be found (for example, it was moved or deleted outside the app). A Deep Sync is what notices this and sets the status. The Verify Files tool spots a vanished file too, but flags it as **Error** rather than Missing.
 - **Error:** The most recent download or conversion attempt failed. Details are available in the book's detail view and the activity log.
 
 ## The automation loop
@@ -51,7 +51,7 @@ The whole workflow above can run hands-free. Scheduled Fast Sync, Deep Sync, and
 A few terms that come up throughout the app and the rest of these docs:
 
 - **Jobs:** AudioBookup runs one job at a time — a Sync, a Download, or a Verify (library-integrity check) — tracked with live progress and kept in a searchable history.
-- **Sidecar files:** Optional extra files saved alongside a converted audiobook, sharing its filename: a cover image, a `metadata.json`, a `.cue` chapter sheet, and/or the original undecrypted source file. All are off by default.
+- **Sidecar files:** Optional extra files saved alongside a converted audiobook, sharing its filename. The Settings page's **Sidecar Files** section covers a cover image, a `metadata.json`, and a `.cue` chapter sheet — all off by default. Two more sit under **Downloading** instead: the book's companion PDF (on by default) and the original undecrypted source file.
 - **Advanced Mode:** A single toggle on the Settings page that reveals the full set of expert options — download-quality requests, MP3 encoder tuning, chapter/metadata cleanups, sidecar files, separate folder/file naming templates, and more — without cluttering the page for everyday use.
 - **Output formats:** **AAC `.m4b`** re-encodes for precision and universal player compatibility; **Original** is a lossless remux with no re-encoding step; **MP3** encodes a single file per book, readable by effectively any player.
 
