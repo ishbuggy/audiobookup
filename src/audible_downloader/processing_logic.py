@@ -197,7 +197,7 @@ def build_base_output_path(
 
     # Trim a long subtitle before sanitization (which rewrites the ':' separator).
     raw_title = title or "Unknown Title"
-    if settings.get("naming", {}).get("truncate_subtitle", False):
+    if naming.get("truncate_subtitle", False):
         raw_title = _strip_subtitle(raw_title)
 
     # Existing tags: always present, always sanitized, "Unknown ..." on missing.

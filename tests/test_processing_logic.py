@@ -1514,3 +1514,37 @@ class TestApplyFileTimestamps:
         before = book.stat().st_mtime
         self._run(processor, "release_date")
         assert book.stat().st_mtime == before
+
+
+class TestFinalizeSuccessStampOrdering:
+    """Phase 9 (W2): _apply_file_timestamps must run AFTER the sidecars are
+    placed. The stamp only touches files that already exist on disk, so a
+    reordering that groups it with the other settings-gated steps would leave
+    every .cue / .metadata.json / retained .aax carrying the download time while
+    the audiobook itself carries the release date — with the rest of the suite
+    still green. This test pins the ordering itself."""
+
+    def test_timestamps_applied_after_sidecars(self):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = "/data/A/Title/Title.m4b"
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+
+        # A single parent mock records the finalization calls in one shared
+        # sequence, so mock_calls reflects the real invocation order.
+        recorder = mock.MagicMock()
+        with (
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "_yield_progress"),
+            mock.patch.object(processor, "_verify_output_file", return_value=(True, None)),
+            mock.patch.object(processor, "_place_supplementary_pdf") as pdf,
+            mock.patch.object(processor, "_place_sidecar_files") as sidecars,
+            mock.patch.object(processor, "_apply_file_timestamps") as stamp,
+        ):
+            recorder.attach_mock(pdf, "pdf")
+            recorder.attach_mock(sidecars, "sidecars")
+            recorder.attach_mock(stamp, "stamp")
+            processor._finalize_success(conversion_start_time=0, record_eta=False)
+
+        called = [name for name, _args, _kwargs in recorder.mock_calls]
+        assert called == ["pdf", "sidecars", "stamp"]
