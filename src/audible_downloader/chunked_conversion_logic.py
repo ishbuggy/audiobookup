@@ -39,6 +39,11 @@ progress_lock = Lock()
 AUTO_CHUNK_TRIGGER_SEC = 1800
 AUTO_CHUNK_SIZE_SEC = 900
 
+# Upper bound on the COMBINED Audible brand intro + outro span the trim will act
+# on. Real branding is roughly 2s + 5s; a combined span past a minute is corrupt
+# chapter-JSON data, not branding. Milliseconds.
+MAX_PLAUSIBLE_BRAND_SPAN_MS = 60_000
+
 # The MP3 (LAME) frame bitrates, ascending. When "match source bitrate" is on we
 # round the master's bitrate UP to the smallest of these that isn't lower, so a
 # re-encode never throws away bits the source had (capped at 320, LAME's ceiling).
@@ -624,15 +629,29 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
         trim_intro_ms = 0
         trim_outro_ms = 0
         if strip_branding and resolve_output_format(settings) != "original" and (brand_intro_ms or brand_outro_ms):
-            log.info(
-                f"PREPARE ({asin}): Trimming Audible branding (intro {brand_intro_ms}ms, outro {brand_outro_ms}ms)."
-            )
-            chapters_list, effective_total_ms = apply_branding_trim(
-                chapters_list, brand_intro_ms, brand_outro_ms, total_duration_ms
-            )
-            effective_total_sec = effective_total_ms / 1000.0
-            trim_intro_ms = brand_intro_ms
-            trim_outro_ms = brand_outro_ms
+            # Plausibility guard on the reported spans. A combined span past
+            # MAX_PLAUSIBLE_BRAND_SPAN_MS — or one long enough to swallow the
+            # whole title — is corrupt chapter-JSON data, and trimming on it
+            # would leave a negative effective total: every chapter clamped to
+            # zero length on the re-encode path, a negative -t on the MP3 path.
+            # Skip the trim entirely and ship the untrimmed book, holding the
+            # same line as _read_brand_span: a bad value never cuts audio.
+            brand_span_ms = brand_intro_ms + brand_outro_ms
+            if brand_span_ms > MAX_PLAUSIBLE_BRAND_SPAN_MS or brand_span_ms >= total_duration_ms:
+                log.warning(
+                    f"PREPARE ({asin}): Implausible Audible branding spans (intro {brand_intro_ms}ms, "
+                    f"outro {brand_outro_ms}ms, book {total_duration_ms}ms); skipping the branding trim."
+                )
+            else:
+                log.info(
+                    f"PREPARE ({asin}): Trimming Audible branding (intro {brand_intro_ms}ms, outro {brand_outro_ms}ms)."
+                )
+                chapters_list, effective_total_ms = apply_branding_trim(
+                    chapters_list, brand_intro_ms, brand_outro_ms, total_duration_ms
+                )
+                effective_total_sec = effective_total_ms / 1000.0
+                trim_intro_ms = brand_intro_ms
+                trim_outro_ms = brand_outro_ms
 
         # 1. Sanitize Chapter Durations
         if chapters_list:

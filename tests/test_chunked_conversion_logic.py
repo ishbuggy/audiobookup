@@ -367,6 +367,22 @@ class _FakeWriteHandle(io.StringIO):
         return False
 
 
+def _capture_chunk_command(chunk_info, context):
+    """Run encode_chapter_chunk against a mocked ffmpeg and return the command
+    list it built."""
+    proc = mock.MagicMock()
+    proc.returncode = 0
+    proc.communicate.return_value = (b"", b"")
+    with (
+        mock.patch.object(ccl, "load_settings", return_value={}),
+        mock.patch.object(ccl.subprocess, "Popen", return_value=proc) as popen,
+        mock.patch.object(ccl.process_registry, "register"),
+        mock.patch.object(ccl.process_registry, "unregister"),
+    ):
+        ccl.encode_chapter_chunk("B0X", 1, "/tmp/x", chunk_info, context)
+    return popen.call_args.args[0]
+
+
 class TestBrandingTrimPipeline:
     """Phase 6 end-to-end through prepare_book_assets: extraction of the brand
     spans, the three-way gate, and the trimmed values flowing into the sanitize
@@ -395,20 +411,38 @@ class TestBrandingTrimPipeline:
         }
     }
 
-    def _run_prepare(self, settings, intro_ms=None, outro_ms=None, snake_case=False):
+    def _run_prepare(
+        self,
+        settings,
+        intro_ms=None,
+        outro_ms=None,
+        snake_case=False,
+        chapters=None,
+        total_sec=None,
+        flac_master=False,
+    ):
         """Drive prepare_book_assets to completion, returning (context, error,
         written_files). `intro_ms`/`outro_ms` are injected into the chapter JSON's
-        chapter_info block (camelCase unless `snake_case`); None omits the key."""
+        chapter_info block (camelCase unless `snake_case`); None omits the key.
+        `flac_master` fails the AAC-copy decrypt so the FLAC fallback produces the
+        master instead."""
         intro_key, outro_key = ("brandIntroDurationMs", "brandOutroDurationMs")
         if snake_case:
             intro_key, outro_key = ("brand_intro_duration_ms", "brand_outro_duration_ms")
-        chapter_info = {"chapters": self.CHAPTERS}
+        chapter_info = {"chapters": self.CHAPTERS if chapters is None else chapters}
         if intro_ms is not None:
             chapter_info[intro_key] = intro_ms
         if outro_ms is not None:
             chapter_info[outro_key] = outro_ms
         chapter_json = json.dumps({"content_metadata": {"chapter_info": chapter_info}})
         voucher_json = '{"content_license": {"license_response": {"key": "K", "iv": "IV"}}}'
+
+        total_sec = total_sec or self.TOTAL_SEC
+        book_info = json.loads(json.dumps(self.BOOK_INFO))
+        # Keep the API runtime consistent with the probed duration so the
+        # post-decrypt integrity check passes. Under a minute it resolves to 0,
+        # which disables that check entirely (the real code skips a falsy value).
+        book_info["item"]["runtime_length_min"] = int(float(total_sec) // 60)
 
         # Download Popen: no progress lines, exits 0. Decrypt Popen: exits 0.
         download_proc = mock.MagicMock()
@@ -427,13 +461,22 @@ class TestBrandingTrimPipeline:
         ]
 
         # _run_registered order: metadata fetch, post-decrypt duration probe,
-        # seek verification (AAC-copy strategy), Phase 2 total-duration probe.
+        # seek verification (AAC-copy strategy only), Phase 2 total-duration probe.
         run_results = [
-            subprocess.CompletedProcess(["audible", "api"], 0, json.dumps(self.BOOK_INFO), ""),
-            subprocess.CompletedProcess(["ffprobe"], 0, self.TOTAL_SEC, ""),
+            subprocess.CompletedProcess(["audible", "api"], 0, json.dumps(book_info), ""),
+            subprocess.CompletedProcess(["ffprobe"], 0, total_sec, ""),
             subprocess.CompletedProcess(["ffmpeg"], 0, "", ""),
-            subprocess.CompletedProcess(["ffprobe"], 0, self.TOTAL_SEC, ""),
+            subprocess.CompletedProcess(["ffprobe"], 0, total_sec, ""),
         ]
+        popen_procs = [download_proc, decrypt_proc]
+        if flac_master:
+            # The AAC-copy decrypt fails, so the FLAC strategy runs instead. FLAC
+            # skips the seek verification, so that probe result drops out too.
+            failed_decrypt = mock.MagicMock()
+            failed_decrypt.returncode = 1
+            failed_decrypt.communicate.return_value = (b"", b"boom")
+            popen_procs = [download_proc, failed_decrypt, decrypt_proc]
+            run_results.pop(2)
 
         written = {}
 
@@ -453,7 +496,7 @@ class TestBrandingTrimPipeline:
 
         with (
             mock.patch.object(ccl, "load_settings", return_value=settings),
-            mock.patch.object(ccl.subprocess, "Popen", side_effect=[download_proc, decrypt_proc]),
+            mock.patch.object(ccl.subprocess, "Popen", side_effect=popen_procs),
             mock.patch.object(ccl, "_run_registered", side_effect=run_results),
             mock.patch.object(ccl.process_registry, "register"),
             mock.patch.object(ccl.process_registry, "unregister"),
@@ -551,6 +594,72 @@ class TestBrandingTrimPipeline:
         assert context["total_duration_sec"] == 3_593.0
         assert context["trim_intro_ms"] == 2_000
 
+    def test_implausibly_long_spans_are_refused(self):
+        # W1: a combined span past a minute is corrupt chapter JSON, not
+        # branding. The book must come out exactly as it would with the trim off.
+        settings = {"conversion": {"output_format": "m4b", "chapters": {"strip_audible_branding": True}}}
+        context, error, _ = self._run_prepare(settings, intro_ms=40_000, outro_ms=25_000)
+        assert error is None
+        assert [c["start_offset_ms"] for c in context["chapters"]] == [0, 600_000, 1_200_000]
+        assert [c["length_ms"] for c in context["chapters"]] == [600_000, 600_000, 2_400_000]
+        assert context["total_duration_sec"] == 3_600.0
+        assert context["trim_intro_ms"] == 0
+        assert context["trim_outro_ms"] == 0
+
+    def test_spans_swallowing_the_whole_book_are_refused(self):
+        # W1: spans that reach (or pass) the book's own length would leave a
+        # negative effective total — zero-length chapters / a negative MP3 -t.
+        settings = {"conversion": {"output_format": "m4b", "chapters": {"strip_audible_branding": True}}}
+        short_book = [{"title": "One", "start_offset_ms": 0, "length_ms": 30_000}]
+        context, error, _ = self._run_prepare(
+            settings, intro_ms=20_000, outro_ms=15_000, chapters=short_book, total_sec="30.0"
+        )
+        assert error is None
+        assert context["chapters"] == [{"title": "One", "start_offset_ms": 0, "length_ms": 30_000}]
+        assert context["total_duration_sec"] == 30.0
+        assert context["trim_intro_ms"] == 0
+
+    def test_auto_chunked_book_chunks_within_the_trimmed_timeline(self):
+        # A chapterless/single-chapter book long enough to auto-chunk: the
+        # synthetic "Part N" spans must be cut from the TRIMMED timeline, and the
+        # per-chunk seek must add the intro back to reach the right source audio.
+        settings = {"conversion": {"output_format": "m4b", "chapters": {"strip_audible_branding": True}}}
+        single = [{"title": "Chapter 1", "start_offset_ms": 0, "length_ms": 3_600_000}]
+        context, error, _ = self._run_prepare(settings, intro_ms=2_043, outro_ms=5_061, chapters=single)
+
+        assert error is None
+        effective_total_ms = 3_600_000 - 2_043 - 5_061
+        chunks = context["chapters"]
+        assert [c["title"] for c in chunks] == ["Part 1", "Part 2", "Part 3", "Part 4"]
+        assert [c["start_offset_ms"] for c in chunks] == [0, 900_000, 1_800_000, 2_700_000]
+        # No chunk may run past the end of the trimmed output, and the last one
+        # ends exactly there.
+        for chunk in chunks:
+            assert chunk["start_offset_ms"] + chunk["length_ms"] <= effective_total_ms
+        assert chunks[-1]["start_offset_ms"] + chunks[-1]["length_ms"] == pytest.approx(effective_total_ms, abs=1)
+        assert context["total_duration_sec"] == pytest.approx(effective_total_ms / 1000.0)
+
+        # The final chunk, as processing_logic would submit it.
+        chunk_info = {
+            "index": 3,
+            "total_chunks": 4,
+            "start": chunks[-1]["start_offset_ms"] / 1000.0,
+            "duration": chunks[-1]["length_ms"] / 1000.0,
+        }
+        cmd = _capture_chunk_command(chunk_info, context)
+        assert float(cmd[cmd.index("-ss") + 1]) == pytest.approx(2_702.043)
+
+    def test_flac_fallback_master_trims_identically(self):
+        # The trim math is master-agnostic: a title whose AAC-copy decrypt fell
+        # back to FLAC takes the same re-encode path and the same timeline.
+        settings = {"conversion": {"output_format": "m4b", "chapters": {"strip_audible_branding": True}}}
+        context, error, _ = self._run_prepare(settings, intro_ms=2_043, outro_ms=5_061, flac_master=True)
+        assert error is None
+        assert context["audio_file"].endswith(".flac")
+        assert [c["start_offset_ms"] for c in context["chapters"]] == [0, 597_957, 1_197_957]
+        assert context["total_duration_sec"] == 3_592.896
+        assert context["trim_intro_ms"] == 2_043
+
 
 class TestEncodeChapterChunkTrim:
     """Phase 6 seek compensation: chunk starts are output-timeline, so the source
@@ -558,30 +667,43 @@ class TestEncodeChapterChunkTrim:
     what it has always been."""
 
     CHUNK = {"index": 0, "total_chunks": 3, "start": 597.957, "duration": 600.0}
+    MASTER = "/tmp/x/master_intermediate.m4b"
 
     def _run(self, context):
-        proc = mock.MagicMock()
-        proc.returncode = 0
-        proc.communicate.return_value = (b"", b"")
-        with (
-            mock.patch.object(ccl, "load_settings", return_value={}),
-            mock.patch.object(ccl.subprocess, "Popen", return_value=proc) as popen,
-            mock.patch.object(ccl.process_registry, "register"),
-            mock.patch.object(ccl.process_registry, "unregister"),
-        ):
-            ccl.encode_chapter_chunk("B0X", 1, "/tmp/x", self.CHUNK, context)
-        return popen.call_args.args[0]
+        return _capture_chunk_command(self.CHUNK, context)
 
     def test_no_trim_seeks_to_the_chunk_start(self):
-        context = {"decryption_args": [], "audio_file": "/tmp/x/master_intermediate.m4b"}
+        # Pinned as a whole command: with the trim inactive this must stay
+        # byte-for-byte what the AAC path has always run.
+        context = {"decryption_args": [], "audio_file": self.MASTER}
         cmd = self._run(context)
-        assert cmd[cmd.index("-ss") + 1] == "597.957"
-        assert cmd[cmd.index("-t") + 1] == "600.0"
+        assert cmd == [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            "597.957",
+            "-i",
+            self.MASTER,
+            "-t",
+            "600.0",
+            "-map",
+            "0:a",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-map_metadata",
+            "-1",
+            "/tmp/x/chunk_000.m4b",
+        ]
 
     def test_trim_adds_the_intro_back_to_the_seek(self):
         context = {
             "decryption_args": [],
-            "audio_file": "/tmp/x/master_intermediate.m4b",
+            "audio_file": self.MASTER,
             "trim_intro_ms": 2_043,
         }
         cmd = self._run(context)
