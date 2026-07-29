@@ -67,6 +67,10 @@ DEFAULT_SETTINGS = {
         "save_metadata_json": False,
         "create_cue_sheet": False,
         "retain_aax": False,
+        # Timestamp stamped onto the finished file (and its sidecars) at finalize
+        # time (Phase 9 consumer). Enum: "none" | "release_date" | "purchase_date".
+        # "none" is today's behavior — the file keeps its real creation mtime.
+        "file_timestamp_source": "none",
         # When true, strip DRM only and keep Audible's original audio: mux
         # chapters/metadata/cover onto the decrypted AAC master with -c copy,
         # skipping the per-chapter re-encode (much faster, no quality loss).

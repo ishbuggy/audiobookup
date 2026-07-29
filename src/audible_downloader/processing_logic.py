@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from datetime import datetime
 from threading import Event, Lock
 
 from . import TEMP_DIR
@@ -48,6 +49,12 @@ _reservation_lock = Lock()
 # A finished .m4b is far larger than this floor; it only catches an absent or
 # empty/stub output — the "ghost book" that reported success but isn't on disk.
 _MIN_OUTPUT_BYTES = 64 * 1024
+
+# Every file that can end up sharing a finished audiobook's base name: the
+# companion PDF, cover image, cue sheet, metadata JSON, and a retained raw
+# master (+ its voucher). Anything that follows the audiobook — a rename moving
+# it, a timestamp stamp — walks this list so the two can't drift apart.
+_SIDECAR_SUFFIXES = (".pdf", ".jpg", ".png", ".cue", ".metadata.json", ".aax", ".aaxc", ".voucher")
 
 
 def _probe_duration_seconds(filepath, job_id=None):
@@ -120,6 +127,26 @@ def _resolve_optional_tag(value):
     return _sanitize_filename(text)
 
 
+def _parse_timestamp_date(value):
+    """
+    Parse one of Audible's date fields into epoch seconds for os.utime, or None
+    when it can't be used. Only the leading "YYYY-MM-DD" is read, which covers
+    both shapes the API returns: `release_date` is already a bare date, while
+    `purchase_date` is a full ISO timestamp ("2023-04-05T06:07:08.000Z"). Sync's
+    "N/A" placeholder and anything unparseable return None so the caller can skip
+    silently rather than stamping a bogus time.
+    """
+    if not value:
+        return None
+    text = str(value)[:10]
+    if text == "N/A":
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").timestamp()
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
 def build_base_output_path(
     settings,
     asin,
@@ -149,8 +176,24 @@ def build_base_output_path(
     render empty when the value is missing (None/""/"N/A"). After substitution the
     rendered path is cleaned segment-by-segment so a missing tag drops its folder
     level cleanly instead of leaving an "N/A" or dangling-separator directory.
+
+    Template composition: `naming.folder_template` and `naming.file_template` are
+    an optional split of the single `naming.template`. They take effect only when
+    BOTH are non-empty, in which case the effective template is
+    "<folder_template>/<file_template>" and `naming.template` is ignored. Any other
+    combination (one side blank, both blank — the shipped default) falls back to
+    `naming.template`, so a default install renders exactly as it always has. The
+    composed string then goes through the same substitution and cleanup below.
     """
-    template = settings.get("naming", {}).get("template", "{author}/{title}/{author} - {title}")
+    naming = settings.get("naming", {})
+    template = naming.get("template", "{author}/{title}/{author} - {title}")
+
+    # The split pair overrides `template` only as a complete pair; a half-filled
+    # split would otherwise silently drop the user's folders or filename.
+    folder_template = (naming.get("folder_template", "") or "").strip()
+    file_template = (naming.get("file_template", "") or "").strip()
+    if folder_template and file_template:
+        template = f"{folder_template}/{file_template}"
 
     # Trim a long subtitle before sanitization (which rewrites the ':' separator).
     raw_title = title or "Unknown Title"
@@ -284,7 +327,7 @@ def rename_book_to_match_metadata(asin):
         # and any retained raw master (+voucher) matched to the new file name.
         old_base = os.path.splitext(current_path)[0]
         new_base = os.path.splitext(target)[0]
-        for suffix in (".pdf", ".jpg", ".png", ".cue", ".metadata.json", ".aax", ".aaxc", ".voucher"):
+        for suffix in _SIDECAR_SUFFIXES:
             old_sidecar = f"{old_base}{suffix}"
             if os.path.exists(old_sidecar):
                 try:
@@ -903,6 +946,37 @@ class BookProcessor:
                 except OSError as e:
                     log.warning(f"PROCESSOR ({self.asin}): Could not retain voucher: {e}")
 
+    def _apply_file_timestamps(self):
+        """
+        Stamp the finished audiobook and its sidecars with the book's release or
+        purchase date, when `conversion.file_timestamp_source` asks for it. Off
+        ("none") by default, so a default install leaves the real creation time
+        alone. Best-effort like _place_sidecar_files: a missing or unparseable
+        date is skipped silently and a utime failure is logged, never fatal —
+        a cosmetic timestamp must not turn a finished book into an error.
+        """
+        source = load_settings().get("conversion", {}).get("file_timestamp_source", "none")
+        if source not in ("release_date", "purchase_date"):
+            return
+
+        book_info = (self.context or {}).get("book_info") or {}
+        timestamp = _parse_timestamp_date(book_info.get(source))
+        if timestamp is None:
+            log.debug(f"PROCESSOR ({self.asin}): No usable {source} for file timestamps; leaving them as-is.")
+            return
+
+        # Both atime and mtime, so the pair stays consistent for tools that sort
+        # on either. Sidecars only exist when their setting produced them.
+        base = os.path.splitext(self.final_output_path)[0]
+        targets = [self.final_output_path] + [f"{base}{suffix}" for suffix in _SIDECAR_SUFFIXES]
+        for path in targets:
+            if not os.path.exists(path):
+                continue
+            try:
+                os.utime(path, (timestamp, timestamp))
+            except OSError as e:
+                log.warning(f"PROCESSOR ({self.asin}): Could not set timestamp on '{path}': {e}")
+
     def _finalize_success(self, conversion_start_time, record_eta=True):
         """
         Shared post-conversion handling for both the re-encode merge and the
@@ -968,6 +1042,8 @@ class BookProcessor:
         # torn down (the raw master, cover, and metadata all live there).
         self._place_supplementary_pdf()
         self._place_sidecar_files()
+        # Stamp timestamps last, once every file that shares the base name exists.
+        self._apply_file_timestamps()
         _yield_progress(self.asin, "Complete!", 100, self.job_id)
 
     def _merge_and_finalize(self):

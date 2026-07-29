@@ -741,6 +741,71 @@
                                 <span class="slider"></span>
                             </label>
                         </div>
+
+                        <!-- Folder/file split is a Phase 9 stretch. Empty templates fall back to the
+                             single template above; both must be non-empty to take effect. Advanced only. -->
+                        <div
+                            class="form-group advanced-setting"
+                            style="flex-direction: column; align-items: flex-start"
+                        >
+                            <label for="folder-template" style="margin-bottom: 0.5em">
+                                Folder Template (optional)
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Advanced: when both Folder and File templates are set, they compose as "folder/file"
+                                    and override the single template above. Leave blank to use the template above.
+                                </small>
+                            </label>
+                            <input
+                                type="text"
+                                id="folder-template"
+                                class="setting-input"
+                                data-path="naming.folder_template"
+                                style="width: 100%; box-sizing: border-box"
+                                value="{{ settings.naming.folder_template | default('') }}"
+                            />
+                        </div>
+
+                        <div
+                            class="form-group advanced-setting"
+                            style="flex-direction: column; align-items: flex-start"
+                        >
+                            <label for="file-template" style="margin-bottom: 0.5em">
+                                File Template (optional)
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    The file name part, used together with the Folder Template above. Same placeholders;
+                                    leave blank to use the single template at the top of this section.
+                                </small>
+                            </label>
+                            <input
+                                type="text"
+                                id="file-template"
+                                class="setting-input"
+                                data-path="naming.file_template"
+                                style="width: 100%; box-sizing: border-box"
+                                value="{{ settings.naming.file_template | default('') }}"
+                            />
+                        </div>
+
+                        <div class="form-group advanced-setting">
+                            <label for="file-timestamp-source">
+                                File Timestamp Source
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Sets the finished audiobook's "modified" date (and that of its companion files) to
+                                    the chosen date instead of the time it was downloaded — useful for sorting by
+                                    release or purchase date in file browsers and media servers. Applies to books
+                                    downloaded from now on.
+                                </small>
+                            </label>
+                            <!-- Old settings.json files predate this key, so resolve the default once here
+                                 rather than repeating the filter in every option. -->
+                            {% set timestamp_source = settings.conversion.file_timestamp_source | default('none') %}
+                            <!-- prettier-ignore -->
+                            <select id="file-timestamp-source" class="setting-input" data-path="conversion.file_timestamp_source">
+                                <option value="none" {% if timestamp_source == 'none' %}selected{% endif %}>Don't change (default)</option>
+                                <option value="release_date" {% if timestamp_source == 'release_date' %}selected{% endif %}>Book release date</option>
+                                <option value="purchase_date" {% if timestamp_source == 'purchase_date' %}selected{% endif %}>Purchase date</option>
+                            </select>
+                        </div>
                     </div>
                 </div>
                 <!-- END: FILE & FOLDER NAMING ACCORDION -->

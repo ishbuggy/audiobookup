@@ -1,6 +1,7 @@
 # tests/test_processing_logic.py
 
 import json
+from datetime import datetime
 from threading import Event
 from unittest import mock
 
@@ -9,7 +10,9 @@ import pytest
 from audible_downloader import processing_logic
 from audible_downloader.processing_logic import (
     BookProcessor,
+    _parse_timestamp_date,
     _sanitize_filename,
+    build_base_output_path,
     build_metadata_json,
     generate_cue_sheet,
 )
@@ -65,6 +68,8 @@ def _resolve_output_path(
     embedded_asin=None,
     truncate_subtitle=False,
     apply_custom_to_filenames=False,
+    folder_template="",
+    file_template="",
 ):
     """
     Drives BookProcessor._prepare_and_spawn_encode_tasks just far enough to
@@ -97,6 +102,8 @@ def _resolve_output_path(
                     "template": template,
                     "truncate_subtitle": truncate_subtitle,
                     "apply_custom_to_filenames": apply_custom_to_filenames,
+                    "folder_template": folder_template,
+                    "file_template": file_template,
                 }
             },
         ),
@@ -221,6 +228,66 @@ class TestNamingPlaceholderExpansion:
         # Regression: with all new tags missing the default template is unchanged.
         path = _resolve_output_path(book_row=BOOK_ROW)
         assert path == "/data/Bram Stoker/Dracula/Bram Stoker - Dracula.m4b"
+
+
+class TestFolderFileTemplateSplit:
+    """Phase 9: `folder_template` + `file_template` compose into the effective
+    template and win over `template`, but only as a complete pair."""
+
+    SERIES_ROW = dict(
+        BOOK_ROW,
+        series="Dune",
+        series_sequence="1",
+        release_date="2019-06-04",
+        language="English",
+    )
+
+    def test_both_set_composes_and_overrides_template(self):
+        path = _resolve_output_path(
+            template="{asin}",
+            folder_template="{author}/{series}",
+            file_template="{series_part} - {title}",
+            book_row=self.SERIES_ROW,
+        )
+        assert path == "/data/Bram Stoker/Dune/1 - Dracula.m4b"
+
+    @pytest.mark.parametrize(
+        ("folder_template", "file_template"),
+        [
+            ("{author}", ""),  # folder only
+            ("", "{title}"),  # file only
+            ("", ""),  # neither (the shipped default)
+            ("   ", "   "),  # whitespace-only counts as empty
+        ],
+    )
+    def test_incomplete_pair_falls_back_to_template(self, folder_template, file_template):
+        path = _resolve_output_path(folder_template=folder_template, file_template=file_template)
+        assert path == "/data/Bram Stoker/Dracula/Bram Stoker - Dracula.m4b"
+
+    def test_missing_keys_fall_back_to_template(self):
+        # Regression for old settings.json files predating the split keys: the
+        # naming dict has no folder_template/file_template at all.
+        settings = {"naming": {"template": "{author}/{title}"}}
+        path = build_base_output_path(settings, "B0OURS", "Bram Stoker", "Dracula", "Simon Vance", "Audible Studios")
+        assert path == "/data/Bram Stoker/Dracula.m4b"
+
+    def test_composed_template_gets_drop_segment_cleanup(self):
+        # A missing {series} folder level is dropped from the composed template
+        # exactly as it is from a single `template`.
+        path = _resolve_output_path(
+            folder_template="{author}/{series}",
+            file_template="{title}",
+            book_row=BOOK_ROW,  # series == "N/A"
+        )
+        assert path == "/data/Bram Stoker/Dracula.m4b"
+
+    def test_composed_empty_filename_falls_back_to_author_title(self):
+        path = _resolve_output_path(
+            folder_template="{author}",
+            file_template="{series}",
+            book_row=BOOK_ROW,  # series == "N/A" -> filename segment empty
+        )
+        assert path == "/data/Bram Stoker/Bram Stoker - Dracula.m4b"
 
 
 class TestSubtitleTruncation:
@@ -1363,3 +1430,87 @@ class TestPlaceSidecarFiles:
         out = tmp_path / "out"
         assert not (out / "Dracula.jpg").exists()
         assert (out / "Dracula.cue").exists()
+
+
+class TestParseTimestampDate:
+    """Phase 9: the pure date parser behind conversion.file_timestamp_source."""
+
+    def test_bare_release_date(self):
+        assert _parse_timestamp_date("2019-06-27") == datetime(2019, 6, 27).timestamp()
+
+    def test_full_iso_purchase_date_uses_leading_ten_chars(self):
+        assert _parse_timestamp_date("2023-04-05T06:07:08.000Z") == datetime(2023, 4, 5).timestamp()
+
+    @pytest.mark.parametrize("value", [None, "", "N/A", "garbage", "2019-13-99", "2019", 0])
+    def test_unusable_values_return_none(self, value):
+        assert _parse_timestamp_date(value) is None
+
+
+class TestApplyFileTimestamps:
+    """Phase 9: BookProcessor._apply_file_timestamps — off by default, stamps the
+    audiobook plus every sidecar that actually exists when switched on."""
+
+    def _processor(self, tmp_path, book_info):
+        processor = BookProcessor(asin="B0OURS", job_id=1, stop_event=Event())
+        (tmp_path / "out").mkdir()
+        processor.final_output_path = str(tmp_path / "out" / "Dracula.m4b")
+        (tmp_path / "out" / "Dracula.m4b").write_bytes(b"audio")
+        processor.context = {"book_info": book_info}
+        return processor
+
+    def _run(self, processor, source):
+        settings = {"conversion": {"file_timestamp_source": source}}
+        with mock.patch.object(processing_logic, "load_settings", return_value=settings):
+            processor._apply_file_timestamps()
+
+    @pytest.mark.parametrize("source", ["none", "bogus"])
+    def test_disabled_leaves_mtime_alone(self, tmp_path, source):
+        processor = self._processor(tmp_path, {"release_date": "2019-06-27"})
+        book = tmp_path / "out" / "Dracula.m4b"
+        before = book.stat().st_mtime
+        self._run(processor, source)
+        assert book.stat().st_mtime == before
+
+    def test_missing_setting_defaults_to_off(self, tmp_path):
+        # Old settings.json files have no conversion.file_timestamp_source key.
+        processor = self._processor(tmp_path, {"release_date": "2019-06-27"})
+        book = tmp_path / "out" / "Dracula.m4b"
+        before = book.stat().st_mtime
+        with mock.patch.object(processing_logic, "load_settings", return_value={"conversion": {}}):
+            processor._apply_file_timestamps()
+        assert book.stat().st_mtime == before
+
+    def test_release_date_stamps_book_and_existing_sidecars(self, tmp_path):
+        processor = self._processor(tmp_path, {"release_date": "2019-06-27"})
+        out = tmp_path / "out"
+        (out / "Dracula.pdf").write_bytes(b"pdf")
+        (out / "Dracula.cue").write_text("cue", encoding="utf-8")
+        self._run(processor, "release_date")
+        expected = datetime(2019, 6, 27).timestamp()
+        assert (out / "Dracula.m4b").stat().st_mtime == expected
+        assert (out / "Dracula.pdf").stat().st_mtime == expected
+        assert (out / "Dracula.cue").stat().st_mtime == expected
+        # Sidecars that were never produced are simply skipped, not created.
+        assert not (out / "Dracula.jpg").exists()
+        assert not (out / "Dracula.voucher").exists()
+
+    def test_purchase_date_source(self, tmp_path):
+        processor = self._processor(
+            tmp_path, {"release_date": "2019-06-27", "purchase_date": "2023-04-05T06:07:08.000Z"}
+        )
+        self._run(processor, "purchase_date")
+        assert (tmp_path / "out" / "Dracula.m4b").stat().st_mtime == datetime(2023, 4, 5).timestamp()
+
+    def test_unparseable_date_skips_silently(self, tmp_path):
+        processor = self._processor(tmp_path, {"release_date": "N/A"})
+        book = tmp_path / "out" / "Dracula.m4b"
+        before = book.stat().st_mtime
+        self._run(processor, "release_date")
+        assert book.stat().st_mtime == before
+
+    def test_missing_book_info_skips_silently(self, tmp_path):
+        processor = self._processor(tmp_path, None)
+        book = tmp_path / "out" / "Dracula.m4b"
+        before = book.stat().st_mtime
+        self._run(processor, "release_date")
+        assert book.stat().st_mtime == before
