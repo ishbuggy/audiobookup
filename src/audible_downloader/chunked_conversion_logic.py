@@ -19,6 +19,7 @@ from . import (
     announcer,  # Import announcer for progress updates
 )
 from .chapter_transforms import (
+    apply_branding_trim,
     flatten_chapter_tree,
     merge_credit_chapters,
     render_chapter_title,
@@ -27,7 +28,7 @@ from .chapter_transforms import (
 from .db import get_db_connection
 from .logger import log
 from .process_registry import process_registry
-from .settings import load_settings
+from .settings import load_settings, resolve_output_format
 
 # A lock to safely track progress across multiple threads, which will still be useful.
 progress_lock = Lock()
@@ -60,6 +61,23 @@ def _should_auto_chunk(lossless, audio_file, chapters_list, total_duration_sec):
     if will_remux_lossless:
         return False
     return len(chapters_list) <= 1 and total_duration_sec > AUTO_CHUNK_TRIGGER_SEC
+
+
+def _read_brand_span(chapter_info, camel_key, snake_key):
+    """
+    Read one brand intro/outro span (milliseconds) out of the chapter JSON's
+    `chapter_info` block, preferring the camelCase key audible-cli writes and
+    falling back to the snake_case spelling. Anything missing, null, or
+    non-numeric reads as 0, i.e. "no branding to trim" — a bad value must never
+    take a chunk out of someone's audiobook.
+    """
+    raw = chapter_info.get(camel_key)
+    if raw is None:
+        raw = chapter_info.get(snake_key)
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _summarize_subprocess_error(exc, fallback):
@@ -201,6 +219,12 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
     pdf_file = None
     book_info = None
     chapters_list = None
+    # Audible brand intro/outro spans, read off the chapter JSON below. Defined
+    # before the retry loop so the Phase 2 gate always has a value (0 = the title
+    # reports no branding, which is also what a chapter JSON without the keys
+    # means).
+    brand_intro_ms = 0
+    brand_outro_ms = 0
     decryption_args = []
     # When retain_aax is on, these carry the raw encrypted master and its AAXC
     # voucher out to the context (both None otherwise). Initialized before the
@@ -504,7 +528,16 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             # Load Chapters for next phase
             with open(json_file, encoding="utf-8") as cj:
                 chapter_data = json.load(cj)
-            chapters_list = chapter_data.get("content_metadata", {}).get("chapter_info", {}).get("chapters", [])
+            chapter_info = chapter_data.get("content_metadata", {}).get("chapter_info", {})
+            chapters_list = chapter_info.get("chapters", [])
+
+            # Brand intro/outro span lengths, in milliseconds, sitting alongside
+            # "chapters" at the chapter_info level. audible-cli's chapter JSON
+            # spells them camelCase; the snake_case names are accepted as a
+            # fallback in case an older/other dump uses them. A title with no
+            # branding simply omits both (or reports 0), which disables the trim.
+            brand_intro_ms = _read_brand_span(chapter_info, "brandIntroDurationMs", "brand_intro_duration_ms")
+            brand_outro_ms = _read_brand_span(chapter_info, "brandOutroDurationMs", "brand_outro_duration_ms")
 
             break  # Break outer download loop
 
@@ -560,6 +593,7 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
         chapter_settings = settings.get("conversion", {}).get("chapters", {})
         combine_nested = chapter_settings.get("combine_nested_titles", False)
         merge_credits = chapter_settings.get("merge_credit_chapters", False)
+        strip_branding = chapter_settings.get("strip_audible_branding", False)
 
         # 0a. Flatten nested chapter trees (joining parent/child titles with
         # ": "). Runs BEFORE the sanitize recompute so lengths are derived from
@@ -574,6 +608,32 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             log.info(f"PREPARE ({asin}): Merging credit chapters.")
             chapters_list = merge_credit_chapters(chapters_list)
 
+        # 0c. Audible branding trim (Phase 6). Everything downstream of this point
+        # works in the TRIMMED output timeline: effective_total_* replaces the
+        # master's duration for the sanitize recompute, the auto-chunk spans, and
+        # the MP3 progress denominator carried in the context.
+        #
+        # Gated on all three of: the setting, a re-encoding output format
+        # (the "original" format is a straight remux of the master — there is no
+        # encode pass to cut a span out of, and the settings help text says
+        # Original files are never trimmed), and the title actually reporting a
+        # brand span. When any of those is false every value below is exactly the
+        # untrimmed one, so the pipeline output is unchanged.
+        effective_total_ms = total_duration_ms
+        effective_total_sec = total_duration_sec
+        trim_intro_ms = 0
+        trim_outro_ms = 0
+        if strip_branding and resolve_output_format(settings) != "original" and (brand_intro_ms or brand_outro_ms):
+            log.info(
+                f"PREPARE ({asin}): Trimming Audible branding (intro {brand_intro_ms}ms, outro {brand_outro_ms}ms)."
+            )
+            chapters_list, effective_total_ms = apply_branding_trim(
+                chapters_list, brand_intro_ms, brand_outro_ms, total_duration_ms
+            )
+            effective_total_sec = effective_total_ms / 1000.0
+            trim_intro_ms = brand_intro_ms
+            trim_outro_ms = brand_outro_ms
+
         # 1. Sanitize Chapter Durations
         if chapters_list:
             log.info(f"PREPARE ({asin}): Sanitizing chapter durations...")
@@ -584,20 +644,23 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
                     next_start = chapters_list[i + 1].get("start_offset_ms", 0)
                     new_length = next_start - current_start
                 else:
-                    new_length = total_duration_ms - current_start
+                    # The final chapter runs to the end of the OUTPUT, which is
+                    # where the branding trim (when active) shortens it by the
+                    # outro span.
+                    new_length = effective_total_ms - current_start
                 chapters_list[i]["length_ms"] = max(0, new_length)
 
         # 2. Time-Based Auto-Chunking (see _should_auto_chunk for the gate).
-        if _should_auto_chunk(lossless, audio_file, chapters_list, total_duration_sec):
+        if _should_auto_chunk(lossless, audio_file, chapters_list, effective_total_sec):
             log.info(f"PREPARE ({asin}): Single chapter detected. Applying auto-chunking (15m).")
             new_chapters = []
-            num_chunks = int(total_duration_sec // AUTO_CHUNK_SIZE_SEC)
-            if total_duration_sec % AUTO_CHUNK_SIZE_SEC > 0:
+            num_chunks = int(effective_total_sec // AUTO_CHUNK_SIZE_SEC)
+            if effective_total_sec % AUTO_CHUNK_SIZE_SEC > 0:
                 num_chunks += 1
 
             for i in range(num_chunks):
                 start_sec = i * AUTO_CHUNK_SIZE_SEC
-                end_sec = min((i + 1) * AUTO_CHUNK_SIZE_SEC, total_duration_sec)
+                end_sec = min((i + 1) * AUTO_CHUNK_SIZE_SEC, effective_total_sec)
                 new_chapters.append(
                     {
                         "title": f"Part {i + 1}",
@@ -720,11 +783,18 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             "chapter_file": chapter_txt_path,
             "chapters": chapters_list,
             "book_info": book_info,
-            # Master duration in seconds, carried so the single-pass MP3 encode
+            # Output duration in seconds, carried so the single-pass MP3 encode
             # (Phase 5) has a denominator for its -progress percentage without a
-            # second ffprobe. (Phase 6's branding trim will store the trimmed
-            # length here instead.)
-            "total_duration_sec": total_duration_sec,
+            # second ffprobe — and, when the branding trim is active, so it knows
+            # where to stop (-t). This is the TRIMMED length whenever the trim
+            # applied, and the raw master duration otherwise.
+            "total_duration_sec": effective_total_sec,
+            # Branding trim spans in ms, both 0 when the trim is inactive. The
+            # intro is added back to every source seek (the chapter starts above
+            # are output-timeline); the outro is carried only so the encoders can
+            # tell an outro-only trim from no trim at all.
+            "trim_intro_ms": trim_intro_ms,
+            "trim_outro_ms": trim_outro_ms,
             # Populated only when retain_aax is on (both None otherwise); copied
             # next to the finished book by BookProcessor._place_sidecar_files.
             "raw_audio_file": retained_raw_audio_file,
@@ -769,10 +839,16 @@ def encode_chapter_chunk(asin, job_id, temp_dir, chunk_info, context):
     }.get(quality, ["-c:a", "aac", "-b:a", "128k"])
 
     output_path = os.path.join(temp_dir, f"chunk_{chunk_index:03d}.m4b")
+    # Branding trim (Phase 6): chunk starts are in the trimmed OUTPUT timeline,
+    # so the seek into the (untrimmed) master has to add the intro span back.
+    # 0 when the trim is inactive, leaving the seek exactly as it was. The
+    # duration needs no adjustment: it comes from the recomputed chapter lengths,
+    # whose final entry was already shortened by the outro.
+    source_start_sec = chunk_info["start"] + context.get("trim_intro_ms", 0) / 1000.0
     split_command = (
         ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
         + context["decryption_args"]
-        + ["-ss", str(chunk_info["start"]), "-i", context["audio_file"], "-t", str(chunk_info["duration"])]
+        + ["-ss", str(source_start_sec), "-i", context["audio_file"], "-t", str(chunk_info["duration"])]
         + ["-map", "0:a"]
         + audio_flags
         + ["-map_metadata", "-1", output_path]
@@ -1070,11 +1146,23 @@ def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context):
     total_duration_sec = context.get("total_duration_sec")
     have_cover = bool(cover_file and os.path.exists(cover_file))
 
+    # Branding trim (Phase 6): skip into the master past the brand intro and stop
+    # after the trimmed length (context's total_duration_sec is already trimmed),
+    # which drops the outro. Both spans are 0 when the trim is inactive, and then
+    # neither flag is added at all — the command stays exactly as it was.
+    trim_intro_ms = context.get("trim_intro_ms", 0)
+    trim_outro_ms = context.get("trim_outro_ms", 0)
+    trim_active = bool(total_duration_sec and (trim_intro_ms or trim_outro_ms))
+
     source_bitrate_bps, source_sample_rate = _probe_source_audio_params(master, job_id)
     quality_flags = build_mp3_flags(mp3_settings, source_bitrate_bps, source_sample_rate)
 
     # Input order: 0 = audio master, 1 = FFMETADATA, 2 = cover (when present).
     command = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1"]
+    if trim_active:
+        # Input-side seek: must precede the master's -i to apply to input 0 only
+        # (the FFMETADATA/cover inputs are unaffected).
+        command += ["-ss", str(trim_intro_ms / 1000.0)]
     command += ["-i", master, "-i", chapter_file]
     if have_cover:
         command += ["-i", cover_file]
@@ -1092,7 +1180,12 @@ def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context):
             "-metadata:s:v",
             "comment=Cover (front)",
         ]
-    command += ["-c:a", "libmp3lame"] + quality_flags + ["-id3v2_version", "3", final_output_path]
+    command += ["-c:a", "libmp3lame"] + quality_flags + ["-id3v2_version", "3"]
+    if trim_active:
+        # Output-side duration cap: the trimmed length, measured from the -ss
+        # point above.
+        command += ["-t", str(total_duration_sec)]
+    command += [final_output_path]
 
     process = None
     stderr_chunks = []

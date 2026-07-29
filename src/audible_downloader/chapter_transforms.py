@@ -112,6 +112,38 @@ def merge_credit_chapters(chapters):
     return result
 
 
+def apply_branding_trim(chapters, intro_ms, outro_ms, total_duration_ms):
+    """Shift a FLAT chapter list into the branding-trimmed OUTPUT timeline.
+
+    Audible's masters open with a "This is Audible" brand intro and close with a
+    matching outro; their lengths come from the chapter JSON (`brandIntroDurationMs`
+    / `brandOutroDurationMs`). Cutting them means the output is the master minus a
+    head span and a tail span, so:
+
+    - every `start_offset_ms` moves down by `intro_ms`, clamped at 0 — a chapter
+      that begins *inside* the intro (Audible sometimes starts chapter 1 at 0)
+      lands at the top of the trimmed file rather than going negative;
+    - `effective_total_ms = total_duration_ms - intro_ms - outro_ms` is the length
+      of the trimmed output.
+
+    Returns `(chapters, effective_total_ms)`. The returned chapters are shallow
+    copies (inputs are never mutated) and `length_ms` is left as-is: the caller's
+    sanitize step recomputes every length from the starts and the effective total,
+    which is what shortens the FINAL chapter by the outro.
+
+    Callers that seek into the untrimmed master afterwards (the per-chapter AAC
+    encode, the single-pass MP3 encode) must add `intro_ms` back to the seek —
+    these offsets are output-timeline, not source-timeline.
+    """
+    shifted = []
+    for ch in chapters:
+        new_ch = dict(ch)
+        new_ch["start_offset_ms"] = max(0, new_ch.get("start_offset_ms", 0) - intro_ms)
+        shifted.append(new_ch)
+
+    return shifted, total_duration_ms - intro_ms - outro_ms
+
+
 def strip_unabridged(text):
     """Remove every "(Unabridged)" occurrence (with leading whitespace) and
     collapse any doubled spaces the removal leaves behind. Non-string / falsy

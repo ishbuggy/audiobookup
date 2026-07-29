@@ -6,6 +6,7 @@
 import pytest
 
 from audible_downloader.chapter_transforms import (
+    apply_branding_trim,
     flatten_chapter_tree,
     merge_credit_chapters,
     render_chapter_title,
@@ -147,6 +148,61 @@ class TestMergeCreditChapters:
         merge_credit_chapters(chapters)
         assert [c["title"] for c in chapters] == ["Opening Credits", "Chapter 1"]
         assert chapters[1]["start_offset_ms"] == 500
+
+
+class TestApplyBrandingTrim:
+    """Phase 6: shift chapters into the branding-trimmed output timeline and
+    report that timeline's length. Lengths are deliberately left alone here —
+    the caller's sanitize step recomputes them from the starts and the effective
+    total, which is what shortens the last chapter by the outro."""
+
+    CHAPTERS = [_ch("One", 0, 600_000), _ch("Two", 600_000, 600_000), _ch("Three", 1_200_000, 600_000)]
+    TOTAL = 1_800_000
+
+    def test_intro_only_shifts_starts_and_shortens_total(self):
+        out, effective = apply_branding_trim(self.CHAPTERS, 2_000, 0, self.TOTAL)
+        assert [c["start_offset_ms"] for c in out] == [0, 598_000, 1_198_000]
+        assert effective == 1_798_000
+
+    def test_outro_only_leaves_starts_and_shortens_total(self):
+        out, effective = apply_branding_trim(self.CHAPTERS, 0, 5_000, self.TOTAL)
+        assert [c["start_offset_ms"] for c in out] == [0, 600_000, 1_200_000]
+        assert effective == 1_795_000
+
+    def test_both_spans(self):
+        out, effective = apply_branding_trim(self.CHAPTERS, 2_043, 5_061, self.TOTAL)
+        assert [c["start_offset_ms"] for c in out] == [0, 597_957, 1_197_957]
+        assert effective == self.TOTAL - 2_043 - 5_061
+
+    def test_zero_spans_are_identity(self):
+        out, effective = apply_branding_trim(self.CHAPTERS, 0, 0, self.TOTAL)
+        assert out == self.CHAPTERS
+        assert effective == self.TOTAL
+
+    def test_chapter_starting_inside_intro_clamps_to_zero(self):
+        # Audible sometimes places a chapter boundary partway through the brand
+        # intro; the shifted start must never go negative.
+        chapters = [_ch("Opening", 0, 1_000), _ch("One", 1_000, 600_000)]
+        out, _ = apply_branding_trim(chapters, 2_043, 0, self.TOTAL)
+        assert [c["start_offset_ms"] for c in out] == [0, 0]
+
+    def test_missing_start_offset_treated_as_zero(self):
+        out, _ = apply_branding_trim([{"title": "One"}], 2_000, 0, self.TOTAL)
+        assert out[0]["start_offset_ms"] == 0
+
+    def test_preserves_other_keys(self):
+        out, _ = apply_branding_trim([{"title": "One", "start_offset_ms": 5_000, "extra": 7}], 2_000, 0, self.TOTAL)
+        assert out[0] == {"title": "One", "start_offset_ms": 3_000, "extra": 7}
+
+    def test_empty_chapter_list_still_reports_effective_total(self):
+        out, effective = apply_branding_trim([], 2_000, 5_000, self.TOTAL)
+        assert out == []
+        assert effective == 1_793_000
+
+    def test_does_not_mutate_input(self):
+        chapters = [_ch("One", 10_000, 600_000)]
+        apply_branding_trim(chapters, 2_000, 0, self.TOTAL)
+        assert chapters[0]["start_offset_ms"] == 10_000
 
 
 class TestStripUnabridged:

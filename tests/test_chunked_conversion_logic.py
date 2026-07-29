@@ -1,5 +1,7 @@
 # tests/test_chunked_conversion_logic.py
 
+import io
+import json
 import subprocess
 from unittest import mock
 
@@ -8,6 +10,7 @@ import pytest
 from audible_downloader import chunked_conversion_logic as ccl
 from audible_downloader.chunked_conversion_logic import (
     _embed_cover_art,
+    _read_brand_span,
     _should_auto_chunk,
     _summarize_subprocess_error,
     build_mp3_flags,
@@ -316,6 +319,382 @@ class TestShouldAutoChunk:
     def test_short_single_chapter_book_is_not_chunked(self):
         # Below the duration trigger, even the re-encode path leaves it alone.
         assert _should_auto_chunk(False, "/t/master_intermediate.m4b", [{}], self.SHORT) is False
+
+
+class TestReadBrandSpan:
+    """Phase 6: pull one brand intro/outro span out of the chapter JSON. The live
+    audible-cli JSON uses camelCase; snake_case is a defensive fallback. Anything
+    unusable must read as 0 — a bad value must never cut audio out of a book."""
+
+    def test_prefers_camel_case(self):
+        info = {"brandIntroDurationMs": 2043, "brand_intro_duration_ms": 999}
+        assert _read_brand_span(info, "brandIntroDurationMs", "brand_intro_duration_ms") == 2043
+
+    def test_falls_back_to_snake_case(self):
+        info = {"brand_outro_duration_ms": 5061}
+        assert _read_brand_span(info, "brandOutroDurationMs", "brand_outro_duration_ms") == 5061
+
+    def test_missing_keys_are_zero(self):
+        assert _read_brand_span({}, "brandIntroDurationMs", "brand_intro_duration_ms") == 0
+
+    @pytest.mark.parametrize("raw", [None, "", "abc", {}])
+    def test_unusable_values_are_zero(self, raw):
+        assert _read_brand_span({"brandIntroDurationMs": raw}, "brandIntroDurationMs", "brand_intro_duration_ms") == 0
+
+    def test_negative_value_clamps_to_zero(self):
+        info = {"brandIntroDurationMs": -100}
+        assert _read_brand_span(info, "brandIntroDurationMs", "brand_intro_duration_ms") == 0
+
+    def test_numeric_string_is_accepted(self):
+        info = {"brandIntroDurationMs": "2043"}
+        assert _read_brand_span(info, "brandIntroDurationMs", "brand_intro_duration_ms") == 2043
+
+
+class _FakeWriteHandle(io.StringIO):
+    """Stand-in for a `with open(path, "w") as f:` target that captures what was
+    written into a dict instead of touching disk."""
+
+    def __init__(self, sink, key):
+        super().__init__()
+        self._sink = sink
+        self._key = key
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self._sink[self._key] = self.getvalue()
+        return False
+
+
+class TestBrandingTrimPipeline:
+    """Phase 6 end-to-end through prepare_book_assets: extraction of the brand
+    spans, the three-way gate, and the trimmed values flowing into the sanitize
+    recompute and the returned context. Everything external (audible-cli, ffmpeg,
+    ffprobe, the DB, the filesystem) is mocked, so this runs on the host."""
+
+    TEMP_DIR = "/tmp/x"
+    # 60 minutes of master, three even 10-minute chapters.
+    TOTAL_SEC = "3600.0"
+    CHAPTERS = [
+        {"title": "One", "start_offset_ms": 0, "length_ms": 600_000},
+        {"title": "Two", "start_offset_ms": 600_000, "length_ms": 600_000},
+        {"title": "Three", "start_offset_ms": 1_200_000, "length_ms": 2_400_000},
+    ]
+    BOOK_INFO = {
+        "item": {
+            "title": "Test Book",
+            "runtime_length_min": 60,
+            "authors": [{"name": "An Author"}],
+            "narrators": [{"name": "A Narrator"}],
+            "copy_right": "(c) Somebody",
+            "publisher_name": "A Publisher",
+            "language": "english",
+            "release_date": "2020-01-01",
+            "merchandising_summary": "",
+        }
+    }
+
+    def _run_prepare(self, settings, intro_ms=None, outro_ms=None, snake_case=False):
+        """Drive prepare_book_assets to completion, returning (context, error,
+        written_files). `intro_ms`/`outro_ms` are injected into the chapter JSON's
+        chapter_info block (camelCase unless `snake_case`); None omits the key."""
+        intro_key, outro_key = ("brandIntroDurationMs", "brandOutroDurationMs")
+        if snake_case:
+            intro_key, outro_key = ("brand_intro_duration_ms", "brand_outro_duration_ms")
+        chapter_info = {"chapters": self.CHAPTERS}
+        if intro_ms is not None:
+            chapter_info[intro_key] = intro_ms
+        if outro_ms is not None:
+            chapter_info[outro_key] = outro_ms
+        chapter_json = json.dumps({"content_metadata": {"chapter_info": chapter_info}})
+        voucher_json = '{"content_license": {"license_response": {"key": "K", "iv": "IV"}}}'
+
+        # Download Popen: no progress lines, exits 0. Decrypt Popen: exits 0.
+        download_proc = mock.MagicMock()
+        download_proc.stderr.readline.return_value = ""
+        download_proc.stdout.read.return_value = ""
+        download_proc.wait.return_value = 0
+        decrypt_proc = mock.MagicMock()
+        decrypt_proc.returncode = 0
+        decrypt_proc.communicate.return_value = (b"", b"")
+
+        entries = [
+            _FakeDirEntry(f"{self.TEMP_DIR}/book.aaxc"),
+            _FakeDirEntry(f"{self.TEMP_DIR}/book.voucher"),
+            _FakeDirEntry(f"{self.TEMP_DIR}/cover.jpg"),
+            _FakeDirEntry(f"{self.TEMP_DIR}/chapters.json"),
+        ]
+
+        # _run_registered order: metadata fetch, post-decrypt duration probe,
+        # seek verification (AAC-copy strategy), Phase 2 total-duration probe.
+        run_results = [
+            subprocess.CompletedProcess(["audible", "api"], 0, json.dumps(self.BOOK_INFO), ""),
+            subprocess.CompletedProcess(["ffprobe"], 0, self.TOTAL_SEC, ""),
+            subprocess.CompletedProcess(["ffmpeg"], 0, "", ""),
+            subprocess.CompletedProcess(["ffprobe"], 0, self.TOTAL_SEC, ""),
+        ]
+
+        written = {}
+
+        def _fake_open(path, mode="r", *args, **kwargs):
+            if "w" in mode:
+                return _FakeWriteHandle(written, path)
+            if path.endswith(".voucher"):
+                return io.StringIO(voucher_json)
+            if path.endswith(".json"):
+                return io.StringIO(chapter_json)
+            raise AssertionError(f"unexpected open of {path}")
+
+        db_con = mock.MagicMock()
+        db_con.execute.return_value.fetchone.return_value = None  # no user overrides
+        db_ctx = mock.MagicMock()
+        db_ctx.__enter__.return_value = db_con
+
+        with (
+            mock.patch.object(ccl, "load_settings", return_value=settings),
+            mock.patch.object(ccl.subprocess, "Popen", side_effect=[download_proc, decrypt_proc]),
+            mock.patch.object(ccl, "_run_registered", side_effect=run_results),
+            mock.patch.object(ccl.process_registry, "register"),
+            mock.patch.object(ccl.process_registry, "unregister"),
+            mock.patch.object(ccl.os, "scandir", side_effect=lambda _d: iter(entries)),
+            mock.patch.object(ccl.os, "remove"),
+            mock.patch.object(ccl, "get_db_connection", return_value=db_ctx),
+            mock.patch("builtins.open", side_effect=_fake_open),
+            mock.patch.object(ccl, "_yield_progress"),
+        ):
+            context, error = ccl.prepare_book_assets("B0X", 1, self.TEMP_DIR)
+        return context, error, written
+
+    @staticmethod
+    def _chapter_txt(written):
+        return written[f"{TestBrandingTrimPipeline.TEMP_DIR}/chapters.txt"]
+
+    def test_trim_shifts_starts_and_shortens_final_chapter(self):
+        settings = {"conversion": {"output_format": "m4b", "chapters": {"strip_audible_branding": True}}}
+        context, error, written = self._run_prepare(settings, intro_ms=2_043, outro_ms=5_061)
+
+        assert error is None
+        starts = [c["start_offset_ms"] for c in context["chapters"]]
+        lengths = [c["length_ms"] for c in context["chapters"]]
+        assert starts == [0, 597_957, 1_197_957]
+        # The outro shortening lands on the final chapter: its end is exactly the
+        # effective (trimmed) total, 3_600_000 - 2_043 - 5_061.
+        assert starts[-1] + lengths[-1] == 3_592_896
+        assert context["total_duration_sec"] == 3_592.896
+        assert context["trim_intro_ms"] == 2_043
+        assert context["trim_outro_ms"] == 5_061
+        # The FFMETADATA chapters carry the same trimmed timeline.
+        assert "END=3592896\n" in self._chapter_txt(written)
+
+    def test_intro_only_trim(self):
+        settings = {"conversion": {"output_format": "mp3", "chapters": {"strip_audible_branding": True}}}
+        context, error, _ = self._run_prepare(settings, intro_ms=2_000, outro_ms=0)
+        assert error is None
+        assert [c["start_offset_ms"] for c in context["chapters"]] == [0, 598_000, 1_198_000]
+        assert context["total_duration_sec"] == 3_598.0
+        assert context["trim_intro_ms"] == 2_000
+
+    def test_outro_only_trim_leaves_starts_alone(self):
+        settings = {"conversion": {"output_format": "m4b", "chapters": {"strip_audible_branding": True}}}
+        context, error, _ = self._run_prepare(settings, intro_ms=0, outro_ms=5_000)
+        assert error is None
+        starts = [c["start_offset_ms"] for c in context["chapters"]]
+        assert starts == [0, 600_000, 1_200_000]
+        assert starts[-1] + context["chapters"][-1]["length_ms"] == 3_595_000
+        assert context["trim_intro_ms"] == 0
+        assert context["trim_outro_ms"] == 5_000
+
+    def test_setting_off_is_untrimmed(self):
+        # Default settings: brand spans present in the JSON, but the trim is off.
+        settings = {"conversion": {"output_format": "m4b", "chapters": {}}}
+        context, error, _ = self._run_prepare(settings, intro_ms=2_043, outro_ms=5_061)
+        assert error is None
+        assert [c["start_offset_ms"] for c in context["chapters"]] == [0, 600_000, 1_200_000]
+        assert [c["length_ms"] for c in context["chapters"]] == [600_000, 600_000, 2_400_000]
+        assert context["total_duration_sec"] == 3_600.0
+        assert context["trim_intro_ms"] == 0
+        assert context["trim_outro_ms"] == 0
+
+    def test_original_format_is_never_trimmed(self):
+        # The remux path copies the master through untouched, so the trim must not
+        # apply even with the setting on and brand spans reported.
+        settings = {"conversion": {"output_format": "original", "chapters": {"strip_audible_branding": True}}}
+        context, error, _ = self._run_prepare(settings, intro_ms=2_043, outro_ms=5_061)
+        assert error is None
+        assert [c["start_offset_ms"] for c in context["chapters"]] == [0, 600_000, 1_200_000]
+        assert context["total_duration_sec"] == 3_600.0
+        assert context["trim_intro_ms"] == 0
+
+    def test_legacy_no_reencode_flag_also_blocks_the_trim(self):
+        # Old settings.json files carry no output_format, only no_reencode.
+        settings = {"conversion": {"no_reencode": True, "chapters": {"strip_audible_branding": True}}}
+        context, error, _ = self._run_prepare(settings, intro_ms=2_043, outro_ms=5_061)
+        assert error is None
+        assert [c["start_offset_ms"] for c in context["chapters"]] == [0, 600_000, 1_200_000]
+        assert context["trim_intro_ms"] == 0
+
+    def test_title_without_branding_is_untrimmed(self):
+        # Setting on, but the chapter JSON reports no brand spans at all.
+        settings = {"conversion": {"output_format": "m4b", "chapters": {"strip_audible_branding": True}}}
+        context, error, _ = self._run_prepare(settings)
+        assert error is None
+        assert [c["start_offset_ms"] for c in context["chapters"]] == [0, 600_000, 1_200_000]
+        assert context["total_duration_sec"] == 3_600.0
+        assert context["trim_intro_ms"] == 0
+
+    def test_snake_case_keys_are_honored(self):
+        settings = {"conversion": {"output_format": "m4b", "chapters": {"strip_audible_branding": True}}}
+        context, error, _ = self._run_prepare(settings, intro_ms=2_000, outro_ms=5_000, snake_case=True)
+        assert error is None
+        assert [c["start_offset_ms"] for c in context["chapters"]] == [0, 598_000, 1_198_000]
+        assert context["total_duration_sec"] == 3_593.0
+        assert context["trim_intro_ms"] == 2_000
+
+
+class TestEncodeChapterChunkTrim:
+    """Phase 6 seek compensation: chunk starts are output-timeline, so the source
+    seek adds the intro span back. With no trim the command must be identical to
+    what it has always been."""
+
+    CHUNK = {"index": 0, "total_chunks": 3, "start": 597.957, "duration": 600.0}
+
+    def _run(self, context):
+        proc = mock.MagicMock()
+        proc.returncode = 0
+        proc.communicate.return_value = (b"", b"")
+        with (
+            mock.patch.object(ccl, "load_settings", return_value={}),
+            mock.patch.object(ccl.subprocess, "Popen", return_value=proc) as popen,
+            mock.patch.object(ccl.process_registry, "register"),
+            mock.patch.object(ccl.process_registry, "unregister"),
+        ):
+            ccl.encode_chapter_chunk("B0X", 1, "/tmp/x", self.CHUNK, context)
+        return popen.call_args.args[0]
+
+    def test_no_trim_seeks_to_the_chunk_start(self):
+        context = {"decryption_args": [], "audio_file": "/tmp/x/master_intermediate.m4b"}
+        cmd = self._run(context)
+        assert cmd[cmd.index("-ss") + 1] == "597.957"
+        assert cmd[cmd.index("-t") + 1] == "600.0"
+
+    def test_trim_adds_the_intro_back_to_the_seek(self):
+        context = {
+            "decryption_args": [],
+            "audio_file": "/tmp/x/master_intermediate.m4b",
+            "trim_intro_ms": 2_043,
+        }
+        cmd = self._run(context)
+        assert cmd[cmd.index("-ss") + 1] == "600.0"
+        # Duration is untouched — it already comes from the trimmed chapter length.
+        assert cmd[cmd.index("-t") + 1] == "600.0"
+
+
+class TestEncodeBookMp3Trim:
+    """Phase 6: the single-pass MP3 encode gains an input-side -ss (past the brand
+    intro) and an output-side -t (the trimmed length) only when the trim is active."""
+
+    MASTER = "/tmp/x/master_intermediate.m4b"
+    CHAPTER_FILE = "/tmp/x/chapters.txt"
+
+    def _run(self, context):
+        proc = mock.MagicMock()
+        proc.stdout.readline.return_value = ""
+        proc.stderr.read.return_value = ""
+        proc.wait.return_value = 0
+        with (
+            mock.patch.object(ccl, "load_settings", return_value={}),
+            mock.patch.object(ccl, "_probe_source_audio_params", return_value=(None, None)),
+            mock.patch.object(ccl.subprocess, "Popen", return_value=proc) as popen,
+            mock.patch.object(ccl.process_registry, "register"),
+            mock.patch.object(ccl.process_registry, "unregister"),
+            mock.patch.object(ccl, "_yield_progress"),
+        ):
+            result = ccl.encode_book_mp3("B0X", 1, "/tmp/x", "/data/out.mp3", context)
+        return result, popen.call_args.args[0]
+
+    def test_inactive_trim_leaves_the_command_untouched(self):
+        context = {
+            "audio_file": self.MASTER,
+            "chapter_file": self.CHAPTER_FILE,
+            "cover_file": None,
+            "total_duration_sec": 3_600.0,
+            "trim_intro_ms": 0,
+            "trim_outro_ms": 0,
+        }
+        result, cmd = self._run(context)
+        assert result is True
+        assert cmd == [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-progress",
+            "pipe:1",
+            "-i",
+            self.MASTER,
+            "-i",
+            self.CHAPTER_FILE,
+            "-map",
+            "0:a",
+            "-map_metadata",
+            "1",
+            "-map_chapters",
+            "1",
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "2",
+            "-compression_level",
+            "0",
+            "-id3v2_version",
+            "3",
+            "/data/out.mp3",
+        ]
+
+    def test_context_without_trim_keys_is_also_untouched(self):
+        # An in-flight job whose context predates Phase 6 must still encode.
+        context = {
+            "audio_file": self.MASTER,
+            "chapter_file": self.CHAPTER_FILE,
+            "cover_file": None,
+            "total_duration_sec": 3_600.0,
+        }
+        _, cmd = self._run(context)
+        assert "-ss" not in cmd
+        assert "-t" not in cmd
+
+    def test_active_trim_seeks_past_the_intro_and_caps_the_duration(self):
+        context = {
+            "audio_file": self.MASTER,
+            "chapter_file": self.CHAPTER_FILE,
+            "cover_file": None,
+            "total_duration_sec": 3_592.896,
+            "trim_intro_ms": 2_043,
+            "trim_outro_ms": 5_061,
+        }
+        _, cmd = self._run(context)
+        # -ss must precede the master's -i so it applies to input 0 only.
+        assert cmd[cmd.index("-ss") + 1] == "2.043"
+        assert cmd.index("-ss") < cmd.index("-i")
+        # -t is an output option: after the codec flags, before the output path.
+        assert cmd[cmd.index("-t") + 1] == "3592.896"
+        assert cmd.index("-t") > cmd.index("libmp3lame")
+        assert cmd[-1] == "/data/out.mp3"
+
+    def test_outro_only_trim_still_caps_the_duration(self):
+        context = {
+            "audio_file": self.MASTER,
+            "chapter_file": self.CHAPTER_FILE,
+            "cover_file": None,
+            "total_duration_sec": 3_595.0,
+            "trim_intro_ms": 0,
+            "trim_outro_ms": 5_000,
+        }
+        _, cmd = self._run(context)
+        assert cmd[cmd.index("-ss") + 1] == "0.0"
+        assert cmd[cmd.index("-t") + 1] == "3595.0"
 
 
 class TestBuildMp3Flags:
