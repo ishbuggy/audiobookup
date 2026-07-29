@@ -78,4 +78,3 @@ def perform_audible_auth_check():
         with _auth_status_lock:
             _auth_status["is_valid"] = False
             _auth_status["error"] = "An unexpected error occurred during the authentication check."
-

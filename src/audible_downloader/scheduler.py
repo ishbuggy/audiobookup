@@ -16,6 +16,7 @@ from .settings import load_settings
 # We initialize it here but will configure its timezone dynamically at startup.
 scheduler = BackgroundScheduler()
 
+
 # --- Job Functions ---
 def _run_fast_sync_job():
     log.info("SCHEDULER: Triggering scheduled FAST library sync...")
@@ -26,6 +27,7 @@ def _run_fast_sync_job():
         if not success:
             log.warning(f"SCHEDULER: Could not start automatic FAST SYNC job: {result.get('error')}")
 
+
 def _run_deep_sync_job():
     log.info("SCHEDULER: Triggering scheduled DEEP library sync...")
     with app.app_context():
@@ -34,6 +36,7 @@ def _run_deep_sync_job():
         success, result = start_new_job("SYNC", job_params=job_params)
         if not success:
             log.warning(f"SCHEDULER: Could not start automatic DEEP SYNC job: {result.get('error')}")
+
 
 def _run_process_job():
     log.info("SCHEDULER: Triggering scheduled processing job...")
@@ -44,9 +47,11 @@ def _run_process_job():
         elif not success:
             log.warning(f"SCHEDULER: Could not start automatic DOWNLOAD job: {result.get('error')}")
 
+
 def _run_audible_auth_check_job():
     log.info("SCHEDULER: Triggering periodic Audible connection check...")
     perform_audible_auth_check()
+
 
 # --- Main Scheduler Management Function ---
 def _apply_schedules():
@@ -124,6 +129,7 @@ def _apply_schedules():
         )
         log.info(f"SCHEDULER: Added AUTH check job for every {auth_interval_hours} hours.")
 
+
 def scheduler_worker():
     """
     The main worker function that configures and runs the scheduler.
@@ -154,6 +160,7 @@ def scheduler_worker():
             log.error(f"SCHEDULER: An unexpected error occurred in the management loop: {e}", exc_info=True)
             # In case of an error, wait a bit before retrying to avoid a tight error loop.
             time.sleep(60)
+
 
 def start_scheduler_management_thread():
     """

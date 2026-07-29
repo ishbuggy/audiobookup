@@ -1,10 +1,6 @@
 // src/static/js/index.js
 
-import { 
-    initializeSSEConnection, 
-    checkForActiveJob, 
-    startSyncJob 
-} from "./modules/job-manager.js";
+import { initializeSSEConnection, checkForActiveJob, startSyncJob } from "./modules/job-manager.js";
 import { fetchUpdates } from "./modules/library-manager.js";
 import { openDownloadSelectionModal } from "./modules/modal-manager.js";
 
@@ -33,7 +29,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         });
     });
-    
+
     // 5. Wire up Log Toggle and Copy
     const logContainer = document.getElementById("log-container");
     const toggleLogBtn = document.getElementById("toggle-log-btn");
@@ -47,7 +43,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 toggleIcon.classList.remove("fa-chevron-up");
                 toggleIcon.classList.add("fa-chevron-down");
                 const logOutput = document.getElementById("log-output");
-                if(logOutput) logOutput.scrollTop = logOutput.scrollHeight;
+                if (logOutput) logOutput.scrollTop = logOutput.scrollHeight;
             } else {
                 toggleIcon.classList.remove("fa-chevron-down");
                 toggleIcon.classList.add("fa-chevron-up");
@@ -57,12 +53,15 @@ document.addEventListener("DOMContentLoaded", () => {
     if (copyLogBtn) {
         copyLogBtn.addEventListener("click", () => {
             const logText = document.getElementById("log-output").textContent;
-            navigator.clipboard.writeText(logText).then(() => {
-                if (window.showToast) window.showToast("Log copied to clipboard!", "success");
-                else alert("Log copied!");
-            }).catch(err => {
-                console.error('Failed to copy log:', err);
-            });
+            navigator.clipboard
+                .writeText(logText)
+                .then(() => {
+                    if (window.showToast) window.showToast("Log copied to clipboard!", "success");
+                    else alert("Log copied!");
+                })
+                .catch((err) => {
+                    console.error("Failed to copy log:", err);
+                });
         });
     }
     if (downloadLogBtn) {

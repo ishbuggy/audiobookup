@@ -126,9 +126,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         // Updates which input fields (Interval, Daily, Cron) are visible.
         const updateVisibility = () => {
-            const selectedType = document.querySelector(
-                `input[name="${jobName}_schedule_type"]:checked`,
-            )?.value;
+            const selectedType = document.querySelector(`input[name="${jobName}_schedule_type"]:checked`)?.value;
             intervalContainer.style.display = selectedType === "interval" ? "flex" : "none";
             dailyContainer.style.display = selectedType === "daily" ? "flex" : "none";
             cronContainer.style.display = selectedType === "cron" ? "flex" : "none";
@@ -144,23 +142,13 @@ document.addEventListener("DOMContentLoaded", () => {
                 let isSimple = false;
 
                 // Check if the cron string matches the simple "Interval" pattern.
-                if (
-                    minute === "0" &&
-                    hour.startsWith("*/") &&
-                    dom === "*" &&
-                    month === "*" &&
-                    dow === "*"
-                ) {
-                    document.querySelector(
-                        `input[name="${jobName}_schedule_type"][value="interval"]`,
-                    ).checked = true;
+                if (minute === "0" && hour.startsWith("*/") && dom === "*" && month === "*" && dow === "*") {
+                    document.querySelector(`input[name="${jobName}_schedule_type"][value="interval"]`).checked = true;
                     intervalInput.value = hour.substring(2);
                     isSimple = true;
                     // Check if the cron string matches the simple "Daily" pattern.
                 } else if (!isNaN(minute) && !isNaN(hour) && dom === "*" && month === "*" && dow === "*") {
-                    document.querySelector(
-                        `input[name="${jobName}_schedule_type"][value="daily"]`,
-                    ).checked = true;
+                    document.querySelector(`input[name="${jobName}_schedule_type"][value="daily"]`).checked = true;
                     dailyInput.value = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
                     isSimple = true;
                 }
@@ -174,9 +162,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     Object.values(cronInputs).forEach((input, i) => (input.value = parts[i]));
                     if (document.body.classList.contains("advanced-mode")) {
                         // In advanced mode, select the "Cron" radio button.
-                        document.querySelector(
-                            `input[name="${jobName}_schedule_type"][value="cron"]`,
-                        ).checked = true;
+                        document.querySelector(`input[name="${jobName}_schedule_type"][value="cron"]`).checked = true;
                     } else {
                         // In simple mode, hide all radio buttons and show the "Custom" label.
                         radioButtons.forEach((rb) => (rb.parentElement.style.display = "none"));
@@ -193,18 +179,13 @@ document.addEventListener("DOMContentLoaded", () => {
         // Reads the current UI state and generates the corresponding cron string.
         const generateCron = () => {
             // If we are in simple mode and have a "Custom" schedule, use the hidden cron values.
-            if (
-                !document.body.classList.contains("advanced-mode") &&
-                customLabel.style.display !== "none"
-            ) {
+            if (!document.body.classList.contains("advanced-mode") && customLabel.style.display !== "none") {
                 return Object.values(cronInputs)
                     .map((i) => i.value)
                     .join(" ");
             }
             // Otherwise, generate based on the selected radio button.
-            const selectedType = document.querySelector(
-                `input[name="${jobName}_schedule_type"]:checked`,
-            ).value;
+            const selectedType = document.querySelector(`input[name="${jobName}_schedule_type"]:checked`).value;
             if (selectedType === "interval") {
                 const hours = Math.max(1, parseInt(intervalInput.value, 10));
                 return `0 */${hours} * * *`;
@@ -254,7 +235,7 @@ document.addEventListener("DOMContentLoaded", () => {
                         if (response.ok && data.success) {
                             window.showCustomAlert(
                                 "Verification started. Check the Dashboard for progress.",
-                                '<i class="fas fa-check-circle" style="color: #28a745;"></i> Started'
+                                '<i class="fas fa-check-circle" style="color: #28a745;"></i> Started',
                             );
                         } else {
                             throw new Error(data.error || "Failed to start job.");
@@ -262,7 +243,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     } catch (error) {
                         window.showCustomAlert(`Error: ${error.message}`);
                     }
-                }
+                },
             );
         });
     }
@@ -305,7 +286,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 "This will delete your current Audible login credentials and force the application to restart. You will be required to complete the setup wizard again. Are you sure?",
                 // The third argument is the callback function to run on confirmation.
                 // We call the global handleResetAuth function from ui.js.
-                handleResetAuth 
+                handleResetAuth,
             );
         });
     }
@@ -317,7 +298,7 @@ document.addEventListener("DOMContentLoaded", () => {
             // Immediately show a "processing" alert to the user.
             showCustomAlert(
                 "Clearing the image cache... Please wait.",
-                '<i class="fas fa-spinner fa-spin"></i> Processing...'
+                '<i class="fas fa-spinner fa-spin"></i> Processing...',
             );
 
             try {
@@ -330,17 +311,13 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
 
                 // On success, update the alert with the success message from the server.
-                showCustomAlert(
-                    data.message,
-                    '<i class="fas fa-check-circle" style="color: #28a745;"></i> Success'
-                );
-
+                showCustomAlert(data.message, '<i class="fas fa-check-circle" style="color: #28a745;"></i> Success');
             } catch (error) {
                 console.error("Clear image cache failed:", error);
                 // On failure, update the alert to show the error.
                 showCustomAlert(
                     `Could not clear the image cache: ${error.message}`,
-                    '<i class="fas fa-times-circle" style="color: #dc3545;"></i> Error'
+                    '<i class="fas fa-times-circle" style="color: #dc3545;"></i> Error',
                 );
             }
         };
@@ -352,7 +329,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 '<i class="fas fa-broom"></i> Clear Image Cache?',
                 "This will delete all downloaded cover art. Are you sure you want to proceed? The images will be re-downloaded on the next library sync.",
                 // Pass the handleClearCache function as the callback to run on confirmation.
-                handleClearCache
+                handleClearCache,
             );
         });
     }
@@ -360,7 +337,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // Advanced Mode Toggle
     const setAdvancedMode = (isAdvanced) => {
         document.body.classList.toggle("advanced-mode", isAdvanced);
-        
+
         // Replace the old logic with a simple call to our new, robust function.
         // Use a timeout to allow the browser to render the new content before we measure it.
         setTimeout(recalculateActiveAccordionHeight, 50);
@@ -372,7 +349,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 fast_sync_schedule: { cron: fastSyncScheduler.generateCron() },
                 deep_sync_schedule: { cron: deepSyncScheduler.generateCron() },
                 process_schedule: { cron: processScheduler.generateCron() },
-            }
+            },
         };
         fastSyncScheduler.populateFromCron(settingsData.tasks.fast_sync_schedule.cron);
         deepSyncScheduler.populateFromCron(settingsData.tasks.deep_sync_schedule.cron);
@@ -409,17 +386,9 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     // Main Enable/Disable Toggles for all three sections.
-    autoFastSyncToggle.addEventListener("change", () =>
-        toggleOptionsGroup(autoFastSyncToggle, autoFastSyncOptions),
-    );
-    autoDeepSyncToggle.addEventListener("change", () =>
-        toggleOptionsGroup(autoDeepSyncToggle, autoDeepSyncOptions),
-    );
-    autoProcessToggle.addEventListener("change", () =>
-        toggleOptionsGroup(autoProcessToggle, autoProcessOptions),
-    );
-
-
+    autoFastSyncToggle.addEventListener("change", () => toggleOptionsGroup(autoFastSyncToggle, autoFastSyncOptions));
+    autoDeepSyncToggle.addEventListener("change", () => toggleOptionsGroup(autoDeepSyncToggle, autoDeepSyncOptions));
+    autoProcessToggle.addEventListener("change", () => toggleOptionsGroup(autoProcessToggle, autoProcessOptions));
 
     // --- Accordion Resize on Window Change ---
     // This ensures that if an accordion is open and the window is resized
@@ -482,10 +451,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const checkFrequency = (cron, name) => {
                 const parts = cron.split(" ");
                 const minutePart = parts[0];
-                if (
-                    minutePart === "*" ||
-                    (minutePart.startsWith("*/") && parseInt(minutePart.substring(2)) < 5)
-                ) {
+                if (minutePart === "*" || (minutePart.startsWith("*/") && parseInt(minutePart.substring(2)) < 5)) {
                     showCustomAlert(
                         `The schedule for the <strong>${name} job</strong> is set to run more frequently than every 5 minutes. This is not recommended and may cause issues.`,
                     );
@@ -552,12 +518,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
     audibleAuthCheckBtn.addEventListener("click", () => handleManualAudibleAuthCheck(audibleAuthCheckBtn));
 
-// Auto Concurrency Button
+    // Auto Concurrency Button
     // We now only need to target the single, always-visible input field.
-    setupAutoConcurrencyDetector(
-        "auto-concurrency-btn",
-        "total-processing-cores-input"
-    );
+    setupAutoConcurrencyDetector("auto-concurrency-btn", "total-processing-cores-input");
 
     // "Run Now" Buttons
     document.querySelectorAll(".run-now-btn").forEach((btn) => {
@@ -671,7 +634,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     // --- 5. INITIAL PAGE LOAD ---
-    
+
     // Set the initial visibility of the scheduler options based on the server-rendered state of the toggles.
     toggleOptionsGroup(autoFastSyncToggle, autoFastSyncOptions);
     toggleOptionsGroup(autoDeepSyncToggle, autoDeepSyncOptions);
@@ -721,8 +684,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
             // Step 4: Apply the highlight flash after the final scroll has settled.
             setTimeout(() => {
-                const settingsToHighlight =
-                    tasksHeader.nextElementSibling.querySelectorAll(".toggle-control");
+                const settingsToHighlight = tasksHeader.nextElementSibling.querySelectorAll(".toggle-control");
                 settingsToHighlight.forEach((el) => {
                     el.classList.add("highlight-flash");
                 });
