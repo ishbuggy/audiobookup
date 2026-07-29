@@ -158,7 +158,7 @@ This method uses the pre-built Docker image from GitHub Packages.
                 # Volume for the critical database and Audible auth files
                 - ./appdata/database:/database
 
-                # Volume where your final, converted .m4b audiobook files will be stored
+                # Volume where your final, converted audiobook files (.m4b or .mp3) will be stored
                 - ./audiobooks:/data
             restart: unless-stopped
     ```

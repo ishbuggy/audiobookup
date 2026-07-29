@@ -16,17 +16,17 @@ High-level direction for the project: what's planned, why, and roughly when. Thi
 | v0.18.0 | Stability & security hardening (all REVIEW.md findings) | Shipped (2026-07-20) |
 | v0.19.0 / v0.20.0 | Backend correctness + frontend library views, editing & card actions | Shipped (2026-07-22, as v0.20.0) |
 | v0.21.0 | Image hardening (Debian trixie base, GPG-verified gosu, apt upgrade) | Shipped (2026-07-22) |
-| **v0.22.0** | **Libation-parity download & processing options + settings IA** | Planned |
+| v0.22.0 | Libation-parity download & processing options + settings IA | Shipped (2026-07-29) |
 | v0.23.0+ | Architectural features (see "Longer horizon") | Ideas |
 
-The v0.19 backend and v0.20 frontend tracks were developed backend-first and released together as **v0.20.0**; **v0.21.0** followed with container-image hardening. The next release, **v0.22.0**, is driven by a settings-parity review of Libation (see `ref-docs/reports/v0.22.0/` and `ref-docs/libation/`).
+The v0.19 backend and v0.20 frontend tracks were developed backend-first and released together as **v0.20.0**; **v0.21.0** followed with container-image hardening. **v0.22.0** shipped 2026-07-29, driven by a settings-parity review of Libation (see `ref-docs/reports/v0.22.0/` and `ref-docs/libation/`). The next milestone is not yet scoped; candidates live under "Longer horizon" below.
 
 ---
 
-## v0.22.0 — Libation-parity download & processing options
+## v0.22.0 — Libation-parity download & processing options (shipped 2026-07-29)
 
-Broaden how much control users have over *how* books are downloaded and processed, toward rough
-parity with Libation's option set, and re-organize the Settings page so the larger surface stays
+Broadened how much control users have over *how* books are downloaded and processed, toward rough
+parity with Libation's option set, and re-organized the Settings page so the larger surface stays
 approachable: a simple **Standard** view with the full set revealed by **Advanced Mode**, and
 settings re-categorized into clearer groups. Detailed step plan and settings schema live in
 `PLAN.md`. Reference material: `ref-docs/reports/v0.22.0/` (Libation settings screenshots) and

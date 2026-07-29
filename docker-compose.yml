@@ -37,7 +37,7 @@ services:
       # Volume for critical database and Audible authentication files
       - ./appdata/database:/database
 
-      # Volume for your final, converted audiobook files (.m4b)
+      # Volume for your final, converted audiobook files (.m4b, or .mp3 when MP3 output is selected)
       - ./audiobooks:/data
 
     restart: unless-stopped
