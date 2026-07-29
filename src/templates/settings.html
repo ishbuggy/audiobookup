@@ -361,7 +361,8 @@
                                     Match Source Bitrate
                                     <small style="display: block; font-weight: normal; color: #6c757d">
                                         When Target is "Bitrate", derive the bitrate from the source instead of the
-                                        fixed value above.
+                                        fixed value above, rounded up to the nearest standard MP3 bitrate. If the source
+                                        bitrate can't be determined, the fixed Bitrate value above is used instead.
                                     </small>
                                 </label>
                                 <label class="switch">
@@ -739,50 +740,6 @@
                                 />
                                 <span class="slider"></span>
                             </label>
-                        </div>
-
-                        <!-- Folder/file split is a Phase 9 stretch. Empty templates fall back to the
-                             single template above; both must be non-empty to take effect. Advanced only. -->
-                        <div
-                            class="form-group advanced-setting"
-                            style="flex-direction: column; align-items: flex-start"
-                        >
-                            <label for="folder-template" style="margin-bottom: 0.5em">
-                                Folder Template (optional)
-                                <small style="display: block; font-weight: normal; color: #6c757d">
-                                    Advanced: when both Folder and File templates are set, they compose as "folder/file"
-                                    and override the single template above. Leave blank to use the template above.
-                                </small>
-                            </label>
-                            <input
-                                type="text"
-                                id="folder-template"
-                                class="setting-input"
-                                data-path="naming.folder_template"
-                                style="width: 100%; box-sizing: border-box"
-                                value="{{ settings.naming.folder_template | default('') }}"
-                            />
-                        </div>
-
-                        <div
-                            class="form-group advanced-setting"
-                            style="flex-direction: column; align-items: flex-start"
-                        >
-                            <label for="file-template" style="margin-bottom: 0.5em">
-                                File Template (optional)
-                                <small style="display: block; font-weight: normal; color: #6c757d">
-                                    The file name part, used together with the Folder Template above. Same placeholders;
-                                    leave blank to use the single template at the top of this section.
-                                </small>
-                            </label>
-                            <input
-                                type="text"
-                                id="file-template"
-                                class="setting-input"
-                                data-path="naming.file_template"
-                                style="width: 100%; box-sizing: border-box"
-                                value="{{ settings.naming.file_template | default('') }}"
-                            />
                         </div>
                     </div>
                 </div>
