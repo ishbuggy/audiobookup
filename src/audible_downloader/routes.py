@@ -65,7 +65,13 @@ from audible_downloader.job_manager import cancel_active_job, start_new_job
 from audible_downloader.logger import log
 
 # Import the settings functions from the settings module
-from audible_downloader.settings import deep_update, load_settings, resolve_output_format, save_settings
+from audible_downloader.settings import (
+    deep_update,
+    load_settings,
+    normalize_output_format,
+    resolve_output_format,
+    save_settings,
+)
 
 # Import the global task_runner instance
 from audible_downloader.task_runner import task_runner
@@ -202,6 +208,15 @@ def post_settings():
         # Always delete the temporary plain-text key before saving.
         del new_settings["password"]
 
+    # The settings page's "Import Settings" button POSTs an uploaded settings
+    # file here verbatim, so a pre-v0.22 export arrives carrying only the legacy
+    # no_reencode flag. Translate it to an output_format on the PAYLOAD before the
+    # merge below: afterwards the flag is unreadable (see the mirror note), and
+    # the user's lossless preference would be silently inverted. Same helper the
+    # read side uses on a legacy settings.json — the payload is both the "raw
+    # file" being inspected and the dict being corrected.
+    normalize_output_format(new_settings, new_settings)
+
     # --- Merge the rest of the settings ---
     updated_settings = deep_update(current_settings, new_settings)
 
@@ -210,10 +225,9 @@ def post_settings():
     # this mirror: `updated_settings` is the deep-merged dict, which always carries
     # an output_format value (from the persisted settings or DEFAULT_SETTINGS), so
     # resolve_output_format never falls back to a posted no_reencode — a payload
-    # that sends only the old flag has it silently overwritten here. Legacy
-    # settings.json files are handled instead by the read-side normalization in
-    # settings.py; any future surface that POSTs a raw legacy file (e.g. a settings
-    # import) must run that same normalization on the payload before this merge.
+    # that sends only the old flag has it silently overwritten here. That is why
+    # legacy payloads are normalized above, and legacy settings.json files by the
+    # read-side normalization in settings.py.
     conversion = updated_settings.setdefault("conversion", {})
     conversion["no_reencode"] = resolve_output_format(updated_settings) == "original"
 

@@ -144,6 +144,26 @@ def apply_branding_trim(chapters, intro_ms, outro_ms, total_duration_ms):
     return shifted, total_duration_ms - intro_ms - outro_ms
 
 
+def drop_zero_length_chapters(chapters):
+    """Remove chapters that span no audio at all.
+
+    Meant to run right AFTER the caller's sanitize step, which recomputes every
+    `length_ms` from the next chapter's start — that is what can produce a zero:
+    two entries sharing a start offset (a flattened parent whose first child
+    begins at the parent's own offset), or the branding trim clamping several
+    early starts down to 0.
+
+    A zero-length entry is not merely cosmetic. It becomes a `-t 0` chunk
+    encode, which ffmpeg happily writes as a header-only file with no audio
+    stream; the concat merge takes its stream layout from the FIRST chunk, so a
+    zero-length chapter in first position fails the whole book with
+    "Stream map '0:a' matches no streams".
+
+    Returns a new list (the caller's dicts are never mutated).
+    """
+    return [ch for ch in chapters if ch.get("length_ms", 0) > 0]
+
+
 def strip_unabridged(text):
     """Remove every "(Unabridged)" occurrence (with leading whitespace) and
     collapse any doubled spaces the removal leaves behind. Non-string / falsy

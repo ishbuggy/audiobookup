@@ -160,26 +160,36 @@ def deep_update(source, overrides):
     return source
 
 
-def _normalize_output_format(settings, loaded_settings):
+def normalize_output_format(settings, loaded_settings):
     """Back-fill conversion.output_format from the legacy no_reencode flag.
 
     Old settings.json files predate the output_format enum and only carry
-    no_reencode. When the *raw loaded file* has no output_format key but its
-    no_reencode is truthy, the user's intent was "keep Audible's original
-    audio", so map that to output_format == "original". We inspect
-    loaded_settings (the raw file) rather than the merged dict, because the
-    merged dict always carries the default "m4b" and would hide the omission.
+    no_reencode. When the *raw loaded file* has no output_format key but does
+    carry no_reencode, that flag is the only statement of the user's intent:
+    truthy means "keep Audible's original audio" ("original"), falsy means
+    "convert it" ("m4b", the pre-enum default). We inspect loaded_settings (the
+    raw file) rather than the merged dict, because the merged dict always
+    carries the default "m4b" and would hide the omission.
+
+    Used both when loading settings.json and — with the same dict passed as both
+    arguments — on an uploaded settings file POSTed to /api/settings, which is
+    the same legacy shape arriving through a different door.
     """
     conv_loaded = loaded_settings.get("conversion", {})
     if not isinstance(conv_loaded, dict):
         return
-    if "output_format" not in conv_loaded and conv_loaded.get("no_reencode"):
-        settings["conversion"]["output_format"] = "original"
+    conv_target = settings.get("conversion")
+    if not isinstance(conv_target, dict):
+        return
+    if "output_format" not in conv_loaded and "no_reencode" in conv_loaded:
+        conv_target["output_format"] = "original" if conv_loaded.get("no_reencode") else "m4b"
 
 
 def resolve_output_format(settings):
     """The one place that decides the output format, honoring the legacy flag."""
-    conv = settings.get("conversion", {})
+    # `or {}` rather than a plain default: a hand-edited file can carry an
+    # explicit "conversion": null, which .get() would hand straight back.
+    conv = settings.get("conversion") or {}
     fmt = conv.get("output_format")
     if fmt in ("original", "m4b", "mp3"):
         return fmt
@@ -202,7 +212,7 @@ def load_settings():
             # to ensure all keys are present.
             settings = copy.deepcopy(DEFAULT_SETTINGS)
             deep_update(settings, loaded_settings)
-            _normalize_output_format(settings, loaded_settings)
+            normalize_output_format(settings, loaded_settings)
             return settings
         except (OSError, json.JSONDecodeError) as e:
             print(f"Error loading settings.json: {e}. Using default settings.")

@@ -7,6 +7,7 @@ import pytest
 
 from audible_downloader.chapter_transforms import (
     apply_branding_trim,
+    drop_zero_length_chapters,
     flatten_chapter_tree,
     merge_credit_chapters,
     render_chapter_title,
@@ -203,6 +204,71 @@ class TestApplyBrandingTrim:
         chapters = [_ch("One", 10_000, 600_000)]
         apply_branding_trim(chapters, 2_000, 0, self.TOTAL)
         assert chapters[0]["start_offset_ms"] == 10_000
+
+
+def _sanitize_lengths(chapters, effective_total_ms):
+    """Mirror of prepare_book_assets' sanitize loop: recompute every length from
+    the next chapter's start (the last one from the effective total), clamped at
+    zero. Kept here so the drop tests exercise the same inputs the pipeline
+    actually feeds drop_zero_length_chapters."""
+    out = [dict(ch) for ch in chapters]
+    out.sort(key=lambda x: x.get("start_offset_ms", 0))
+    for i, ch in enumerate(out):
+        current_start = ch.get("start_offset_ms", 0)
+        if i < len(out) - 1:
+            new_length = out[i + 1].get("start_offset_ms", 0) - current_start
+        else:
+            new_length = effective_total_ms - current_start
+        ch["length_ms"] = max(0, new_length)
+    return out
+
+
+class TestDropZeroLengthChapters:
+    """B1 regression: a chapter that spans no audio becomes a "-t 0" chunk encode
+    (a header-only file with no audio stream), and in first position that fails
+    the concat merge outright. Both new v0.22.0 chapter features can produce one."""
+
+    def test_normal_list_passes_through_unchanged(self):
+        chapters = [_ch("One", 0, 600_000), _ch("Two", 600_000, 600_000)]
+        assert drop_zero_length_chapters(chapters) == chapters
+
+    def test_drops_zero_and_negative_lengths(self):
+        chapters = [_ch("Zero", 0, 0), _ch("One", 0, 600_000), _ch("Negative", 600_000, -5)]
+        assert [c["title"] for c in drop_zero_length_chapters(chapters)] == ["One"]
+
+    def test_missing_length_key_is_dropped(self):
+        assert drop_zero_length_chapters([{"title": "One", "start_offset_ms": 0}]) == []
+
+    def test_does_not_mutate_input(self):
+        chapters = [_ch("One", 0, 0)]
+        drop_zero_length_chapters(chapters)
+        assert chapters == [_ch("One", 0, 0)]
+
+    def test_flattened_parent_sharing_first_childs_start_leaves_no_zero(self):
+        # The primary vector: a part whose first child begins at the part's own
+        # offset. Flatten emits both, sanitize gives the parent length 0.
+        nested = [
+            _ch("Part 1", 0, 1_200_000, children=[_ch("Ch 1", 0, 600_000), _ch("Ch 2", 600_000, 600_000)]),
+        ]
+        flat = flatten_chapter_tree(nested, join_titles=True)
+        sanitized = _sanitize_lengths(flat, 1_200_000)
+        assert 0 in [c["length_ms"] for c in sanitized]  # the defect this guards
+
+        kept = drop_zero_length_chapters(sanitized)
+        assert all(c["length_ms"] > 0 for c in kept)
+        assert [c["title"] for c in kept] == ["Part 1: Ch 1", "Part 1: Ch 2"]
+
+    def test_trim_clamped_duplicate_starts_leave_no_zero(self):
+        # The Phase 6 vector: chapter 2 starts inside the brand intro, so both it
+        # and chapter 1 clamp to start 0 and the first ends up zero-length.
+        chapters = [_ch("Opening", 0, 1_000), _ch("One", 1_000, 600_000), _ch("Two", 601_000, 600_000)]
+        shifted, effective = apply_branding_trim(chapters, 2_043, 0, 1_201_000)
+        sanitized = _sanitize_lengths(shifted, effective)
+        assert sanitized[0]["length_ms"] == 0
+
+        kept = drop_zero_length_chapters(sanitized)
+        assert all(c["length_ms"] > 0 for c in kept)
+        assert [c["title"] for c in kept] == ["One", "Two"]
 
 
 class TestStripUnabridged:

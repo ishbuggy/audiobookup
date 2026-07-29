@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Not supported:** Requesting Widevine DRM, the xHE-AAC codec, or Spatial Audio is not possible in AudioBookup. These require a licensing path that its underlying download tool cannot use — a permanent limitation of the toolchain, not a deferred feature.
 
 ### Changed
-- **Library Card Cleanup:** Already-downloaded books no longer show a "Re-download" button on their library cards (in any of the Grid, List, or Table views). Re-downloading a book you already have is a deliberate, destructive action — it overwrites the existing file — so it now lives only in the book's detail modal as "Force Re-download", with its confirmation prompt. The "Download" button on New, Missing, and Error books is unchanged.
+- **Library Card Cleanup:** Already-downloaded books no longer show a "Re-download" button on their library cards (in any of the Grid, List, or Table views). Re-downloading a book you already have is a deliberate action — it converts the book again using your current settings, and if the output format or naming has changed since the original download, the new file lands at a new path and the previous one is left on disk — so it now lives only in the book's detail modal as "Force Re-download", with its confirmation prompt. The "Download" button on New, Missing, and Error books is unchanged.
 - **CI:** Bumped the GitHub Actions used by the image-publish workflow to their current major versions (checkout v7, docker setup-qemu/setup-buildx/login v4, metadata v6, build-push v7) so they run on Node.js 24, clearing the runner's Node 20 deprecation warnings. Build-only change; the published image is unaffected.
 
 ## [0.21.0] - 2026-07-22

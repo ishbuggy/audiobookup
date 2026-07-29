@@ -340,7 +340,11 @@ def rename_book_to_match_metadata(asin):
         log.info(f"RENAME ({asin}): Moved file to '{target}'.")
         _cleanup_empty_dirs(os.path.dirname(current_path))
         return target
-    except OSError as e:
+    except (OSError, ValueError) as e:
+        # ValueError as well as OSError: a control character (a NUL byte in a
+        # custom title survives _sanitize_filename) makes os.makedirs raise
+        # "embedded null byte", and this is called after the metadata edit has
+        # already been committed — it must never escape as a 500.
         log.warning(f"RENAME ({asin}): Could not rename file(s): {e}")
         return None
 

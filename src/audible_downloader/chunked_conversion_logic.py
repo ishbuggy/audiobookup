@@ -20,6 +20,7 @@ from . import (
 )
 from .chapter_transforms import (
     apply_branding_trim,
+    drop_zero_length_chapters,
     flatten_chapter_tree,
     merge_credit_chapters,
     render_chapter_title,
@@ -669,6 +670,18 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
                     new_length = effective_total_ms - current_start
                 chapters_list[i]["length_ms"] = max(0, new_length)
 
+            # Two chapters sharing a start offset (a flattened parent and its
+            # first child, or early chapters the branding trim clamped to 0) come
+            # out of the loop above with length 0. Drop them here, before both the
+            # chunk list and the FFMETADATA writer, so no zero-length chapter can
+            # reach any output: a "-t 0" chunk encode writes a header-only file
+            # with no audio stream, and one in first position fails the merge.
+            kept_chapters = drop_zero_length_chapters(chapters_list)
+            dropped = len(chapters_list) - len(kept_chapters)
+            if dropped:
+                log.info(f"PREPARE ({asin}): Dropped {dropped} zero-length chapter(s) after sanitizing.")
+            chapters_list = kept_chapters
+
         # 2. Time-Based Auto-Chunking (see _should_auto_chunk for the gate).
         if _should_auto_chunk(lossless, audio_file, chapters_list, effective_total_sec):
             log.info(f"PREPARE ({asin}): Single chapter detected. Applying auto-chunking (15m).")
@@ -1064,8 +1077,10 @@ def build_mp3_flags(mp3_settings, source_bitrate_bps, source_sample_rate):
          produce "-b:a 0k".
       2. `-compression_level` from encoder_quality (LAME effort; 0 = best).
       3. `-ac 1` when downsample_mono.
-      4. `-ar N` ONLY when the source sample rate exceeds max_sample_rate (never
-         upsample a source that's already at/below the cap).
+      4. `-ar N` ONLY when the source sample rate exceeds a POSITIVE numeric
+         max_sample_rate (never upsample a source that's already at/below the
+         cap, and never pass a cleared/negative/junk field through to ffmpeg,
+         which would fail the encode with "-ar 0"/"-ar -1").
     """
     mp3 = mp3_settings or {}
     flags = []
@@ -1073,6 +1088,11 @@ def build_mp3_flags(mp3_settings, source_bitrate_bps, source_sample_rate):
     target = mp3.get("target", "quality")
     if target == "bitrate":
         kbps = mp3.get("bitrate_kbps", 128)
+        if kbps is None:
+            # An explicit null in a hand-edited settings.json would blow up on the
+            # max() below. Only None falls back — a 0 from a cleared UI field is
+            # left alone so the 32 kbps floor there still applies.
+            kbps = 128
         if mp3.get("match_source_bitrate", True) and source_bitrate_bps:
             needed_kbps = source_bitrate_bps / 1000
             kbps = next((b for b in MP3_STANDARD_BITRATES_KBPS if b >= needed_kbps), 320)
@@ -1093,8 +1113,12 @@ def build_mp3_flags(mp3_settings, source_bitrate_bps, source_sample_rate):
     if mp3.get("downsample_mono", False):
         flags += ["-ac", "1"]
 
+    # The cap must be POSITIVE to be emitted: the UI's min/max attributes are
+    # decorative (the page reads the field with a bare Number()), so a typed "-1"
+    # reaches here and "-ar -1" would fail every encode. A zero or negative cap
+    # is treated as "no cap", exactly like a missing source sample rate.
     max_sample_rate = mp3.get("max_sample_rate", 44100)
-    if source_sample_rate and max_sample_rate and source_sample_rate > max_sample_rate:
+    if source_sample_rate and isinstance(max_sample_rate, (int, float)) and 0 < max_sample_rate < source_sample_rate:
         flags += ["-ar", str(max_sample_rate)]
 
     return flags
@@ -1153,7 +1177,10 @@ def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context):
     chapters as id3v2 CHAP frames and the cover as APIC in the same pass.
 
     Structured like remux_book_lossless (Popen + process_registry in try/finally,
-    -15 -> cancelled/False, stderr summarized on failure). Progress is driven by
+    -15 -> cancelled/False, stderr summarized on failure). ffmpeg writes to a
+    sibling ".part" file that is renamed into place only after a clean exit, so a
+    failed or cancelled encode can never leave a truncated book at the library
+    path for a later deep sync to adopt. Progress is driven by
     ffmpeg's `-progress pipe:1` stream, occupying the 30..90 band; the final
     verify/finalize takes it to 100.
 
@@ -1210,10 +1237,25 @@ def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context):
         # Output-side duration cap: the trimmed length, measured from the -ss
         # point above.
         command += ["-t", str(total_duration_sec)]
-    command += [final_output_path]
+    # Encode to a ".part" file next to the destination, never straight to the
+    # library path. A cancelled or failed encode would otherwise leave a
+    # truncated .mp3 behind — and unlike a half-written .m4b (no moov atom, so
+    # ffprobe rejects it) a truncated MP3 is perfectly readable, ID3 tags and
+    # all, so the next deep sync would adopt it and mark the book DOWNLOADED.
+    # Same directory means the same filesystem, so the rename below is atomic.
+    part_path = final_output_path + ".part"
+    command += [part_path]
 
     process = None
     stderr_chunks = []
+
+    def _discard_partial():
+        """Best-effort cleanup of the ".part" file after a failed/cancelled run."""
+        try:
+            os.remove(part_path)
+        except OSError as e:
+            log.debug(f"MP3 ({asin}): Could not remove partial encode '{part_path}': {e}")
+
     try:
         log.debug(f"MP3 ({asin}): Command: {' '.join(command)}")
         process = subprocess.Popen(
@@ -1257,6 +1299,7 @@ def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context):
         if returncode != 0:
             if returncode == -15:
                 log.info(f"MP3 ({asin}): Encode cancelled.")
+                _discard_partial()
                 return False
             stderr_text = "".join(stderr_chunks)
             reason = _summarize_subprocess_error(
@@ -1264,6 +1307,16 @@ def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context):
                 "MP3 encode failed.",
             )
             log.error(f"MP3 ({asin}): Encode failed: {reason}")
+            _discard_partial()
+            return False
+
+        # Promote the finished encode into the library in one atomic rename, so
+        # the final path never exists in a half-written state.
+        try:
+            os.replace(part_path, final_output_path)
+        except OSError as e:
+            log.error(f"MP3 ({asin}): Could not move the finished encode into place: {e}")
+            _discard_partial()
             return False
 
         log.info(f"MP3 ({asin}): Successfully encoded MP3 at {final_output_path}")
@@ -1271,6 +1324,7 @@ def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context):
 
     except OSError as e:
         log.error(f"MP3 ({asin}): Could not run ffmpeg for MP3 encode: {e}")
+        _discard_partial()
         return False
     finally:
         if process:

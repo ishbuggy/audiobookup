@@ -681,3 +681,35 @@ class TestSettingsOutputFormatMirror:
         settings = client.get("/api/settings").get_json()
         assert settings["conversion"]["output_format"] == "mp3"
         assert settings["conversion"]["no_reencode"] is False
+
+
+class TestSettingsImportLegacyPayload:
+    """Importing a pre-v0.22 settings export POSTs the raw file here: it carries
+    no_reencode and no output_format, so the payload must be normalized before
+    the merge or the user's lossless preference is silently discarded."""
+
+    def test_legacy_no_reencode_true_imports_as_original(self, client, completed_setup):
+        _login_session(client)
+        response = client.post("/api/settings", json={"conversion": {"no_reencode": True}})
+        assert response.status_code == 200
+        settings = client.get("/api/settings").get_json()
+        assert settings["conversion"]["output_format"] == "original"
+        assert settings["conversion"]["no_reencode"] is True
+
+    def test_legacy_no_reencode_false_imports_as_m4b(self, client, completed_setup):
+        _login_session(client)
+        # Start from "original" so a stuck value would be visible in the result.
+        client.post("/api/settings", json={"conversion": {"output_format": "original"}})
+        response = client.post("/api/settings", json={"conversion": {"no_reencode": False}})
+        assert response.status_code == 200
+        settings = client.get("/api/settings").get_json()
+        assert settings["conversion"]["output_format"] == "m4b"
+        assert settings["conversion"]["no_reencode"] is False
+
+    def test_payload_carrying_both_keeps_the_explicit_output_format(self, client, completed_setup):
+        _login_session(client)
+        response = client.post("/api/settings", json={"conversion": {"output_format": "mp3", "no_reencode": True}})
+        assert response.status_code == 200
+        settings = client.get("/api/settings").get_json()
+        assert settings["conversion"]["output_format"] == "mp3"
+        assert settings["conversion"]["no_reencode"] is False

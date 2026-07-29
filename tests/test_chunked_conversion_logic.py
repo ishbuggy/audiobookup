@@ -731,6 +731,9 @@ class TestEncodeBookMp3Trim:
             mock.patch.object(ccl.process_registry, "register"),
             mock.patch.object(ccl.process_registry, "unregister"),
             mock.patch.object(ccl, "_yield_progress"),
+            # The encode writes to "<final>.part" and renames on success; there is
+            # no real file here, so the promotion is stubbed out.
+            mock.patch.object(ccl.os, "replace"),
         ):
             result = ccl.encode_book_mp3("B0X", 1, "/tmp/x", "/data/out.mp3", context)
         return result, popen.call_args.args[0]
@@ -772,7 +775,7 @@ class TestEncodeBookMp3Trim:
             "0",
             "-id3v2_version",
             "3",
-            "/data/out.mp3",
+            "/data/out.mp3.part",
         ]
 
     def test_context_without_trim_keys_is_also_untouched(self):
@@ -803,7 +806,7 @@ class TestEncodeBookMp3Trim:
         # -t is an output option: after the codec flags, before the output path.
         assert cmd[cmd.index("-t") + 1] == "3592.896"
         assert cmd.index("-t") > cmd.index("libmp3lame")
-        assert cmd[-1] == "/data/out.mp3"
+        assert cmd[-1] == "/data/out.mp3.part"
 
     def test_outro_only_trim_still_caps_the_duration(self):
         context = {
@@ -817,6 +820,94 @@ class TestEncodeBookMp3Trim:
         _, cmd = self._run(context)
         assert cmd[cmd.index("-ss") + 1] == "0.0"
         assert cmd[cmd.index("-t") + 1] == "3595.0"
+
+
+class TestEncodeBookMp3PartialContainment:
+    """B2 regression: ffmpeg writes to "<final>.part", promoted with an atomic
+    rename only on a clean exit. A truncated .mp3 left at the library path is
+    fully probe-readable (unlike a moov-less .m4b), so the next deep sync would
+    adopt it and mark the book DOWNLOADED."""
+
+    FINAL = "/data/out.mp3"
+    PART = "/data/out.mp3.part"
+    CONTEXT = {
+        "audio_file": "/tmp/x/master_intermediate.m4b",
+        "chapter_file": "/tmp/x/chapters.txt",
+        "cover_file": None,
+        "total_duration_sec": 3_600.0,
+    }
+
+    def _run(self, returncode):
+        proc = mock.MagicMock()
+        proc.stdout.readline.return_value = ""
+        proc.stderr.read.return_value = ""
+        proc.wait.return_value = returncode
+        with (
+            mock.patch.object(ccl, "load_settings", return_value={}),
+            mock.patch.object(ccl, "_probe_source_audio_params", return_value=(None, None)),
+            mock.patch.object(ccl.subprocess, "Popen", return_value=proc) as popen,
+            mock.patch.object(ccl.process_registry, "register"),
+            mock.patch.object(ccl.process_registry, "unregister"),
+            mock.patch.object(ccl, "_yield_progress"),
+            mock.patch.object(ccl.os, "replace") as replace,
+            mock.patch.object(ccl.os, "remove") as remove,
+        ):
+            result = ccl.encode_book_mp3("B0X", 1, "/tmp/x", self.FINAL, self.CONTEXT)
+        return result, popen.call_args.args[0], replace, remove
+
+    def test_success_renames_the_part_file_into_place(self):
+        result, cmd, replace, remove = self._run(0)
+        assert result is True
+        assert cmd[-1] == self.PART
+        replace.assert_called_once_with(self.PART, self.FINAL)
+        remove.assert_not_called()
+
+    def test_failure_removes_the_part_file_and_never_promotes_it(self):
+        result, _, replace, remove = self._run(1)
+        assert result is False
+        replace.assert_not_called()
+        remove.assert_called_once_with(self.PART)
+
+    def test_cancellation_removes_the_part_file(self):
+        result, _, replace, remove = self._run(-15)
+        assert result is False
+        replace.assert_not_called()
+        remove.assert_called_once_with(self.PART)
+
+    def test_missing_part_file_on_cleanup_is_non_fatal(self):
+        # Best-effort cleanup: ffmpeg may never have created the file.
+        proc = mock.MagicMock()
+        proc.stdout.readline.return_value = ""
+        proc.stderr.read.return_value = ""
+        proc.wait.return_value = 1
+        with (
+            mock.patch.object(ccl, "load_settings", return_value={}),
+            mock.patch.object(ccl, "_probe_source_audio_params", return_value=(None, None)),
+            mock.patch.object(ccl.subprocess, "Popen", return_value=proc),
+            mock.patch.object(ccl.process_registry, "register"),
+            mock.patch.object(ccl.process_registry, "unregister"),
+            mock.patch.object(ccl, "_yield_progress"),
+            mock.patch.object(ccl.os, "remove", side_effect=OSError("gone")),
+        ):
+            assert ccl.encode_book_mp3("B0X", 1, "/tmp/x", self.FINAL, self.CONTEXT) is False
+
+    def test_failed_promotion_reports_failure_and_cleans_up(self):
+        proc = mock.MagicMock()
+        proc.stdout.readline.return_value = ""
+        proc.stderr.read.return_value = ""
+        proc.wait.return_value = 0
+        with (
+            mock.patch.object(ccl, "load_settings", return_value={}),
+            mock.patch.object(ccl, "_probe_source_audio_params", return_value=(None, None)),
+            mock.patch.object(ccl.subprocess, "Popen", return_value=proc),
+            mock.patch.object(ccl.process_registry, "register"),
+            mock.patch.object(ccl.process_registry, "unregister"),
+            mock.patch.object(ccl, "_yield_progress"),
+            mock.patch.object(ccl.os, "replace", side_effect=OSError("cross-device")),
+            mock.patch.object(ccl.os, "remove") as remove,
+        ):
+            assert ccl.encode_book_mp3("B0X", 1, "/tmp/x", self.FINAL, self.CONTEXT) is False
+        remove.assert_called_once_with(self.PART)
 
 
 class TestBuildMp3Flags:
@@ -908,6 +999,19 @@ class TestBuildMp3Flags:
 
     def test_sample_rate_gate_unknown_source_no_ar(self):
         assert "-ar" not in build_mp3_flags({"target": "quality", "max_sample_rate": 44100}, None, None)
+
+    @pytest.mark.parametrize("bad_cap", [-1, -44100, 0])
+    def test_sample_rate_gate_rejects_non_positive_caps(self, bad_cap):
+        # The UI's min/max attributes are decorative (a bare Number() reads the
+        # field), so a typed "-1" would otherwise emit "-ar -1" and fail every
+        # encode. Zero and negative both mean "no cap".
+        assert "-ar" not in build_mp3_flags({"target": "quality", "max_sample_rate": bad_cap}, None, 48000)
+
+    def test_null_bitrate_falls_back_to_the_default(self):
+        # A hand-edited settings.json can carry an explicit null, which would
+        # otherwise blow up in the floor clamp.
+        flags = build_mp3_flags({"target": "bitrate", "bitrate_kbps": None, "match_source_bitrate": False}, None, None)
+        assert flags[flags.index("-b:a") + 1] == "128k"
 
     @pytest.mark.parametrize(
         ("encoder_quality", "level"),

@@ -364,7 +364,16 @@ class TestRenameToMatchMetadata:
         row.update(over)
         return row
 
-    def _run(self, *, apply=True, row=None, target="/data/New/New.m4b", target_exists=False, target_owner=None):
+    def _run(
+        self,
+        *,
+        apply=True,
+        row=None,
+        target="/data/New/New.m4b",
+        target_exists=False,
+        target_owner=None,
+        makedirs_error=None,
+    ):
         row = row if row is not None else self._row()
         con = mock.MagicMock()
         con.__enter__.return_value = con
@@ -393,7 +402,7 @@ class TestRenameToMatchMetadata:
             mock.patch.object(processing_logic, "get_db_connection", return_value=con),
             mock.patch.object(processing_logic, "build_base_output_path", return_value=target),
             mock.patch("os.path.exists", side_effect=exists),
-            mock.patch("os.makedirs"),
+            mock.patch("os.makedirs", side_effect=makedirs_error),
             mock.patch.object(processing_logic.shutil, "move") as move,
             mock.patch.object(processing_logic, "_cleanup_empty_dirs"),
         ):
@@ -425,6 +434,20 @@ class TestRenameToMatchMetadata:
         result, move = self._run(target="/data/New/New.m4b")
         assert result == "/data/New/New.m4b"
         move.assert_any_call(self.CURRENT, "/data/New/New.m4b")
+
+    def test_value_error_from_makedirs_is_swallowed(self):
+        # W4 regression: a NUL byte survives _sanitize_filename, and os.makedirs
+        # raises ValueError("embedded null byte") — not OSError. The rename is
+        # best-effort and runs after the metadata edit is committed, so it must
+        # never escape as a 500.
+        result, move = self._run(makedirs_error=ValueError("embedded null byte"))
+        assert result is None
+        move.assert_not_called()
+
+    def test_os_error_from_makedirs_is_still_swallowed(self):
+        result, move = self._run(makedirs_error=OSError("read-only filesystem"))
+        assert result is None
+        move.assert_not_called()
 
     def test_collision_with_other_book_appends_asin(self):
         result, move = self._run(target="/data/New/New.m4b", target_exists=True, target_owner="B0OTHER")
