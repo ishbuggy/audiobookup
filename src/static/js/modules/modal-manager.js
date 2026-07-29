@@ -62,6 +62,9 @@ async function handleBookClick(event) {
     // DOWNLOADED book lives only in the detail modal, not on cards.
     const cardActionBtn = event.target.closest("button[data-card-action]");
     if (cardActionBtn) {
+        // "download" is the only card action; ignore anything else so a future
+        // action added to the markup can't silently start a download job.
+        if (cardActionBtn.dataset.cardAction !== "download") return;
         const libraryData = getLibraryData(); // imported from library-manager.js
         const book = libraryData.find((b) => b.asin === asin);
         if (!book) return;

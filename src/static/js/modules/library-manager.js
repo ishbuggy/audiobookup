@@ -118,7 +118,8 @@ const LAZY_PLACEHOLDER = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEA
 // re-download lives only in the book detail modal. Transitional statuses
 // (e.g. DOWNLOADING) get no button either. The click handling lives in
 // modal-manager.js via `data-card-action`, so every view must keep the
-// button's `data-asin`/`data-card-action` attributes intact.
+// button's `data-card-action` attribute and the card's `data-asin` intact
+// (the handler reads the ASIN from the card, not the button).
 function buildActionButtonHTML(book, esc) {
     if (book.status === "NEW" || book.status === "MISSING" || book.status === "ERROR") {
         return `<button class="retry-button" data-asin="${esc(book.asin)}" data-card-action="download">Download</button>`;

@@ -284,7 +284,7 @@ Once setup is complete, the application will always start in **Normal Mode**, ta
 - **Sync Library:** Triggers a manual **Deep Sync** (API fetch + full disk scan). This ensures your database matches your files perfectly.
 - **Process Downloads:** Opens a selection modal to batch download books marked as `NEW`, `MISSING`, or `ERROR`.
 - **Force Re-download:** Opened via the Book Detail modal, this allows you to re-download a specific book (overwriting the existing file) to fix glitches or update metadata.
-- **Retry:** Appears on individual book cards if a previous download failed. Clicking it instantly re-queues that specific book.
+- **Download:** Appears on individual book cards for books not yet on disk (New, Missing, or Error). Clicking it instantly queues that specific book.
 
 ---
 
@@ -396,7 +396,7 @@ If you suspect files are corrupt or incomplete (e.g., a 13-hour book is only 2 h
 2.  Scroll to the **Audible Connection** section.
 3.  Click the **"Verify Files"** button.
 4.  The application will scan every downloaded book. If a discrepancy is found, the book's status will change to **ERROR**.
-5.  Go to the Dashboard, filter by **Error**, and click **Retry** to re-download the correct file.
+5.  Go to the Dashboard, filter by **Error**, and click **Download** to re-download the correct file.
 
 ### Resetting Your Local User Password
 

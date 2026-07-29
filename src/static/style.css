@@ -1104,18 +1104,6 @@ h2 {
     background-color: #0056b3;
 }
 
-/* Cautionary variant for the card "Re-download" action (DOWNLOADED books),
-   matching the detail modal's yellow "Force Re-download" button. */
-.retry-button.is-warning {
-    background-color: #ffc107;
-    border-color: #e0a800;
-    color: #212529;
-}
-.retry-button.is-warning:hover:not(:disabled) {
-    background-color: #e0a800;
-    border-color: #e0a800;
-}
-
 /* ==========================================================================
    Library View Switcher (Grid / List / Table)
    ========================================================================== */
