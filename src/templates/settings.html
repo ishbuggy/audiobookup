@@ -44,7 +44,10 @@
                         <i class="fas fa-moon"></i>
                     </button>
                     <!-- START: Advanced Mode Toggle Location -->
-                    <div class="advanced-mode-control" title="Shows advanced options like cron scheduling">
+                    <div
+                        class="advanced-mode-control"
+                        title="Shows advanced options like MP3 encoder settings, chapter cleanups and cron scheduling"
+                    >
                         <label for="advanced-mode-toggle">Advanced Mode</label>
                         <label class="switch">
                             <input
@@ -228,10 +231,11 @@
                             <label for="output-format-select">
                                 Output Format
                                 <small style="display: block; font-weight: normal; color: #6c757d">
-                                    <strong>Original</strong> strips DRM only and keeps Audible's audio untouched
-                                    (fastest, no quality loss). <strong>AAC (.m4b)</strong> re-encodes at the quality
-                                    below. <strong>MP3</strong> produces a single MP3 with chapters, using the LAME
-                                    options below.
+                                    What we encode locally — separate from Download Quality (what we request from
+                                    Audible) in the Downloading section. <strong>Original</strong> strips DRM only and
+                                    keeps Audible's audio untouched (fastest, no quality loss).
+                                    <strong>AAC (.m4b)</strong> re-encodes at the quality below. <strong>MP3</strong>
+                                    produces a single MP3 with chapters, using the LAME options below.
                                 </small>
                             </label>
                             <!-- prettier-ignore -->
@@ -244,7 +248,13 @@
 
                         <!-- AAC quality: shown by JS only when Output Format == "m4b". -->
                         <div class="form-group" id="aac-quality-row">
-                            <label for="conversion-quality">AAC Quality:</label>
+                            <label for="conversion-quality">
+                                AAC Quality
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    The bitrate we encode to. Higher quality means larger files; it cannot recover
+                                    detail the downloaded source doesn't have.
+                                </small>
+                            </label>
                             <!-- prettier-ignore -->
                             <select id="conversion-quality" class="setting-input" data-path="conversion.quality">
                                 <option value="High" {% if settings.conversion.quality == 'High' %}selected{% endif %}>High (AAC, ~128 kbps)</option>
@@ -261,38 +271,18 @@
                                 <div class="radio-buttons-wrapper">
                                     <div style="flex-grow: 1"></div>
                                     <label class="radio-group-item">
-                                        <input
-                                            type="radio"
-                                            name="mp3_target"
-                                            value="quality"
-                                            class="setting-input"
-                                            data-path="conversion.mp3.target"
-                                            {%
-                                            if
-                                            settings.conversion.mp3.target=""
-                                            ="quality"
-                                            %}checked{%
-                                            endif
-                                            %}
-                                        />
+                                        <!-- NOTE: Prettier parses a bare `==` inside a tag as two separate
+                                             attributes and rewrites it into invalid Jinja, so both radios keep
+                                             their condition on one prettier-ignored line (same treatment the
+                                             <option> blocks elsewhere on this page get). -->
+                                        <!-- prettier-ignore -->
+                                        <input type="radio" name="mp3_target" value="quality" class="setting-input" data-path="conversion.mp3.target" {% if settings.conversion.mp3.target == 'quality' %}checked{% endif %} />
                                         <span class="radio-circle"><span class="radio-dot"></span></span>
                                         Quality (VBR)
                                     </label>
                                     <label class="radio-group-item">
-                                        <input
-                                            type="radio"
-                                            name="mp3_target"
-                                            value="bitrate"
-                                            class="setting-input"
-                                            data-path="conversion.mp3.target"
-                                            {%
-                                            if
-                                            settings.conversion.mp3.target=""
-                                            ="bitrate"
-                                            %}checked{%
-                                            endif
-                                            %}
-                                        />
+                                        <!-- prettier-ignore -->
+                                        <input type="radio" name="mp3_target" value="bitrate" class="setting-input" data-path="conversion.mp3.target" {% if settings.conversion.mp3.target == 'bitrate' %}checked{% endif %} />
                                         <span class="radio-circle"><span class="radio-dot"></span></span>
                                         Bitrate
                                     </label>
@@ -778,7 +768,13 @@
                             class="form-group advanced-setting"
                             style="flex-direction: column; align-items: flex-start"
                         >
-                            <label for="file-template" style="margin-bottom: 0.5em">File Template (optional)</label>
+                            <label for="file-template" style="margin-bottom: 0.5em">
+                                File Template (optional)
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    The file name part, used together with the Folder Template above. Same placeholders;
+                                    leave blank to use the single template at the top of this section.
+                                </small>
+                            </label>
                             <input
                                 type="text"
                                 id="file-template"

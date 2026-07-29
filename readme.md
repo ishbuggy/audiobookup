@@ -32,24 +32,57 @@ This entire system runs as a single Docker container, providing a seamless user 
 - **Rich Metadata Tagging:** Files are now tagged with extended metadata (Genre, Album, Album Artist, Publisher, Audible ASIN) for perfect integration with players like Plex, Audiobookshelf, and Apple Books.
 - **Smart File Management:**
     - **Collision Protection:** Automatically detects and renames files to prevent overwriting different editions of the same book (e.g., different narrators).
-    - **Expanded Naming Templates:** Organize your library your way using placeholders like `{author}`, `{title}`, `{narrator}`, `{series}`, `{publisher}`, and `{asin}`.
+    - **Expanded Naming Templates:** Organize your library your way using placeholders like `{author}`, `{title}`, `{narrator}`, `{publisher}`, `{asin}`, `{series}`, `{series_part}`, `{year}`, and `{language}`. A book missing a value (e.g. a standalone title has no series) simply drops that part of the path cleanly — no empty or "N/A" folders.
 - **Context-Aware Downloads:** The UI intelligently offers to "Download" new books or "Force Re-download" existing ones to fix corruption or update tags.
 - **Maintenance Tools:** Built-in tools to **Clear Image Cache** and **Reset Audible Connection** directly from the Settings UI, removing the need for manual file system operations.
 - **Job History with Filtering & Search:** View a complete history of all past jobs on a dedicated `/history` page. The page includes controls to **filter** by job type and status, and to **search** for jobs containing specific books by title or author.
 - **Detailed Book View:** Click on any book to see a detailed modal with high-resolution art and full metadata. By default, summaries of each item are truncated, but a full summary of the book can be grabbed with a single button.
-- **Settings Configuration:** Configure features from a dedicated `/settings` page. This includes custom folder/file naming templates (supporting Narrator, Publisher, etc.), audio quality, and a simplified "Job Settings" UI that allows for auto-detection of CPU cores in Normal Mode, or manual control over `Total Processing Cores` and `Max Parallel Downloads` in Advanced Mode.
+- **Settings Configuration:** Configure features from a dedicated `/settings` page, split into a **Standard** view for everyday options (output format, quality, naming, cover art, and more) and a single **Advanced Mode** toggle that reveals the full power-user surface — download-quality requests, MP3/LAME tuning, chapter and metadata cleanups, sidecar files, custom folder/file naming templates, and manual control over `Total Processing Cores` / `Max Parallel Downloads` (vs. Standard mode's CPU auto-detection) — without cluttering the page for everyday use.
 - **Audible Connection Health Check:** The app automatically checks if its connection to Audible is still valid on a periodic basis and displays a prominent warning banner if re-authentication is needed.
 - **DRM-Free Conversion:** Converts your audiobooks into standard `.m4b` files with chapters and metadata intact.
 - **Simple Docker Deployment:** Runs as a single, easy-to-manage Docker container with a clean, separated data structure.
 
 ## Audio Conversion & Quality
 
-AudioBookUp **re-encodes** your books into a standardized, high-quality AAC format. This is done for a number of reasons, because although stripping DRM and simply copying the raw data stream is fast and effective, there are some benefits to re-encoding the file, even if it takes more processing time to do it.
+AudioBookup gives you a choice of **output format** for every book, plus a separate control over the **quality requested from Audible** at download time. These are two different axes — what you ask Audible to serve, and what AudioBookup does with it afterward — and the Settings page keeps them clearly labeled as such.
 
-**Why do we re-encode?**
-*   **Precision:** Re-encoding allows for frame-perfect chapter splitting. This ensures chapters start *exactly* at the correct millisecond, preventing cut-off words or awkward glitches which can happen in direct-stream copies.
-*   **Universal Compatibility:** The resulting `.m4b` files are clean, standardized containers guaranteed to work on any player—from modern media servers (Sotryteller, Audiobookshelf, Plex) to legacy hardware and mobile apps.
-*   **Storage Control:** You can choose your preferred quality (High, Standard, Low) to balance audio fidelity with file size.
+### Output Format
+
+Choose from three output formats on the Settings page:
+
+*   **AAC `.m4b` (default):** AudioBookup **re-encodes** your books into a standardized, high-quality AAC format. Although stripping DRM and simply copying the raw data stream is fast and effective, re-encoding buys precision and compatibility, even if it takes more processing time to do it:
+    *   **Precision:** Re-encoding allows for frame-perfect chapter splitting. This ensures chapters start *exactly* at the correct millisecond, preventing cut-off words or awkward glitches which can happen in direct-stream copies.
+    *   **Universal Compatibility:** The resulting `.m4b` files are clean, standardized containers guaranteed to work on any player—from modern media servers (Storyteller, Audiobookshelf, Plex) to legacy hardware and mobile apps.
+    *   **Storage Control:** You can choose your preferred quality (High, Standard, Low) to balance audio fidelity with file size.
+*   **Original (lossless remux):** Skips re-encoding entirely — the decrypted audio stream is repackaged into an `.m4b` container as-is, with no quality loss and the least processing time. The trade-off is that chapters land wherever Audible's own markers fall (no frame-perfect splitting) and the chapter/metadata cleanups and branding trim described below don't apply to it.
+*   **MP3 (new in v0.22.0):** Encodes a single `.mp3` file per book in one pass over the whole audiobook, rather than per-chapter — this avoids the small gaps and chapter drift that come from stitching together separately-encoded chunks. Chapters and cover art are embedded directly in the file, alongside the audio, in the same encoding pass. Quality is configurable: target a VBR quality level or a specific bitrate (CBR or ABR, optionally matched to the source), with optional mono downmixing and a sample-rate cap. MP3 encoding is single-threaded and takes longer per book than AAC, in exchange for a format that's readable by effectively any player.
+
+### Download Quality
+
+Separate from the output format above, you can also choose the **quality requested from Audible** itself when downloading — Best, High, or Normal. This controls what Audible serves *before* any local conversion happens; it's an advanced setting (default Best), useful mainly if you want smaller downloads.
+
+### Sidecar Files
+
+Optionally, AudioBookup can save extra files alongside your converted audiobook, sharing its filename:
+
+*   A cover image (`.jpg`/`.png`)
+*   A curated `metadata.json` (author, narrator, series, genres, description, and more)
+*   A `.cue` sheet mapping chapters to timestamps
+*   The original, undecrypted AAX/AAXC file (plus its `.voucher`), if you'd like to keep the raw source
+
+All four are off by default, and each is saved best-effort — a failure writing one never blocks the download itself.
+
+### Chapter & Metadata Cleanups
+
+A set of optional cleanups, all off by default so nothing changes unless you turn it on:
+
+*   **Combine nested chapter titles:** Flattens a multi-part book's nested chapter tree into a single navigable list, joining parent and child titles (e.g. "Part 1: Chapter 1").
+*   **Merge Opening/End Credits:** Folds Audible's "Opening Credits" and "End Credits" markers into the neighboring chapter instead of leaving them as their own short chapter.
+*   **Strip "(Unabridged)":** Removes the "(Unabridged)" suffix Audible appends to many titles from the embedded title/album tags. A custom title you've set yourself is left untouched.
+*   **Chapter title template:** Customize how chapter titles are written into the file using `{ch}`, `{ch_total}`, `{ch_title}`, and `{title}` placeholders.
+*   **Trim Audible's branded intro/outro:** Cuts Audible's "This is Audible" branding clip from the start and end of the audio. This only applies to AAC and MP3 re-encodes — **Original (lossless remux) output is never trimmed**, since there's no encoding pass to cut a span out of.
+
+> **Not supported:** Widevine DRM, xHE-AAC, and Spatial Audio — these require Libation's Widevine license path; audible-cli cannot request them.
 
 ---
 

@@ -487,6 +487,14 @@ h2 {
     width: 80px;
 }
 
+/* Range sliders (currently only the MP3 VBR quality control). Left unstyled they
+   render with the browser's stock accent, which reads as a foreign blue next to the
+   themed radios and toggles — so borrow the same accent those use. Width is set
+   inline on the control itself, since it lives in a stacked (column) form group. */
+.form-group input[type="range"] {
+    accent-color: var(--color-accent-blue);
+}
+
 /* Focus styles for inputs and selects */
 #search-bar:focus,
 #search-history:focus,
@@ -1580,6 +1588,13 @@ h2 {
 }
 .accordion-panel > .form-group:first-child,
 .setting-item-group > .form-group:first-child {
+    border-top: none;
+}
+/* ...but when that first control is Advanced-only (e.g. Download Quality in the
+   Downloading section) it is hidden in Standard mode, so the rule above suppresses
+   the divider on a row nobody can see and the *visible* first row draws one right
+   under the accordion header. Move the exemption to whichever row is actually first. */
+body:not(.advanced-mode) .accordion-panel > .form-group.advanced-setting:first-child + .form-group {
     border-top: none;
 }
 .form-group label {
