@@ -285,7 +285,7 @@ Once setup is complete, the application will always start in **Normal Mode**, ta
 
 - **Sync Library:** Triggers a manual **Deep Sync** (API fetch + full disk scan). This ensures your database matches your files perfectly.
 - **Process Downloads:** Opens a selection modal to batch download books marked as `NEW`, `MISSING`, or `ERROR`.
-- **Force Re-download:** Opened via the Book Detail modal, this allows you to re-download a specific book (overwriting the existing file) to fix glitches or update metadata.
+- **Force Re-download:** Opened via the Book Detail modal, this allows you to re-download a specific book to fix glitches or update metadata. The book is always re-downloaded and converted using your **current** settings, so if the output format or naming template has changed since the original download, the new file is written to a new path instead of overwriting the old one. The previous file (and its sidecars) stays on disk and must be deleted manually.
 - **Download:** Appears on individual book cards for books not yet on disk (New, Missing, or Error). Clicking it instantly queues that specific book.
 
 ---

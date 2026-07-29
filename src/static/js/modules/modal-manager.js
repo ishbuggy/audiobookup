@@ -171,7 +171,7 @@ async function handleBookClick(event) {
                     if (window.showConfirmationModal) {
                         window.showConfirmationModal(
                             '<i class="fas fa-exclamation-triangle"></i> Force Re-download?',
-                            `Are you sure you want to re-download "<strong>${window.escapeHtml(book.title)}</strong>"?<br>This will overwrite the existing file.`,
+                            `Are you sure you want to re-download "<strong>${window.escapeHtml(book.title)}</strong>"?<br>It will be re-downloaded and converted using your <strong>current</strong> settings. If the output format or naming template has changed since the original download, the new file is written to a new path and the previous file is left on disk for you to delete manually.`,
                             runDownload,
                         );
                     } else {

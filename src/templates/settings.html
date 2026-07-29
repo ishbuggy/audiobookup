@@ -682,7 +682,7 @@
                                 class="setting-input"
                                 data-path="naming.template"
                                 style="width: 100%; box-sizing: border-box"
-                                value="{{ settings.naming.template | default('{author}/{title}') }}"
+                                value="{{ settings.naming.template | default('{author}/{title}/{author} - {title}') }}"
                             />
                             <small style="margin-top: 0.75em; color: #6c757d">
                                 Placeholders: <code>{author}</code>, <code>{title}</code>, <code>{series}</code>,

@@ -882,6 +882,17 @@ class TestBuildMp3Flags:
         )
         assert flags[:2] == ["-b:a", "256k"]
 
+    def test_zero_bitrate_floors_at_32(self):
+        # Clearing the UI Bitrate field saves Number("") === 0; with source
+        # matching off that would emit "-b:a 0k" and fail every encode, so the
+        # explicit bitrate is floored at 32 kbps.
+        flags = build_mp3_flags(
+            {"target": "bitrate", "bitrate_kbps": 0, "match_source_bitrate": False, "constant_bitrate": True},
+            None,
+            None,
+        )
+        assert flags[:2] == ["-b:a", "32k"]
+
     def test_downsample_mono_adds_ac(self):
         flags = build_mp3_flags({"target": "quality", "downsample_mono": True}, None, None)
         assert "-ac" in flags and flags[flags.index("-ac") + 1] == "1"

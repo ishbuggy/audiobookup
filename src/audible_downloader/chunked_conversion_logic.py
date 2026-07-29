@@ -987,8 +987,9 @@ def remux_book_lossless(asin, job_id, temp_dir, final_output_path, context):
     """
     Lossless finalize for no-re-encode mode: mux chapters + metadata onto the
     already-decrypted AAC master with `-c copy` (no transcode), then embed the
-    cover. Used only when conversion.no_reencode is on AND the fast AAC-copy
-    decrypt succeeded, so context["audio_file"] is the ".m4b" master.
+    cover. Used only when resolve_output_format(settings) == "original" AND the
+    fast AAC-copy decrypt succeeded, so context["audio_file"] is the ".m4b"
+    master.
 
     This is deliberately a separate, additive path — merge_book_chunks with a
     single "-i master" in place of the concat demuxer — so the load-bearing
@@ -1059,6 +1060,8 @@ def build_mp3_flags(mp3_settings, source_bitrate_bps, source_sample_rate):
          (`-b:a Nk`, plus `-abr 1` for ABR when not constant_bitrate). With
          match_source_bitrate on and a known source bitrate, the target kbps is
          rounded up to the nearest standard LAME bitrate (>= source, capped 320).
+         The emitted bitrate is floored at 32 kbps so a cleared UI field can't
+         produce "-b:a 0k".
       2. `-compression_level` from encoder_quality (LAME effort; 0 = best).
       3. `-ac 1` when downsample_mono.
       4. `-ar N` ONLY when the source sample rate exceeds max_sample_rate (never
@@ -1073,7 +1076,10 @@ def build_mp3_flags(mp3_settings, source_bitrate_bps, source_sample_rate):
         if mp3.get("match_source_bitrate", True) and source_bitrate_bps:
             needed_kbps = source_bitrate_bps / 1000
             kbps = next((b for b in MP3_STANDARD_BITRATES_KBPS if b >= needed_kbps), 320)
-        flags += ["-b:a", f"{kbps}k"]
+        # Floor the explicit bitrate: clearing the UI number field saves 0, which
+        # would emit "-b:a 0k" and fail every encode with an opaque ffmpeg error.
+        # 32 kbps is the lowest LAME rate that's still usable for spoken audio.
+        flags += ["-b:a", f"{max(kbps, 32)}k"]
         # ABR (variable around a target) unless the user asked for true CBR.
         if not mp3.get("constant_bitrate", False):
             flags += ["-abr", "1"]

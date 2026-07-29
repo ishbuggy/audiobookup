@@ -206,9 +206,14 @@ def post_settings():
     updated_settings = deep_update(current_settings, new_settings)
 
     # Keep the legacy no_reencode flag mirrored to the new output_format enum so
-    # any code still reading it (the pipeline, until Phase 5) stays correct after
-    # every save. resolve_output_format also honors a payload that only sends the
-    # old flag, so legacy clients round-trip consistently.
+    # any code still reading it stays correct after every save. Note the limit of
+    # this mirror: `updated_settings` is the deep-merged dict, which always carries
+    # an output_format value (from the persisted settings or DEFAULT_SETTINGS), so
+    # resolve_output_format never falls back to a posted no_reencode — a payload
+    # that sends only the old flag has it silently overwritten here. Legacy
+    # settings.json files are handled instead by the read-side normalization in
+    # settings.py; any future surface that POSTs a raw legacy file (e.g. a settings
+    # import) must run that same normalization on the payload before this merge.
     conversion = updated_settings.setdefault("conversion", {})
     conversion["no_reencode"] = resolve_output_format(updated_settings) == "original"
 

@@ -166,6 +166,12 @@ def render_chapter_title(template, ch_num, ch_total, ch_title, book_title):
     """
     # Replace the longer tags first: `{ch}` is a prefix of `{ch_total}`/
     # `{ch_title}`, so substituting it first would corrupt them.
+    #
+    # Known limitation (same class as the naming engine's replace chain): the
+    # chain is sequential, so a later pass re-scans text that an earlier pass
+    # substituted in. A chapter literally titled "About {title}" therefore ends
+    # up with the book title spliced into it. Real chapter data effectively never
+    # contains brace tags, so this is accepted rather than restructured.
     return (
         template.replace("{ch_total}", str(ch_total))
         .replace("{ch_title}", ch_title if ch_title is not None else "")
