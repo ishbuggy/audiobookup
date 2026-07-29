@@ -113,16 +113,13 @@ function updateStats(stats) {
 // cover scrolls into view (see initializeLazyLoading / the IntersectionObserver).
 const LAZY_PLACEHOLDER = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 
-// Status-aware action button markup, shared by every view. Mirrors the detail
-// modal: a plain "Download" for anything not yet on disk, and a cautionary
-// "Re-download" (confirmation-gated in the click handler) for DOWNLOADED books.
-// Transitional statuses (e.g. DOWNLOADING) get no button. The click handling
-// lives in modal-manager.js via `data-card-action`, so every view must keep the
+// Status-aware action button markup, shared by every view: a plain "Download"
+// for anything not yet on disk. DOWNLOADED books get no card button — force
+// re-download lives only in the book detail modal. Transitional statuses
+// (e.g. DOWNLOADING) get no button either. The click handling lives in
+// modal-manager.js via `data-card-action`, so every view must keep the
 // button's `data-asin`/`data-card-action` attributes intact.
 function buildActionButtonHTML(book, esc) {
-    if (book.status === "DOWNLOADED") {
-        return `<button class="retry-button is-warning" data-asin="${esc(book.asin)}" data-card-action="redownload">Re-download</button>`;
-    }
     if (book.status === "NEW" || book.status === "MISSING" || book.status === "ERROR") {
         return `<button class="retry-button" data-asin="${esc(book.asin)}" data-card-action="download">Download</button>`;
     }

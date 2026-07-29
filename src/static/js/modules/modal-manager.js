@@ -56,40 +56,23 @@ async function handleBookClick(event) {
     const asin = card.dataset.asin;
     if (!asin) return;
 
-    // --- CASE 1: CARD ACTION BUTTON CLICKED (download / re-download) ---
-    // Mirrors the detail-modal download logic without opening the modal:
-    // a plain download for not-yet-on-disk books, and a confirmation-gated
-    // re-download for DOWNLOADED books.
+    // --- CASE 1: CARD ACTION BUTTON CLICKED (download) ---
+    // Mirrors the detail-modal download logic without opening the modal: a
+    // plain download for not-yet-on-disk books. Force re-download of a
+    // DOWNLOADED book lives only in the detail modal, not on cards.
     const cardActionBtn = event.target.closest("button[data-card-action]");
     if (cardActionBtn) {
-        const action = cardActionBtn.dataset.cardAction;
         const libraryData = getLibraryData(); // imported from library-manager.js
         const book = libraryData.find((b) => b.asin === asin);
         if (!book) return;
 
-        const runDownload = async () => {
-            // startJob populates the panel itself (only if no other job is
-            // running) and reports whether the job actually started.
-            const started = await startJob("DOWNLOAD", [asin], null, null, [book]);
-            if (!started) return;
-            // Visual Feedback: Scroll to the job panel
-            const panel = document.getElementById("processing-panel");
-            if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
-        };
-
-        if (action === "redownload") {
-            if (window.showConfirmationModal) {
-                window.showConfirmationModal(
-                    '<i class="fas fa-exclamation-triangle"></i> Force Re-download?',
-                    `Are you sure you want to re-download "<strong>${window.escapeHtml(book.title)}</strong>"?<br>This will overwrite the existing file.`,
-                    runDownload,
-                );
-            } else if (confirm(`Re-download "${book.title}"?`)) {
-                runDownload();
-            }
-        } else {
-            runDownload();
-        }
+        // startJob populates the panel itself (only if no other job is
+        // running) and reports whether the job actually started.
+        const started = await startJob("DOWNLOAD", [asin], null, null, [book]);
+        if (!started) return;
+        // Visual Feedback: Scroll to the job panel
+        const panel = document.getElementById("processing-panel");
+        if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
         return;
     }
 
@@ -963,7 +946,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
         // The confirmation modal closes itself once the callback runs, so the
         // callback only needs to start the download. Fall back to a native confirm
-        // if the modal helper isn't present (mirrors the re-download path).
+        // if the modal helper isn't present (mirrors the detail modal's
+        // force re-download path).
         if (window.showConfirmationModal) {
             window.showConfirmationModal(
                 '<i class="fas fa-clock" style="color: #ffc107;"></i> Large download',

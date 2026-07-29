@@ -33,7 +33,7 @@ This entire system runs as a single Docker container, providing a seamless user 
 - **Smart File Management:**
     - **Collision Protection:** Automatically detects and renames files to prevent overwriting different editions of the same book (e.g., different narrators).
     - **Expanded Naming Templates:** Organize your library your way using placeholders like `{author}`, `{title}`, `{narrator}`, `{publisher}`, `{asin}`, `{series}`, `{series_part}`, `{year}`, and `{language}`. A book missing a value (e.g. a standalone title has no series) simply drops that part of the path cleanly — no empty or "N/A" folders.
-- **Context-Aware Downloads:** The UI intelligently offers to "Download" new books or "Force Re-download" existing ones to fix corruption or update tags.
+- **Context-Aware Downloads:** Library cards offer a one-click "Download" for books not yet on disk, while already-downloaded books can be "Force Re-download"-ed from their detail modal to fix corruption or update tags.
 - **Maintenance Tools:** Built-in tools to **Clear Image Cache** and **Reset Audible Connection** directly from the Settings UI, removing the need for manual file system operations.
 - **Job History with Filtering & Search:** View a complete history of all past jobs on a dedicated `/history` page. The page includes controls to **filter** by job type and status, and to **search** for jobs containing specific books by title or author.
 - **Detailed Book View:** Click on any book to see a detailed modal with high-resolution art and full metadata. By default, summaries of each item are truncated, but a full summary of the book can be grabbed with a single button.

@@ -230,15 +230,7 @@
                         <p class="book-card-author">{{ book.author }}</p>
                         <span class="book-card-status status-{{ book.status }}">{{ book.status }}</span>
                         <div class="book-card-actions">
-                            {% if book.status == 'DOWNLOADED' %}
-                            <button
-                                class="retry-button is-warning"
-                                data-asin="{{ book.asin }}"
-                                data-card-action="redownload"
-                            >
-                                Re-download
-                            </button>
-                            {% elif book.status == 'NEW' or book.status == 'MISSING' or book.status == 'ERROR' %}
+                            {% if book.status == 'NEW' or book.status == 'MISSING' or book.status == 'ERROR' %}
                             <button class="retry-button" data-asin="{{ book.asin }}" data-card-action="download">
                                 Download
                             </button>
