@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Clean up old files after a Force Re-download:** A Force Re-download now asks whether to delete the previous file and its companion files once the new one is ready, instead of leaving them behind forever — they're only actually removed if the re-download ends up at a new location (for example because your output format or naming template changed); overwriting in place leaves nothing to clean up. A new advanced setting, "Clean up Replaced Files" under Downloading, lets you skip the question and always clean up automatically, including for re-downloads that happen on their own through scheduled processing, where there's no prompt to answer.
+
 ### Fixed
+- **Fewer mixed-up files between books with the same name but different formats:** Two books that would otherwise share the same filename except for their file extension (for example one saved as `.m4b` and the other as `.mp3`) could end up overwriting each other's cover, PDF, or other companion files. Downloading and renaming books now tell them apart the same way other same-name books are; the same mix-up can still happen for books added through manual upload, which isn't covered by this fix yet.
+- **Renaming a book can no longer collide with a download in progress:** If a book was renamed (with custom names applied to files) while another download was actively claiming that same filename, the two could clash. Renaming now checks in-progress downloads too, so this can't happen.
 - **Companion files now match the book's actual title:** The optional `.metadata.json` and `.cue` companion files now use the same title as the tags embedded in the audiobook itself — so with the "(Unabridged)" title cleanup enabled they get the cleaned-up title, and a title you've customized yourself is used as-is (and never altered by the cleanup). Previously they always used the raw Audible title.
 - **Uploaded books honor the `{year}` naming placeholder:** Audiobooks added through the manual upload feature are now filed using the release date read from the file's own tags, so a naming template with `{year}` in it no longer drops that part of the path.
 - **Auto-detect respects the processing-cores limit:** On machines with many CPU cores, the Auto-detect button for Total Processing Cores no longer suggests a value above the setting's 1–16 range.

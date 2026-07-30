@@ -23,6 +23,13 @@ DEFAULT_SETTINGS = {
         "download": {
             "max_parallel_downloads": 2,
             "total_processing_cores": 2,
+            # A re-download re-derives its output path from the current settings,
+            # so a changed output format or naming template lands the new file
+            # beside the old one, which then sits untracked forever. When true,
+            # that previous file (and its sidecars) is deleted automatically at
+            # the end of the conversion; when false — the default — the UI asks
+            # per re-download instead.
+            "cleanup_stale_files": False,
         }
     },
     "naming": {

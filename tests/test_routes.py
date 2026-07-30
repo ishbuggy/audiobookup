@@ -760,3 +760,60 @@ class TestCpuCoreRecommendation:
         data = response.get_json()
         assert data["total_cores"] == 2
         assert data["recommended_concurrency"] == 1
+
+
+class TestStartDownloadJobParams:
+    """v0.23.0 #2 (D5): the stale-file cleanup answer is a destructive consent that
+    has to survive the whole chain, so the route forwards job_params verbatim —
+    and normalizes a malformed one instead of letting the worker thread raise
+    after the job row already exists."""
+
+    @pytest.fixture
+    def captured_start(self, monkeypatch):
+        """Replace start_new_job with a recorder, so no thread or DB is involved."""
+        calls = []
+
+        def fake_start_new_job(job_type, asins=None, job_params=None):
+            calls.append({"job_type": job_type, "asins": asins, "job_params": job_params})
+            return True, {"success": True, "job_id": 42}
+
+        monkeypatch.setattr("audible_downloader.routes.start_new_job", fake_start_new_job)
+        return calls
+
+    def test_declined_prompt_is_forwarded_as_an_explicit_false(self, client, completed_setup, captured_start):
+        # The unticked checkbox must reach the job manager as False, not vanish —
+        # that False is what vetoes the saved setting.
+        _login_session(client)
+        response = client.post(
+            "/api/jobs/start",
+            json={"job_type": "DOWNLOAD", "asins": ["B001"], "job_params": {"cleanup_stale_files": False}},
+        )
+        assert response.status_code == 200
+        assert captured_start[0]["asins"] == ["B001"]
+        assert captured_start[0]["job_params"] == {"cleanup_stale_files": False}
+
+    def test_accepted_prompt_is_forwarded_as_true(self, client, completed_setup, captured_start):
+        _login_session(client)
+        response = client.post(
+            "/api/jobs/start",
+            json={"job_type": "DOWNLOAD", "asins": ["B001"], "job_params": {"cleanup_stale_files": True}},
+        )
+        assert response.status_code == 200
+        assert captured_start[0]["job_params"] == {"cleanup_stale_files": True}
+
+    def test_absent_job_params_forwards_an_empty_dict(self, client, completed_setup, captured_start):
+        # Bulk and card downloads send no params at all; the setting governs those.
+        _login_session(client)
+        response = client.post("/api/jobs/start", json={"job_type": "DOWNLOAD", "asins": ["B001"]})
+        assert response.status_code == 200
+        assert captured_start[0]["job_params"] == {}
+
+    def test_malformed_job_params_are_normalized(self, client, completed_setup, captured_start):
+        # A string body would become ("yes").get(...) inside the worker thread.
+        _login_session(client)
+        response = client.post(
+            "/api/jobs/start",
+            json={"job_type": "DOWNLOAD", "asins": ["B001"], "job_params": "yes"},
+        )
+        assert response.status_code == 200
+        assert captured_start[0]["job_params"] == {}

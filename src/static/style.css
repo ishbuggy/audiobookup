@@ -1617,6 +1617,10 @@ body:not(.advanced-mode) .accordion-panel > .form-group.advanced-setting:first-c
     display: inline-block;
     width: 60px;
     height: 34px;
+    /* The track must hold its 60px inside flex .form-group rows: a long
+       setting description otherwise compresses it and the 26px knob
+       overflows the shortened track when the switch is on. */
+    flex-shrink: 0;
 }
 .switch input {
     opacity: 0;

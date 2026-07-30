@@ -45,6 +45,24 @@ function closeDetailModal() {
     bookDetailModal.style.display = "none";
 }
 
+// Read the `job.download.cleanup_stale_files` setting for the force-re-download
+// prompt. Deliberately NOT cached for the session (unlike the naming setting
+// above): the toggle can be flipped on the settings page in another tab between
+// two re-downloads, and the prompt must match what the server will actually do.
+// A failed fetch resolves to false so the prompt falls back to offering the
+// per-download checkbox — a settings hiccup must never block a re-download.
+async function getCleanupStaleFilesSetting() {
+    try {
+        const res = await fetch("/api/settings");
+        if (!res.ok) throw new Error(`Server responded with status: ${res.status}`);
+        const settings = await res.json();
+        return Boolean(settings?.job?.download?.cleanup_stale_files);
+    } catch (error) {
+        console.error("Could not read the cleanup-stale-files setting; assuming it is off:", error);
+        return false;
+    }
+}
+
 async function handleBookClick(event) {
     const card = event.target.closest(".book-card");
     if (!card) return; // Not a book card click
@@ -153,12 +171,15 @@ async function handleBookClick(event) {
             newBtn.className = `action-button ${className}`;
             newBtn.style.display = "inline-block";
 
-            newBtn.onclick = () => {
-                const runDownload = async () => {
+            newBtn.onclick = async () => {
+                // `jobParams` is forwarded to the DOWNLOAD job. Passing null lets
+                // the saved `cleanup_stale_files` setting govern; passing an
+                // explicit flag is the per-download override from the prompt below.
+                const runDownload = async (jobParams = null) => {
                     closeDetailModal();
                     // startJob populates the panel itself (only if no other job
                     // is running) and reports whether the job actually started.
-                    const started = await startJob("DOWNLOAD", [asin], null, null, [book]);
+                    const started = await startJob("DOWNLOAD", [asin], null, jobParams, [book]);
                     if (!started) return;
                     // Visual Feedback: Scroll to panel
                     setTimeout(() => {
@@ -167,18 +188,71 @@ async function handleBookClick(event) {
                     }, 300); // Small delay to allow modal to close/panel to open
                 };
 
-                if (isConfirm) {
-                    if (window.showConfirmationModal) {
+                if (!isConfirm) {
+                    runDownload();
+                    return;
+                }
+
+                // A force re-download re-runs the conversion with the CURRENT
+                // settings, so a changed output format or naming template lands
+                // the new file at a different path and orphans the old one. What
+                // happens to that orphan depends on the saved setting: either it
+                // is cleaned up automatically, or we offer the choice here.
+                const cleanupAlways = await getCleanupStaleFilesSetting();
+
+                // Shared first half of the warning, in both HTML and plain-text form.
+                const escapedTitle = `<strong>${window.escapeHtml(book.title)}</strong>`;
+                const introHtml = `Are you sure you want to re-download "${escapedTitle}"?<br>It will be re-downloaded and converted using your <strong>current</strong> settings. If the output format or naming template has changed since the original download, the new file is written to a new path`;
+                const introText = `Re-download "${book.title}"?\n\nIt will be re-downloaded and converted using your current settings. If the output format or naming template has changed since the original download, the new file is written to a new path`;
+
+                if (window.showConfirmationModal) {
+                    if (cleanupAlways) {
+                        // Setting is on — state what will happen and start the job
+                        // with no job_params, letting the server setting govern.
                         window.showConfirmationModal(
                             '<i class="fas fa-exclamation-triangle"></i> Force Re-download?',
-                            `Are you sure you want to re-download "<strong>${window.escapeHtml(book.title)}</strong>"?<br>It will be re-downloaded and converted using your <strong>current</strong> settings. If the output format or naming template has changed since the original download, the new file is written to a new path and the previous file is left on disk for you to delete manually.`,
-                            runDownload,
+                            `${introHtml} and the previous file and its companion files will be <strong>deleted automatically</strong> (per your <strong>Clean up Replaced Files</strong> setting).`,
+                            () => runDownload(),
                         );
                     } else {
-                        if (confirm(`Re-download "${book.title}"?`)) runDownload();
+                        // Setting is off — offer the cleanup as a one-off choice.
+                        // The checkbox lives inside the confirmation modal's message
+                        // (which is injected as HTML), and the callback reads its
+                        // state at click time: the modal is only hidden, never
+                        // cleared, so the input is still in the DOM when it fires.
+                        window.showConfirmationModal(
+                            '<i class="fas fa-exclamation-triangle"></i> Force Re-download?',
+                            `${introHtml} and the previous file is left on disk.` +
+                                `<label style="display: block; margin-top: 15px; font-weight: normal">` +
+                                `<input type="checkbox" id="redownload-cleanup-checkbox" style="margin-right: 8px" />` +
+                                `If the new file is written to a different location, also delete the previous file and its companion files (PDF, cover, cue sheet, metadata).` +
+                                `</label>`,
+                            () => {
+                                const checkbox = document.getElementById("redownload-cleanup-checkbox");
+                                runDownload({ cleanup_stale_files: Boolean(checkbox?.checked) });
+                            },
+                        );
                     }
                 } else {
-                    runDownload();
+                    // Fallback for the (practically unreachable) case where ui.js
+                    // has not defined the confirmation modal. Text parity with the
+                    // modal above, using two native confirms instead of a checkbox.
+                    if (cleanupAlways) {
+                        if (
+                            confirm(
+                                `${introText} and the previous file and its companion files will be deleted automatically (per your settings).`,
+                            )
+                        ) {
+                            runDownload();
+                        }
+                    } else {
+                        if (confirm(`${introText} and the previous file is left on disk.`)) {
+                            const alsoDelete = confirm(
+                                "If the new file is written to a different location, also delete the previous file and its companion files (PDF, cover, cue sheet, metadata)?",
+                            );
+                            runDownload({ cleanup_stale_files: alsoDelete });
+                        }
+                    }
                 }
             };
         };

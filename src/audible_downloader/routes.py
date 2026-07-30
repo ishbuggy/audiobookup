@@ -577,7 +577,15 @@ def start_job():
         asins = data.get("asins")
         if not asins or not isinstance(asins, list):
             return jsonify(error="List of ASINs is required for DOWNLOAD job."), 400
-        success, result = start_new_job(job_type, asins=asins)
+        # Per-job options from the download/re-download modal — currently just the
+        # user's answer to the stale-file cleanup prompt. Absent for jobs started
+        # anywhere else, which then fall back to the saved setting.
+        job_params = data.get("job_params", {})
+        # A malformed body (job_params sent as a string, say) would otherwise reach
+        # the worker thread and blow up there, after the job row already exists.
+        if not isinstance(job_params, dict):
+            job_params = {}
+        success, result = start_new_job(job_type, asins=asins, job_params=job_params)
 
     elif job_type == "SYNC":
         # Get the job_params dictionary from the JSON payload sent by the frontend.

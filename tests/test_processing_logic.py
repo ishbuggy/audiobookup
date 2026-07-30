@@ -1,6 +1,7 @@
 # tests/test_processing_logic.py
 
 import json
+import os
 from datetime import datetime
 from threading import Event
 from unittest import mock
@@ -391,6 +392,8 @@ class TestRenameToMatchMetadata:
         target_exists=False,
         target_owner=None,
         makedirs_error=None,
+        also_present=(),
+        move_side_effect=None,
     ):
         row = row if row is not None else self._row()
         con = mock.MagicMock()
@@ -406,12 +409,14 @@ class TestRenameToMatchMetadata:
 
         con.execute.side_effect = execute
 
+        current = row["filepath"]
+
         def exists(path):
-            if path == self.CURRENT:
+            if path == current:
                 return True
             if path == target:
                 return target_exists
-            return False
+            return path in also_present
 
         with (
             mock.patch.object(
@@ -421,7 +426,7 @@ class TestRenameToMatchMetadata:
             mock.patch.object(processing_logic, "build_base_output_path", return_value=target),
             mock.patch("os.path.exists", side_effect=exists),
             mock.patch("os.makedirs", side_effect=makedirs_error),
-            mock.patch.object(processing_logic.shutil, "move") as move,
+            mock.patch.object(processing_logic.shutil, "move", side_effect=move_side_effect) as move,
             mock.patch.object(processing_logic, "_cleanup_empty_dirs"),
         ):
             result = processing_logic.rename_book_to_match_metadata("B0OURS")
@@ -471,6 +476,95 @@ class TestRenameToMatchMetadata:
         result, move = self._run(target="/data/New/New.m4b", target_exists=True, target_owner="B0OTHER")
         assert result == "/data/New/New_B0OURS.m4b"
         move.assert_any_call(self.CURRENT, "/data/New/New_B0OURS.m4b")
+
+    """v0.23.0 #6: a metadata edit must respect the in-flight reservations a
+    DOWNLOAD job takes at PREPARE time, and must judge "taken" on the
+    extension-stripped base the sidecars share rather than the full path."""
+
+    def test_collision_at_sibling_extension_appends_asin(self):
+        # The .m4b target itself is free, but another book's .mp3 already occupies
+        # the same base — our .pdf/.cue/.metadata.json would overwrite its ones.
+        result, move = self._run(
+            target="/data/New/New.m4b",
+            also_present=("/data/New/New.mp3",),
+            target_owner="B0OTHER",
+        )
+        assert result == "/data/New/New_B0OURS.m4b"
+        move.assert_any_call(self.CURRENT, "/data/New/New_B0OURS.m4b")
+
+    def test_collision_at_m4a_sibling_extension_appends_asin(self):
+        # W2 regression: ".m4a" is a real library extension (import keeps an
+        # upload's own container), so it must be probed like ".mp3" is.
+        result, move = self._run(
+            target="/data/New/New.m4b",
+            also_present=("/data/New/New.m4a",),
+            target_owner="B0OTHER",
+        )
+        assert result == "/data/New/New_B0OURS.m4b"
+        move.assert_any_call(self.CURRENT, "/data/New/New_B0OURS.m4b")
+
+    def test_m4a_book_still_checks_its_own_siblings(self):
+        # W2 regression, the other direction: an imported ".m4a" book keeps its
+        # extension through the rename, and the ".m4b" sibling of its target is
+        # another book's — the old two-entry map examined no sibling at all here.
+        current = "/data/Old/Old.m4a"
+        result, move = self._run(
+            row=self._row(filepath=current),
+            target="/data/New/New.m4a",
+            also_present=(current, "/data/New/New.m4b"),
+            target_owner="B0OTHER",
+        )
+        assert result == "/data/New/New_B0OURS.m4a"
+        move.assert_any_call(current, "/data/New/New_B0OURS.m4a")
+
+    def test_sibling_extension_owned_by_this_book_is_not_a_collision(self):
+        # Our own earlier download in the previous output format: not foreign.
+        result, move = self._run(
+            target="/data/New/New.m4b",
+            also_present=("/data/New/New.mp3",),
+            target_owner="B0OURS",
+        )
+        assert result == "/data/New/New.m4b"
+        move.assert_any_call(self.CURRENT, "/data/New/New.m4b")
+
+    def test_target_reserved_by_in_flight_book_appends_asin(self):
+        # The reserving book has run PREPARE but not yet written its file, so
+        # neither the on-disk nor the DB check can see the conflict.
+        processing_logic._reserved_output_paths.add("/data/New/New")
+        result, move = self._run(target="/data/New/New.m4b")
+        assert result == "/data/New/New_B0OURS.m4b"
+        move.assert_any_call(self.CURRENT, "/data/New/New_B0OURS.m4b")
+
+    def test_rename_reserves_the_target_only_for_the_duration_of_the_move(self):
+        # The claim has to be HELD across the move (that is the half of #6 that
+        # stops an in-flight download from claiming this base mid-rename), so the
+        # assertion happens INSIDE the patched move — checking the set afterwards
+        # can't tell "claimed then released" from "never claimed at all".
+        held = []
+
+        def check_claim_at_move_time(src, dst):
+            if src == self.CURRENT:
+                held.append(os.path.splitext(dst)[0] in processing_logic._reserved_output_paths)
+
+        result, _move = self._run(target="/data/New/New.m4b", move_side_effect=check_claim_at_move_time)
+        assert result == "/data/New/New.m4b"
+        assert held == [True]
+        # ...and released once the move and the DB update are done.
+        assert processing_logic._reserved_output_paths == set()
+
+    def test_reservation_is_released_when_the_rename_fails(self):
+        # Same claim-at-move-time assertion, then the move raises: the release must
+        # happen on the failure path too.
+        held = []
+
+        def fail_after_checking_claim(src, dst):
+            held.append(os.path.splitext(dst)[0] in processing_logic._reserved_output_paths)
+            raise OSError("read-only filesystem")
+
+        result, _move = self._run(target="/data/New/New.m4b", move_side_effect=fail_after_checking_claim)
+        assert result is None
+        assert held == [True]
+        assert processing_logic._reserved_output_paths == set()
 
     def test_preserves_mp3_extension(self):
         # Phase 5: an .mp3 book must be renamed to an .mp3 target, so the file's
@@ -594,11 +688,102 @@ class TestConcurrentDuplicateHandling:
 
     def test_released_reservation_frees_the_plain_name(self):
         # After the first book finishes (reservation released), a later book
-        # reclaims the plain name instead of being suffixed.
+        # reclaims the plain name instead of being suffixed. Reservations are
+        # keyed by the extension-stripped base, which is what `run` discards.
         path_first = _resolve_output_path(asin="B0AAAA")
-        processing_logic._reserved_output_paths.discard(path_first)
+        processing_logic._reserved_output_paths.discard(os.path.splitext(path_first)[0])
         path_next = _resolve_output_path(asin="B0BBBB")
         assert path_next == "/data/Bram Stoker/Dracula/Bram Stoker - Dracula.m4b"
+
+    def test_reservation_is_keyed_by_the_extension_stripped_base(self):
+        # v0.23.0 #5: every sidecar hangs off the extension-stripped base, so an
+        # .mp3 book claiming the same base as an in-flight .m4b book IS a
+        # collision — the audio files differ but the .pdf/.cue/.metadata.json
+        # would silently overwrite each other.
+        first = BookProcessor(asin="B0AAAA", job_id=1)
+        second = BookProcessor(asin="B0BBBB", job_id=1)
+        with mock.patch("os.path.exists", return_value=False):
+            path_a = first._reserve_output_path("/data/A/Title/Title.m4b", "B0AAAA")
+            path_b = second._reserve_output_path("/data/A/Title/Title.mp3", "B0BBBB")
+        assert path_a == "/data/A/Title/Title.m4b"
+        assert path_b == "/data/A/Title/Title_B0BBBB.mp3"
+        assert first.is_duplicate is False
+        assert second.is_duplicate is True
+
+
+class TestSiblingExtensionOnDisk:
+    """v0.23.0 #5, on-disk half: a file already sitting at the SIBLING audio
+    extension shares our sidecar base, so it collides — unless it verifiably
+    belongs to this same book (our own earlier download in the other format),
+    which the finalize-time stale-file cleanup is what removes."""
+
+    def _reserve(self, base_output_path, present, owners):
+        """Reserve `base_output_path` with `present` paths on disk, each tracked
+        in the DB under the ASIN given in `owners` (absent = untracked)."""
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+
+        def execute(query, params=None):
+            cursor = mock.MagicMock()
+            tracked = owners.get(params[0]) if params else None
+            cursor.fetchone.return_value = {"asin": tracked} if tracked else None
+            return cursor
+
+        con.execute.side_effect = execute
+
+        with (
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch("os.path.exists", side_effect=lambda p: p in present),
+        ):
+            path = processor._reserve_output_path(base_output_path, "B0OURS")
+        return processor, path
+
+    def test_foreign_file_at_sibling_extension_forces_suffix(self):
+        processor, path = self._reserve(
+            "/data/A/Title/Title.m4b",
+            present={"/data/A/Title/Title.mp3"},
+            owners={"/data/A/Title/Title.mp3": "B0OTHER"},
+        )
+        assert path == "/data/A/Title/Title_B0OURS.m4b"
+        assert processor.is_duplicate is True
+
+    def test_foreign_m4a_file_at_sibling_extension_forces_suffix(self):
+        # W2 regression: an imported ".m4a" book occupying the base is just as much
+        # a collision as an ".mp3" one — every audio extension is probed, not just
+        # the other output format.
+        processor, path = self._reserve(
+            "/data/A/Title/Title.m4b",
+            present={"/data/A/Title/Title.m4a"},
+            owners={"/data/A/Title/Title.m4a": "B0OTHER"},
+        )
+        assert path == "/data/A/Title/Title_B0OURS.m4b"
+        assert processor.is_duplicate is True
+
+    def test_same_asin_file_at_sibling_extension_keeps_the_plain_name(self):
+        processor, path = self._reserve(
+            "/data/A/Title/Title.mp3",
+            present={"/data/A/Title/Title.m4b"},
+            owners={"/data/A/Title/Title.m4b": "B0OURS"},
+        )
+        assert path == "/data/A/Title/Title.mp3"
+        assert processor.is_duplicate is False
+
+    def test_untracked_file_at_sibling_extension_forces_suffix(self):
+        # Untracked and unprobeable (the ffprobe mock returns no embedded ASIN),
+        # so it can't be proven ours — the safe answer is a unique name.
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = None
+        with (
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch("os.path.exists", side_effect=lambda p: p == "/data/A/Title/Title.mp3"),
+            mock.patch.object(processor, "_probe_file_asin", return_value=None),
+        ):
+            path = processor._reserve_output_path("/data/A/Title/Title.m4b", "B0OURS")
+        assert path == "/data/A/Title/Title_B0OURS.m4b"
+        assert processor.is_duplicate is True
 
 
 class TestDuplicateFlag:
@@ -616,6 +801,18 @@ class TestDuplicateFlag:
         second = BookProcessor(asin="B0BBBB", job_id=1)
         with mock.patch("os.path.exists", return_value=False):
             first._reserve_output_path("/data/A/Title/Title.m4b", "B0AAAA")
+            second._reserve_output_path("/data/A/Title/Title.m4b", "B0BBBB")
+        assert first.is_duplicate is False
+        assert second.is_duplicate is True
+
+    def test_cross_extension_in_flight_collision_sets_flag(self):
+        # v0.23.0 #5: reservations are keyed by the extension-stripped base, so
+        # the duplicate flag fires across a format difference too — here the
+        # in-flight .mp3 book claims the base an .m4b book then wants.
+        first = BookProcessor(asin="B0AAAA", job_id=1)
+        second = BookProcessor(asin="B0BBBB", job_id=1)
+        with mock.patch("os.path.exists", return_value=False):
+            first._reserve_output_path("/data/A/Title/Title.mp3", "B0AAAA")
             second._reserve_output_path("/data/A/Title/Title.m4b", "B0BBBB")
         assert first.is_duplicate is False
         assert second.is_duplicate is True
@@ -791,7 +988,7 @@ class TestRemuxFinalize:
         processor.final_output_path = "/data/A/Title/Title.m4b"
         con = mock.MagicMock()
         con.__enter__.return_value = con
-        con.execute.return_value.fetchone.return_value = {"runtime_min": 60}
+        con.execute.return_value.fetchone.return_value = {"runtime_min": 60, "filepath": None}
         with (
             mock.patch.object(processing_logic, "remux_book_lossless", return_value=remux_success),
             mock.patch.object(processing_logic, "get_db_connection", return_value=con),
@@ -839,7 +1036,7 @@ class TestRemuxFinalize:
         processor.final_output_path = "/data/A/Title/Title.m4b"
         con = mock.MagicMock()
         con.__enter__.return_value = con
-        con.execute.return_value.fetchone.return_value = {"runtime_min": 60}
+        con.execute.return_value.fetchone.return_value = {"runtime_min": 60, "filepath": None}
         with (
             mock.patch.object(processing_logic, "merge_book_chunks", return_value=True),
             mock.patch.object(processing_logic, "get_db_connection", return_value=con),
@@ -863,7 +1060,7 @@ class TestMp3Finalize:
         processor.final_output_path = "/data/A/Title/Title.mp3"
         con = mock.MagicMock()
         con.__enter__.return_value = con
-        con.execute.return_value.fetchone.return_value = {"runtime_min": 60}
+        con.execute.return_value.fetchone.return_value = {"runtime_min": 60, "filepath": None}
         with (
             mock.patch.object(processing_logic, "encode_book_mp3", return_value=encode_success),
             mock.patch.object(processing_logic, "get_db_connection", return_value=con),
@@ -1652,3 +1849,241 @@ class TestFinalizeSuccessStampOrdering:
 
         called = [name for name, _args, _kwargs in recorder.mock_calls]
         assert called == ["pdf", "sidecars", "stamp"]
+
+
+class TestCleanupStaleFiles:
+    """v0.23.0 #2 (D5): a re-download re-derives its output path from the current
+    settings, so a changed format or naming template lands the new file somewhere
+    else and leaves the old one behind untracked. That leftover is deleted only
+    with consent (the job's prompt answer or the saved setting), only inside the
+    output root, and never when the "old" sidecars are this run's own."""
+
+    NEW = "/data/Author/Title/Title.m4b"
+    OLD = "/data/Author/Old Title/Old Title.m4b"
+
+    def _run(
+        self,
+        previous_path,
+        *,
+        new_path=None,
+        param=None,
+        setting=False,
+        present=None,
+        remove_error=None,
+        other_books=(),
+    ):
+        """Drive _cleanup_stale_files with the filesystem faked out, and return
+        the set of paths it tried to unlink plus the empty-dir cleanup mock. The
+        paths are deliberately fake /data ones: the guard is hard-coded to the
+        real output root, so nothing here may touch a real file.
+
+        `other_books` are (asin, filepath) pairs for OTHER tracked books, which is
+        what the shared-base check reads to decide whether the old base's sidecars
+        are jointly owned."""
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = new_path or self.NEW
+        processor.cleanup_stale_files = param
+
+        if present is None:
+            present = {previous_path} if previous_path else set()
+        settings = {"job": {"download": {"cleanup_stale_files": setting}}}
+
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        tracked = [{"asin": "B0OURS", "filepath": previous_path}] if previous_path else []
+        tracked += [{"asin": asin, "filepath": path} for asin, path in other_books]
+        con.execute.return_value.fetchall.return_value = tracked
+
+        with (
+            mock.patch.object(processing_logic, "load_settings", return_value=settings),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch("os.path.exists", side_effect=lambda p: p in present),
+            mock.patch("os.remove", side_effect=remove_error) as remove,
+            mock.patch.object(processing_logic, "_cleanup_empty_dirs") as cleanup_dirs,
+        ):
+            processor._cleanup_stale_files(previous_path)
+
+        return {call.args[0] for call in remove.call_args_list}, cleanup_dirs
+
+    def test_different_base_deletes_old_audio_and_sidecars(self):
+        old_base = "/data/Author/Old Title/Old Title"
+        removed, cleanup_dirs = self._run(
+            self.OLD,
+            param=True,
+            present={self.OLD, old_base + ".pdf", old_base + ".cue", old_base + ".metadata.json"},
+        )
+        assert removed == {self.OLD, old_base + ".pdf", old_base + ".cue", old_base + ".metadata.json"}
+        # Sidecars that weren't there are not touched.
+        assert old_base + ".jpg" not in removed
+        cleanup_dirs.assert_called_once_with("/data/Author/Old Title")
+
+    def test_extension_only_change_keeps_the_shared_sidecars(self):
+        # The critical subtlety: "Title.mp3" -> "Title.m4b" leaves the base equal,
+        # so the "old" sidecars ARE the ones this run just wrote. Only the old
+        # audio file may go.
+        old = "/data/Author/Title/Title.mp3"
+        base = "/data/Author/Title/Title"
+        removed, cleanup_dirs = self._run(
+            old,
+            param=True,
+            present={old, base + ".pdf", base + ".cue", base + ".metadata.json"},
+        )
+        assert removed == {old}
+        cleanup_dirs.assert_called_once_with("/data/Author/Title")
+
+    def test_shared_base_in_the_db_keeps_the_sidecars(self):
+        # B1 regression: a library made before same-base collisions were prevented
+        # can hold two books at one base under different audio extensions. The other
+        # book's row still points there, so those sidecars are its ONLY cover / PDF /
+        # cue / metadata — the old audio file goes, the sidecars stay.
+        old_base = "/data/Author/Old Title/Old Title"
+        removed, cleanup_dirs = self._run(
+            self.OLD,
+            param=True,
+            present={self.OLD, old_base + ".jpg", old_base + ".pdf", old_base + ".metadata.json"},
+            other_books=(("B0OTHER", old_base + ".mp3"),),
+        )
+        assert removed == {self.OLD}
+        cleanup_dirs.assert_called_once_with("/data/Author/Old Title")
+
+    def test_shared_base_on_disk_keeps_the_sidecars(self):
+        # B1 regression, the untracked half: nothing in the DB shares the base, but
+        # a sibling audio file is still sitting on it, so the sidecars are not
+        # provably ours alone.
+        old_base = "/data/Author/Old Title/Old Title"
+        removed, _cleanup_dirs = self._run(
+            self.OLD,
+            param=True,
+            present={self.OLD, old_base + ".m4a", old_base + ".jpg", old_base + ".cue"},
+        )
+        assert removed == {self.OLD}
+
+    def test_unshared_base_still_sweeps_the_sidecars(self):
+        # The control for the two above: other books exist, but none of them lives
+        # at the old base, so the sweep proceeds exactly as before.
+        old_base = "/data/Author/Old Title/Old Title"
+        removed, _cleanup_dirs = self._run(
+            self.OLD,
+            param=True,
+            present={self.OLD, old_base + ".jpg", old_base + ".cue"},
+            other_books=(("B0OTHER", "/data/Author/Other/Other.m4b"),),
+        )
+        assert removed == {self.OLD, old_base + ".jpg", old_base + ".cue"}
+
+    def test_symlinked_alias_of_the_new_path_is_never_deleted(self, tmp_path):
+        # W4 regression: /data/Author as a symlink to another mount is a plausible
+        # layout. The tracked previous path and this run's output are then the same
+        # file reached two ways — abspath strings differ while realpath agrees, and
+        # deleting would destroy the file this run just wrote. Real files here (no
+        # os.path.exists fake), with only os.remove stubbed so nothing is lost if
+        # the guard regresses.
+        real_dir = tmp_path / "library" / "Author"
+        real_dir.mkdir(parents=True)
+        book = real_dir / "Title.m4b"
+        book.write_bytes(b"audio")
+        alias_dir = tmp_path / "Author"
+        alias_dir.symlink_to(real_dir)
+
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = str(book)
+        processor.cleanup_stale_files = True
+
+        with (
+            mock.patch.object(processing_logic, "load_settings", return_value={}),
+            mock.patch("os.remove") as remove,
+            mock.patch.object(processing_logic, "_cleanup_empty_dirs") as cleanup_dirs,
+        ):
+            processor._cleanup_stale_files(str(alias_dir / "Title.m4b"))
+
+        remove.assert_not_called()
+        cleanup_dirs.assert_not_called()
+
+    def test_missing_old_file_is_a_noop(self):
+        removed, cleanup_dirs = self._run(self.OLD, param=True, present=set())
+        assert removed == set()
+        cleanup_dirs.assert_not_called()
+
+    def test_no_previous_path_is_a_noop(self):
+        removed, cleanup_dirs = self._run(None, param=True)
+        assert removed == set()
+        cleanup_dirs.assert_not_called()
+
+    def test_same_path_is_a_noop(self):
+        # The re-download overwrote its own file; nothing was left behind.
+        removed, cleanup_dirs = self._run(self.NEW, param=True)
+        assert removed == set()
+        cleanup_dirs.assert_not_called()
+
+    def test_path_outside_the_output_root_is_never_deleted(self):
+        outside = "/mnt/somewhere/else/Title.m4b"
+        removed, cleanup_dirs = self._run(outside, param=True, present={outside})
+        assert removed == set()
+        cleanup_dirs.assert_not_called()
+
+    def test_switch_off_deletes_nothing(self):
+        # No job param and the setting off: status quo, the old file stays.
+        removed, cleanup_dirs = self._run(self.OLD, param=None, setting=False)
+        assert removed == set()
+        cleanup_dirs.assert_not_called()
+
+    def test_setting_on_without_a_job_param_deletes(self):
+        # A scheduled job carries no params at all, so the saved setting has to be
+        # honored on its own.
+        removed, _cleanup_dirs = self._run(self.OLD, param=None, setting=True)
+        assert removed == {self.OLD}
+
+    def test_explicit_decline_vetoes_the_setting(self):
+        # D5: "declining the prompt = leave files". The flag is tri-state, so an
+        # unticked checkbox (False) is not the same as no answer (None) and must not
+        # fall through to the saved setting, even with it switched on.
+        removed, cleanup_dirs = self._run(self.OLD, param=False, setting=True)
+        assert removed == set()
+        cleanup_dirs.assert_not_called()
+
+    def test_missing_setting_key_defaults_to_off(self):
+        # Old settings.json files have no job.download.cleanup_stale_files key.
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = self.NEW
+        with (
+            mock.patch.object(processing_logic, "load_settings", return_value={"job": {"download": {}}}),
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("os.remove") as remove,
+        ):
+            processor._cleanup_stale_files(self.OLD)
+        remove.assert_not_called()
+
+    def test_unlink_failure_does_not_propagate(self):
+        # Best-effort: a finished book is never failed over a cleanup problem.
+        old_base = "/data/Author/Old Title/Old Title"
+        removed, cleanup_dirs = self._run(
+            self.OLD,
+            param=True,
+            present={self.OLD, old_base + ".cue"},
+            remove_error=OSError("permission denied"),
+        )
+        # Every unlink was still attempted, and the empty-dir sweep still ran.
+        assert removed == {self.OLD, old_base + ".cue"}
+        cleanup_dirs.assert_called_once_with("/data/Author/Old Title")
+
+    def test_finalize_captures_the_previous_path_before_the_update(self):
+        # The UPDATE overwrites filepath, so reading it afterwards would only ever
+        # see the NEW path and the cleanup would never fire. This pins the order.
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = self.NEW
+
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = {"filepath": self.OLD}
+
+        with (
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "_yield_progress"),
+            mock.patch.object(processor, "_verify_output_file", return_value=(True, None)),
+            mock.patch.object(processor, "_place_supplementary_pdf"),
+            mock.patch.object(processor, "_place_sidecar_files"),
+            mock.patch.object(processor, "_apply_file_timestamps"),
+            mock.patch.object(processor, "_cleanup_stale_files") as cleanup,
+        ):
+            processor._finalize_success(conversion_start_time=0, record_eta=False)
+
+        cleanup.assert_called_once_with(self.OLD)

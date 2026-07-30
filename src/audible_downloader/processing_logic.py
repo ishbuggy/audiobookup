@@ -38,12 +38,17 @@ from .settings import load_settings, resolve_output_format
 # Import the task runner and task objects
 from .task_runner import Task, TaskPriority, task_runner
 
-# Output paths claimed by in-flight books, guarded by a lock. The on-disk/DB
+# Output names claimed by in-flight books, guarded by a lock. The on-disk/DB
 # collision check only sees files that already exist; in a bulk job two
 # different books with the same author+title both run PREPARE before either
 # has written its file, so without this the loser's merge would silently
-# overwrite the winner. Each book reserves its chosen path here for the
+# overwrite the winner. Each book reserves its chosen name here for the
 # duration of its run and releases it when finished.
+#
+# The currency is the EXTENSION-STRIPPED base, not the full path: every sidecar
+# below hangs off that base, so "/data/X/T.m4b" and "/data/X/T.mp3" are the same
+# claim even though the audio files differ — treating them as distinct would let
+# one book's .pdf/.cue/.metadata.json silently overwrite the other's.
 _reserved_output_paths: set[str] = set()
 _reservation_lock = Lock()
 
@@ -56,6 +61,23 @@ _MIN_OUTPUT_BYTES = 64 * 1024
 # master (+ its voucher). Anything that follows the audiobook — a rename moving
 # it, a timestamp stamp — walks this list so the two can't drift apart.
 _SIDECAR_SUFFIXES = (".pdf", ".jpg", ".png", ".cue", ".metadata.json", ".aax", ".aaxc", ".voucher")
+
+# Every audio extension a tracked book's file can carry. Two books at the same
+# base under DIFFERENT audio extensions share one set of sidecars, so any of
+# these occupying our base is a collision — not just the format we happen to be
+# writing. ".m4a" is in the list because import_logic keeps an upload's real
+# container extension (see IMPORTABLE_EXTS), so real libraries contain .m4a
+# books, and rename_book_to_match_metadata preserves whatever it finds on disk.
+_AUDIO_EXTENSIONS = (".m4b", ".mp3", ".m4a")
+
+
+def _sibling_audio_paths(base, ext):
+    """
+    Every path that would share the sidecar base `base` under an audio extension
+    OTHER than `ext`. An unrecognized `ext` (not one of _AUDIO_EXTENSIONS) yields
+    all of them, so an unusual container still gets the full check.
+    """
+    return [f"{base}{other}" for other in _AUDIO_EXTENSIONS if other.lower() != ext.lower()]
 
 
 def _probe_duration_seconds(filepath, job_id=None):
@@ -312,13 +334,41 @@ def rename_book_to_match_metadata(asin):
     if os.path.abspath(target) == os.path.abspath(current_path):
         return None  # Name already matches.
 
-    # Collision-safe: if the target is taken by a different book, suffix the ASIN.
-    if os.path.exists(target):
+    # Collision-safe: if the target name is taken by a different book, suffix the
+    # ASIN. "Taken" is judged on the extension-stripped base, not the full path,
+    # because the sidecars hang off that base — a foreign book sitting at the same
+    # base under ANY other audio extension would have its .pdf/.cue/.metadata.json
+    # overwritten by ours, so every sibling extension is probed. Filesystem and DB
+    # reads happen outside the reservation lock (same discipline as
+    # _reserve_output_path).
+    target_root, target_ext = os.path.splitext(target)
+    occupied_candidates = [target] + _sibling_audio_paths(target_root, target_ext)
+
+    collision = False
+    for candidate in occupied_candidates:
+        if not os.path.exists(candidate):
+            continue
         with get_db_connection() as con:
-            other = con.execute("SELECT asin FROM audiobooks WHERE filepath = ?", (target,)).fetchone()
+            other = con.execute("SELECT asin FROM audiobooks WHERE filepath = ?", (candidate,)).fetchone()
         if not other or other["asin"] != asin:
-            root, ext = os.path.splitext(target)
-            target = f"{root}_{_sanitize_filename(asin)}{ext}"
+            collision = True
+            break
+
+    # An in-flight DOWNLOAD reserves its output base at PREPARE time, long before
+    # the file exists on disk, so neither check above can see it — a metadata edit
+    # made mid-job would otherwise move this book onto a name another book is
+    # about to write. Check the reservation set and claim our own (possibly
+    # suffixed) base atomically, then hold that claim across the move so the race
+    # can't run the other way either.
+    with _reservation_lock:
+        if target_root in _reserved_output_paths:
+            log.info(f"RENAME ({asin}): Target name is claimed by an in-flight book. Appending unique ID.")
+            collision = True
+        if collision:
+            target = f"{target_root}_{_sanitize_filename(asin)}{target_ext}"
+            target_root = os.path.splitext(target)[0]
+        reserved_base = target_root
+        _reserved_output_paths.add(reserved_base)
 
     try:
         os.makedirs(os.path.dirname(target), exist_ok=True)
@@ -348,6 +398,11 @@ def rename_book_to_match_metadata(asin):
         # already been committed — it must never escape as a 500.
         log.warning(f"RENAME ({asin}): Could not rename file(s): {e}")
         return None
+    finally:
+        # The claim only had to survive the move and the DB update; release it
+        # either way so the name is available again immediately.
+        with _reservation_lock:
+            _reserved_output_paths.discard(reserved_base)
 
 
 def build_metadata_json(book_info, title_override=None):
@@ -454,10 +509,19 @@ class BookProcessor:
     This acts as the "General Contractor" for one book.
     """
 
-    def __init__(self, asin, job_id, download_complete_event=None, stop_event=None):
+    def __init__(self, asin, job_id, download_complete_event=None, stop_event=None, cleanup_stale_files=None):
         self.asin = asin
         self.job_id = job_id
         self.download_complete_event = download_complete_event
+        # This job's answer to the stale-file prompt: when a re-download lands at a
+        # different path than the tracked one, delete the file left behind. THREE
+        # states, and the difference matters:
+        #   None  -> no answer was given (bulk/card download, scheduled job), so
+        #            finalize defers to the saved setting.
+        #   False -> the user was asked and DECLINED; the saved setting must not
+        #            override that, so nothing is ever deleted.
+        #   True  -> the user consented for this job, whatever the setting says.
+        self.cleanup_stale_files = cleanup_stale_files
         # The job's cancellation signal. The process_registry kills subprocesses
         # that are already running, but tasks still sitting in the queue would
         # otherwise start fresh work after a cancel — each task checks this
@@ -528,13 +592,14 @@ class BookProcessor:
 
     def _reserve_output_path(self, base_output_path, safe_asin):
         """
-        Choose this book's final output path and reserve it in-process so two
-        books with the same author+title can't both claim it.
+        Choose this book's final output path and reserve its base name in-process
+        so two books with the same author+title can't both claim it.
 
         Collision cases, in order:
-          1. Another in-flight book has already reserved this path -> rename ours.
-          2. A file already exists at the path -> keep it only if it verifiably
-             belongs to this same book (see _existing_file_is_foreign).
+          1. Another in-flight book has already reserved this base -> rename ours.
+          2. A file already exists at the path, or at ANY SIBLING audio extension
+             sharing the same base -> keep it only if it verifiably belongs to
+             this same book (see _existing_file_is_foreign).
         On collision we inject the ASIN ("Title.m4b" -> "Title_B00XYZ.m4b"),
         which is unique per book, and mark this book as a duplicate.
         """
@@ -547,24 +612,38 @@ class BookProcessor:
         # check-and-reserve against _reserved_output_paths still happens under it.
         file_is_foreign = os.path.exists(base_output_path) and self._existing_file_is_foreign(base_output_path)
 
+        # The sidecars hang off the extension-stripped base, so a foreign book
+        # already occupying the same base under ANY other audio extension is a
+        # collision too — both would write the same .pdf/.cue/.metadata.json. Every
+        # sibling extension is probed, not just the other output format: an imported
+        # ".m4a" book can occupy the base as easily as an ".mp3" one. A sibling
+        # belonging to this same ASIN (our own earlier download in the previous
+        # format) is NOT foreign and NOT a collision; the stale-file cleanup at
+        # finalize time is what removes it.
+        base, ext = os.path.splitext(base_output_path)
+        sibling_is_foreign = False
+        for sibling_path in _sibling_audio_paths(base, ext):
+            if os.path.exists(sibling_path) and self._existing_file_is_foreign(sibling_path):
+                sibling_is_foreign = True
+                break
+
         with _reservation_lock:
             collision = False
-            if base_output_path in _reserved_output_paths:
+            if base in _reserved_output_paths:
                 log.info(
-                    f"TASK-PREPARE ({self.asin}): Target path is already claimed by another "
+                    f"TASK-PREPARE ({self.asin}): Target name is already claimed by another "
                     f"in-flight book. Appending unique ID."
                 )
                 collision = True
-            elif file_is_foreign:
+            elif file_is_foreign or sibling_is_foreign:
                 collision = True
 
             if collision:
-                root, ext = os.path.splitext(base_output_path)
-                final_path = f"{root}_{safe_asin}{ext}"
+                final_path = f"{base}_{safe_asin}{ext}"
             else:
                 final_path = base_output_path
 
-            _reserved_output_paths.add(final_path)
+            _reserved_output_paths.add(os.path.splitext(final_path)[0])
 
         self.is_duplicate = collision
         return final_path
@@ -590,7 +669,7 @@ class BookProcessor:
                     f"{existing_entry['asin']}. Appending unique ID."
                 )
                 return True
-            log.info(f"TASK-PREPARE ({self.asin}): File exists and belongs to this ASIN. Overwriting.")
+            log.info(f"TASK-PREPARE ({self.asin}): Existing file '{filepath}' belongs to this book; not a collision.")
             return False
 
         embedded_asin = self._probe_file_asin(filepath)
@@ -638,11 +717,12 @@ class BookProcessor:
             log.error(f"PROCESSOR ({self.asin}): A critical error occurred in the processor run: {e}", exc_info=True)
             self._update_db_on_failure(f"A critical error occurred: {e}")
         finally:
-            # Release our claimed output path so the name is available again
-            # (e.g. for a later re-download of this same book).
+            # Release our claimed output name so it is available again (e.g. for
+            # a later re-download of this same book). Reservations are keyed by
+            # the extension-stripped base, so release the same way.
             if self.final_output_path:
                 with _reservation_lock:
-                    _reserved_output_paths.discard(self.final_output_path)
+                    _reserved_output_paths.discard(os.path.splitext(self.final_output_path)[0])
             log.info(f"PROCESSOR ({self.asin}): Finished run method.")
 
     def _prepare_and_spawn_encode_tasks(self):
@@ -1066,7 +1146,13 @@ class BookProcessor:
         # same-author+title collision forced an ASIN suffix onto our name;
         # it is written explicitly (0 when clean) so a later re-download
         # that resolves without a collision clears a stale flag.
+        #
+        # The path this book was tracked at is read FIRST: the UPDATE below
+        # overwrites it, and it's the only record of where a re-download's
+        # previous file lives (see _cleanup_stale_files).
         with get_db_connection() as con:
+            previous_row = con.execute("SELECT filepath FROM audiobooks WHERE asin = ?", (self.asin,)).fetchone()
+            previous_path = previous_row["filepath"] if previous_row else None
             con.execute(
                 "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, "
                 "error_message = '', retry_count = 0, is_duplicate = ? WHERE asin = ?",
@@ -1078,7 +1164,137 @@ class BookProcessor:
         self._place_sidecar_files()
         # Stamp timestamps last, once every file that shares the base name exists.
         self._apply_file_timestamps()
+        # Only now that this run's own output is fully in place is it safe to
+        # remove what the previous download left somewhere else.
+        self._cleanup_stale_files(previous_path)
         _yield_progress(self.asin, "Complete!", 100, self.job_id)
+
+    def _cleanup_stale_files(self, previous_path):
+        """
+        Remove the file a re-download left behind. A re-download re-derives its
+        output path from the *current* settings, so a changed output format or
+        naming template writes the new file somewhere else entirely and the old
+        one stops being referenced by anything — it just sits in /data forever.
+
+        Gated on this job's answer to the UI prompt OR the saved setting, since a
+        scheduled job carries no params and the setting is the only thing that can
+        speak for it. Every guard below is load-bearing: this is the finalizer's
+        only destructive step, so it refuses to act unless the tracked previous
+        path is a real, different file inside the output root. Each unlink is
+        independently best-effort — a finished book is never failed over cleanup.
+        """
+        # Tri-state per-job flag: an explicit False is the user DECLINING the
+        # prompt, which vetoes the saved setting. Only None ("never asked") falls
+        # back to it. See BookProcessor.__init__.
+        if self.cleanup_stale_files is not None:
+            consented = self.cleanup_stale_files
+        else:
+            consented = load_settings().get("job", {}).get("download", {}).get("cleanup_stale_files", False)
+        if not consented:
+            return
+
+        if not previous_path:
+            return
+        # Every destructive comparison below resolves symlinks: os.path.abspath only
+        # collapses "."/".." , so a symlinked alias of the output tree (say
+        # /data/Author -> /data/library/Author) makes the old and new paths compare
+        # unequal even when they are the same file, and this run's own freshly
+        # written output would be deleted.
+        previous_real = os.path.realpath(previous_path)
+        new_real = os.path.realpath(self.final_output_path)
+        if previous_real == new_real:
+            return  # The re-download overwrote its own file; nothing was left behind.
+        # This exists() guard is also what implements the plan's "never for a
+        # MISSING book" rule: a MISSING row's tracked file is gone from disk, so
+        # cleanup returns here before touching anything.
+        if not os.path.exists(previous_path):
+            return
+        # Belt-and-braces on top of the realpath comparison — a hard link (or a
+        # symlink realpath could not resolve) still makes two different-looking
+        # paths the same inode. An OSError means the stat failed, so we cannot
+        # prove they are the same file and fall through to the remaining guards.
+        try:
+            if os.path.exists(self.final_output_path) and os.path.samefile(previous_path, self.final_output_path):
+                return
+        except OSError:
+            pass
+        # Whatever the DB row claims, never delete outside the output directory.
+        # Both sides are resolved so a symlinked /data still compares as inside it.
+        data_root = os.path.realpath("/data")
+        if not previous_real.startswith(data_root + os.sep):
+            log.warning(f"PROCESSOR ({self.asin}): Refusing to clean up '{previous_path}' — it is outside {data_root}.")
+            return
+
+        try:
+            os.remove(previous_path)
+            log.info(f"PROCESSOR ({self.asin}): Removed stale file from the previous download: {previous_path}")
+        except OSError as e:
+            log.warning(f"PROCESSOR ({self.asin}): Could not remove stale file '{previous_path}': {e}")
+
+        # Sidecars come off only when the extension-stripped BASE actually moved.
+        # On a format-only change ("Title.m4b" -> "Title.mp3") the old base IS the
+        # new base, so the "old" sidecars are the ones _place_sidecar_files wrote
+        # moments ago for this very run — deleting them would destroy this
+        # download's own output.
+        old_base = os.path.splitext(previous_real)[0]
+        new_base = os.path.splitext(new_real)[0]
+        if old_base != new_base:
+            # ...and only when nothing ELSE still lives at the old base. Sidecars
+            # are keyed by the base while audio files are not, so a second book
+            # sitting there under a different audio extension shares these exact
+            # files — they may be its only cover/PDF/cue/metadata/raw master.
+            if self._output_base_is_shared(old_base, previous_real):
+                log.info(
+                    f"PROCESSOR ({self.asin}): Skipped the stale-sidecar sweep at '{old_base}' — "
+                    f"the base is still in use by another book."
+                )
+            else:
+                for suffix in _SIDECAR_SUFFIXES:
+                    stale_sidecar = f"{old_base}{suffix}"
+                    if not os.path.exists(stale_sidecar):
+                        continue
+                    try:
+                        os.remove(stale_sidecar)
+                        log.info(f"PROCESSOR ({self.asin}): Removed stale sidecar: {stale_sidecar}")
+                    except OSError as e:
+                        log.warning(f"PROCESSOR ({self.asin}): Could not remove stale sidecar '{stale_sidecar}': {e}")
+
+        # The old folder may now be empty (a naming-template change moves whole
+        # directory levels); the existing helper stops at the first non-empty one.
+        _cleanup_empty_dirs(os.path.dirname(previous_path))
+
+    def _output_base_is_shared(self, old_base, previous_real):
+        """
+        True when something OTHER than this book's previous download still occupies
+        `old_base`, which makes the sidecars there jointly owned and unsafe to
+        delete. Libraries created before same-base collisions were prevented can
+        hold two books at one base under different audio extensions.
+
+        Two independent signals, either of which is enough:
+          1. Another audio file is still on disk at the base — anything from
+             _AUDIO_EXTENSIONS other than the previous file we just removed.
+          2. Another audiobooks row is tracked at the same base, even if its file
+             is temporarily absent (a MISSING book still owns its cover/PDF).
+
+        The DB half reads every non-null filepath and compares bases in Python
+        rather than with a LIKE pattern: libraries are small, and a base name can
+        contain LIKE wildcards that would need escaping.
+        """
+        for ext in _AUDIO_EXTENSIONS:
+            candidate = f"{old_base}{ext}"
+            if os.path.realpath(candidate) == previous_real:
+                continue  # The previous download's own file, not a second book.
+            if os.path.exists(candidate):
+                return True
+
+        with get_db_connection() as con:
+            rows = con.execute("SELECT asin, filepath FROM audiobooks WHERE filepath IS NOT NULL").fetchall()
+        for row in rows:
+            if row["asin"] == self.asin:
+                continue
+            if os.path.splitext(os.path.realpath(row["filepath"]))[0] == old_base:
+                return True
+        return False
 
     def _merge_and_finalize(self):
         """The actual function for the MERGE_BOOK task (re-encode path)."""

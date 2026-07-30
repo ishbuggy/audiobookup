@@ -213,6 +213,36 @@
                                 <span class="slider"></span>
                             </label>
                         </div>
+
+                        <!-- A force re-download re-converts with the CURRENT settings, so a
+                             changed format or naming template writes the new file to a new
+                             path and orphans the old one. Off = the re-download prompt asks
+                             each time; on = the orphan is always removed. Advanced only. -->
+                        <div class="form-group advanced-setting">
+                            <label for="cleanup-stale-files">
+                                Clean up Replaced Files
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    When a re-download lands at a different location (because the output format or
+                                    naming template changed), delete the previous file and its companion files (PDF,
+                                    cover, cue sheet, metadata) automatically instead of asking each time.
+                                </small>
+                            </label>
+                            <label class="switch">
+                                <input
+                                    type="checkbox"
+                                    id="cleanup-stale-files"
+                                    class="setting-input"
+                                    data-path="job.download.cleanup_stale_files"
+                                    {%
+                                    if
+                                    settings.job.download.cleanup_stale_files
+                                    %}checked{%
+                                    endif
+                                    %}
+                                />
+                                <span class="slider"></span>
+                            </label>
+                        </div>
                     </div>
                 </div>
                 <!-- END: DOWNLOADING ACCORDION -->

@@ -254,12 +254,16 @@ def import_worker(job_id, app_context, stop_event):
 
 
 ## The worker now announces events to the SSE stream, and responds to cancellation signal
-def download_worker(job_id, app_context, stop_event):
+def download_worker(job_id, app_context, stop_event, job_params=None):
     """
     This function runs in a background thread and processes the download job.
     It now uses a ThreadPoolExecutor to limit the number of books being prepared
     concurrently, and delegates all processing logic to the global TaskRunner via
     the BookProcessor class.
+
+    `job_params` carries the per-job options the UI collected (currently only the
+    stale-file cleanup answer). It is None for scheduler-started jobs, which have
+    no UI to ask — those fall back to the saved setting inside the processor.
     """
     with app_context:
         was_cancelled = False
@@ -277,6 +281,16 @@ def download_worker(job_id, app_context, stop_event):
             # --- "HEAD-START" CONCURRENCY V2: CORRECTLY DECOUPLED ---
             settings = load_settings()
             book_concurrency = settings.get("job", {}).get("download", {}).get("max_parallel_downloads", 1)
+
+            # The user's answer to the stale-file prompt, if this job came from the
+            # UI. Deliberately NOT coerced to a bool: the value is tri-state, and
+            # False (the user unticked the checkbox) has to stay distinguishable
+            # from "no answer at all" so declining the prompt vetoes the saved
+            # setting instead of falling back to it. Only a real JSON boolean counts
+            # as an answer — anything else in the body is treated as absent.
+            cleanup_stale_files = (job_params or {}).get("cleanup_stale_files")
+            if not isinstance(cleanup_stale_files, bool):
+                cleanup_stale_files = None
 
             def _prepare_and_process_book(asin):
                 """
@@ -299,7 +313,12 @@ def download_worker(job_id, app_context, stop_event):
                 try:
                     # Create the processor and store it. The stop_event lets
                     # queued tasks bail out cleanly after a cancellation.
-                    processor = BookProcessor(asin=asin, job_id=job_id, stop_event=stop_event)
+                    processor = BookProcessor(
+                        asin=asin,
+                        job_id=job_id,
+                        stop_event=stop_event,
+                        cleanup_stale_files=cleanup_stale_files,
+                    )
                     processors[asin] = processor
 
                     # This is the key change: processor.run() is a blocking call that
@@ -462,8 +481,9 @@ def start_new_job(job_type, asins=None, job_params=None):
                 items_to_insert = [(job_id, asin, "QUEUED") for asin in asins]
                 cur.executemany("INSERT INTO job_items (job_id, asin, status) VALUES (?, ?, ?)", items_to_insert)
 
-                # The download_worker takes (job_id, app_context, stop_event).
-                worker_args = (job_id, app.app_context(), stop_event)
+                # The download_worker takes (job_id, app_context, stop_event) plus
+                # the job's params (the stale-file cleanup answer).
+                worker_args = (job_id, app.app_context(), stop_event, job_params)
 
             elif job_type == "SYNC":
                 worker_target = sync_worker

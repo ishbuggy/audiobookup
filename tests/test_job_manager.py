@@ -62,3 +62,63 @@ class TestImportWorkerCancellation:
             job_manager.import_worker(1, nullcontext(), stop_event)
 
         assert _final_status(con) == "COMPLETED"
+
+
+def _download_con(asins):
+    """A DB stand-in for download_worker: the job's items, then the per-book and
+    per-job status reads it makes on the way out."""
+    con = mock.MagicMock()
+    con.__enter__.return_value = con
+
+    def execute(sql, params=None):
+        cursor = mock.MagicMock()
+        if "SELECT asin, status FROM job_items" in sql:
+            cursor.fetchall.return_value = [{"asin": asin, "status": "COMPLETED"} for asin in asins]
+        elif "SELECT asin FROM job_items" in sql:
+            cursor.fetchall.return_value = [{"asin": asin} for asin in asins]
+        elif "SELECT status FROM job_items" in sql:
+            cursor.fetchall.return_value = [{"status": "COMPLETED"} for _ in asins]
+        elif "SELECT status FROM audiobooks" in sql:
+            cursor.fetchone.return_value = {"status": "DOWNLOADED"}
+        return cursor
+
+    con.execute.side_effect = execute
+    return con
+
+
+class TestDownloadWorkerCleanupConsent:
+    """v0.23.0 #2 (D5): the stale-file cleanup answer is a destructive consent, and
+    this is the link that maps the job's params onto the processor. It is
+    TRI-STATE: True = consented, False = declined (which vetoes the saved
+    setting), None = never asked (scheduled/bulk job, so the setting governs)."""
+
+    def _cleanup_arg(self, job_params):
+        con = _download_con(["B001"])
+        with (
+            mock.patch.object(job_manager, "get_db_connection", return_value=con),
+            mock.patch.object(job_manager, "load_settings", return_value={}),
+            mock.patch.object(job_manager, "BookProcessor") as processor_cls,
+            mock.patch.object(job_manager.announcer, "announce"),
+        ):
+            job_manager.download_worker(1, nullcontext(), Event(), job_params)
+        processor_cls.assert_called_once()
+        return processor_cls.call_args.kwargs["cleanup_stale_files"]
+
+    def test_consent_is_passed_through_as_true(self):
+        assert self._cleanup_arg({"cleanup_stale_files": True}) is True
+
+    def test_decline_is_passed_through_as_false(self):
+        # The failure this pins: coercing to bool here loses the decline entirely.
+        assert self._cleanup_arg({"cleanup_stale_files": False}) is False
+
+    def test_absent_key_becomes_none(self):
+        assert self._cleanup_arg({}) is None
+
+    def test_no_params_at_all_becomes_none(self):
+        # Scheduler-started jobs pass job_params=None.
+        assert self._cleanup_arg(None) is None
+
+    def test_non_boolean_value_is_treated_as_no_answer(self):
+        # Only a real JSON boolean counts as an answer; a string must not sneak
+        # through as a truthy "yes".
+        assert self._cleanup_arg({"cleanup_stale_files": "false"}) is None
