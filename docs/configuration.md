@@ -12,7 +12,7 @@ Default: `Off`.
 
 ![The Advanced Mode toggle in the Settings page header, next to the theme switcher](images/settings-advanced-toggle.png)
 
-**Export as JSON / Import from JSON.** At the bottom of the page, these two buttons let you download your entire configuration as a `.json` file, or load one back in. Useful for backing up your setup before experimenting, or copying your configuration to a fresh install. Importing merges the file over your current settings — every key the file contains replaces your current value, and anything it doesn't mention is left alone — then reloads the page. One caution on the export: the file includes your (hashed) web-UI login credential, so keep it private and don't post it anywhere public.
+**Export as JSON / Import from JSON.** At the bottom of the page, these two buttons let you download your entire configuration as a `.json` file, or load one back in. Useful for backing up your setup before experimenting, or copying your configuration to a fresh install. Importing merges the file over your current settings — every key the file contains replaces your current value, and anything it doesn't mention is left alone — then reloads the page. The exported file no longer contains your (hashed) web-UI login credential, so it's safe to share — for backup, migration, or asking for help — without handing anyone something crackable. Historical note: exports taken from older versions did include that credential, so treat any older export file as private, and be aware that importing one also switches your login password back to whatever it was when that export was made.
 
 **Save Changes.** Nothing you change on this page takes effect until you click **Save Changes** at the bottom. Most changes apply immediately after saving; changing your username or password is the one exception — see [Authentication Settings](#authentication-settings) below.
 
@@ -25,7 +25,7 @@ Screenshots for each section below are placeholders for now and will be filled i
 ![The Job Settings section, showing Total Processing Cores with the Auto-detect button](images/settings-01-jobs.png)
 
 **Total Processing Cores**
-Sets the global ceiling on how many CPU-intensive tasks (audio encoding, decryption) can run at once across the whole app. A good starting point is your system's total CPU core count minus one, leaving a core free for the OS and the web UI. Click **Auto-detect** to have the app measure your system's hardware and fill in a suggested value for you.
+Sets the global ceiling on how many CPU-intensive tasks (audio encoding, decryption) can run at once across the whole app. A good starting point is your system's total CPU core count minus one, leaving a core free for the OS and the web UI — capped at this setting's maximum of 16 on machines with more cores than that. Click **Auto-detect** to have the app measure your system's hardware and fill in a suggested value for you (never more than 16).
 Range: 1–16. Default: `2`.
 `settings.json: job.download.total_processing_cores — default 2`
 
@@ -186,7 +186,7 @@ The default, `{ch_title}`, reproduces each chapter's original title exactly, unc
 
 ![The Sidecar Files section, showing the Save Cover Alongside toggle](images/settings-05-sidecar.png)
 
-This section covers three of the extra files that can land next to a finished audiobook: the cover image, a `metadata.json`, and a `.cue` sheet. Two others live elsewhere — the companion PDF and the raw AAX/AAXC download are both controlled from the **Downloading** section above.
+This section covers four of the extra files that can land next to a finished audiobook: the cover image, a `metadata.json`, a `.cue` sheet, and an annotations file. Two others live elsewhere — the companion PDF and the raw AAX/AAXC download are both controlled from the **Downloading** section above.
 
 **Save Cover Alongside**
 Saves the book's cover image as its own file next to the finished audiobook, in addition to the copy already embedded inside the audio file itself.
@@ -205,6 +205,11 @@ Default: `Off`.
 Writes a `.cue` chapter sheet next to the audiobook, listing each chapter's start time — a format some media players and burning tools can read directly.
 Default: `Off`.
 `settings.json: conversion.create_cue_sheet — default false`
+
+**Save Annotations**
+Writes your clips, notes, and bookmarks for the book — the ones you made in the Audible app — to an `.annotations.json` sidecar next to the audiobook, in Audible's own raw format. Fetched with a separate request during download, so turning this on adds a small amount of extra time per book. A book you never annotated simply produces no file, which is the normal case, not an error. You don't have to turn this on ahead of time to get annotations for a book you've already downloaded — see the **Download Annotations** button in that book's detail view, covered in [usage.md](usage.md#book-details).
+Default: `Off`.
+`settings.json: conversion.save_annotations — default false`
 
 </details>
 
@@ -231,6 +236,8 @@ If a placeholder resolves to nothing — most commonly `{series}`/`{series_part}
 
 Default: `{author}/{title}/{author} - {title}` — which produces, for example, `Brandon Sanderson/Mistborn/Brandon Sanderson - Mistborn.m4b`.
 `settings.json: naming.template — default "{author}/{title}/{author} - {title}"`
+
+> **`{series_part}` can render blank right after upgrading, then fix itself.** The series-position value behind this placeholder is only populated by a library sync. A book already in your library from before that data was tracked shows a blank `{series_part}` (and any folder level built from it is dropped, per the rule above) until the next Fast or Deep Sync refreshes its record from Audible — at which point it fills in on its own. No action is needed; new downloads and newly-synced books are unaffected.
 
 **Truncate Subtitle in Filenames**
 Some Audible titles carry a long subtitle after a colon (e.g. "Project Hail Mary: A Novel"). When on, only the part before the first `": "` is used when building the filename — so the example above becomes just "Project Hail Mary" on disk. This only affects the on-disk filename; the full, untruncated title is still written into the file's embedded metadata.
@@ -318,7 +325,7 @@ Automatically downloads and converts books matching the statuses you select belo
 
 - **NEW** — books not yet downloaded. `settings.json: tasks.auto_process_new — default true`
 - **MISSING** — previously-downloaded books whose file can no longer be found. `settings.json: tasks.auto_process_missing — default true`
-- **ERROR** — books whose last attempt failed. `settings.json: tasks.auto_process_error — default false`. Checking this box pops up a warning, and it's worth taking seriously: with ERROR ticked, every scheduled automatic-processing run re-attempts the books that failed. That's exactly what you want for a transient failure — a dropped connection, a temporary Audible hiccup — but a book that fails for a permanent reason, such as a title AudioBookup simply can't convert, will keep being picked up and retried run after run. Enable it to clear out transient failures, and turn it back off if a particular book keeps failing.
+- **ERROR** — books whose last attempt failed. `settings.json: tasks.auto_process_error — default false`. Checking this box pops up a warning worth reading carefully: with ERROR ticked, a failed book gets exactly **one** further automatic retry on a later scheduled run — if that retry fails too, automatic processing leaves the book alone from then on, so a permanently-broken title doesn't get hammered against Audible's API forever. That's exactly what you want for a transient failure — a dropped connection, a temporary Audible hiccup. Retrying the book yourself at any time (its own Download button, or selecting it in Process Downloads) re-arms one more automatic attempt, even if that manual attempt also fails.
 
 **Trigger immediate processing when new books are found by a sync**
 Lives inside the Automatic Processing block and only works as part of it: **Automatic Processing must be enabled too**, and while it's off this toggle is hidden entirely. With both on, a successful Fast or Deep Sync kicks off a processing run right away instead of waiting for the schedule above to come around — whether or not the sync actually turned up anything new. That run processes everything matching the status checkboxes above, not only newly-discovered books.
@@ -350,7 +357,7 @@ Default: `admin`.
 `settings.json: username — default "admin"`
 
 **New Password** / **Confirm New Password**
-Sets a new web-UI login password. Leave both fields blank to keep your current password unchanged. The **Confirm New Password** field is a convenience check in your browser — it flags a mismatch as you type, but it isn't what decides what gets saved, so double-check that both fields match before you save. If you're ever unsure what actually got stored, the password-reset procedure in [troubleshooting.md](troubleshooting.md#resetting-your-local-web-ui-password) puts you back to a known password.
+Sets a new web-UI login password. Leave both fields blank to keep your current password unchanged. If the two fields don't match, saving is blocked with an error and nothing is changed, so a mistyped confirmation can't silently set a password you didn't intend. If you're ever unsure what actually got stored, the password-reset procedure in [troubleshooting.md](troubleshooting.md#resetting-your-local-web-ui-password) puts you back to a known password.
 Minimum length: 8 characters.
 `settings.json: password_hash` — your password is only ever stored hashed; the plain text you type into these fields is never written to the file.
 

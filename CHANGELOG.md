@@ -27,8 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Assorted small fixes:** A clearer error message when a book ends up with no usable chapters after its chapter data is processed; companion files with uppercase extensions (like `.JPG`) are now recognized when a book is renamed, re-dated, or cleaned up; and a couple of hard-to-reach edge cases in file naming and duplicate marking are handled properly.
 
 ### Documentation
-- **New documentation in `docs/`:** The README has been split into a full set of user guides — an overview of how AudioBookup works, a Docker Compose installation guide, a first-time setup walkthrough, a day-to-day usage guide, a complete settings reference covering every option (including the Advanced Mode ones), and a troubleshooting guide — all illustrated with up-to-date screenshots of the app. The README is now a short landing page pointing into them.
+- **A full set of user guides:** The README has been split into a full set of user guides — an overview of how AudioBookup works, a Docker Compose installation guide, a first-time setup walkthrough, a day-to-day usage guide, a complete settings reference covering every option (including the Advanced Mode ones), and a troubleshooting guide — all illustrated with up-to-date screenshots of the app. The README is now a short landing page pointing into them.
 - **Documentation corrections:** The first-time login flow is now described accurately (sign in with the default credentials first, then set your own password), and the local password-reset procedure has been fixed so it actually works as written.
+- **Naming template caveat:** The settings guide now notes that the `{series_part}` naming placeholder can render blank for books already in your library right after updating, until the next sync catches up — it fixes itself automatically, no action needed.
 
 ## [0.22.0] - 2026-07-29
 
