@@ -17,9 +17,13 @@ High-level direction for the project: what's planned, why, and roughly when. Thi
 | v0.19.0 / v0.20.0 | Backend correctness + frontend library views, editing & card actions | Shipped (2026-07-22, as v0.20.0) |
 | v0.21.0 | Image hardening (Debian trixie base, GPG-verified gosu, apt upgrade) | Shipped (2026-07-22) |
 | v0.22.0 | Libation-parity download & processing options + settings IA | Shipped (2026-07-29) |
-| v0.23.0+ | Architectural features (see "Longer horizon") | Ideas |
+| v0.23.0 | Quality release: full backlog sweep + clips/notes/bookmarks export | In flight |
+| v0.24.0 | Split books into per-chapter files | Planned |
+| v0.25.0 | Full Libation `<tag>` naming engine + chapter-timestamp parity | Planned |
+| v0.26.0 | Multiple Audible accounts / profiles | Planned |
+| v0.27.0 | Faster / event-driven library sync | Planned |
 
-The v0.19 backend and v0.20 frontend tracks were developed backend-first and released together as **v0.20.0**; **v0.21.0** followed with container-image hardening. **v0.22.0** shipped 2026-07-29, driven by a settings-parity review of Libation (see `ref-docs/reports/v0.22.0/` and `ref-docs/libation/`). A **documentation pass** followed on 2026-07-30 (no version bump; it ships with the next release's notes): the README was split into a screenshot-illustrated `docs/` folder, and a docs sweep is now a standing part of every release plan. The next milestone is not yet scoped; candidates live under "Longer horizon" below.
+The v0.19 backend and v0.20 frontend tracks were developed backend-first and released together as **v0.20.0**; **v0.21.0** followed with container-image hardening. **v0.22.0** shipped 2026-07-29, driven by a settings-parity review of Libation (see `ref-docs/reports/v0.22.0/` and `ref-docs/libation/`). A **documentation pass** followed on 2026-07-30 (no version bump; it ships with the next release's notes): the README was split into a screenshot-illustrated `docs/` folder, and a docs sweep is now a standing part of every release plan. **v0.23.0** was scoped 2026-07-30 (detailed plan in `PLAN.md`) and the headline sequence through v0.27.0 was laid out the same day — see "Planned headline features" below.
 
 ---
 
@@ -56,17 +60,44 @@ settings re-categorized into clearer groups. Detailed step plan and settings sch
 
 ---
 
-## Longer horizon (v0.23.0+ / ideas)
+## v0.23.0 — Quality release: full backlog sweep + clips/notes/bookmarks export (in flight)
 
-Deliberately deferred because they're architectural, low-priority, or need investigation rather than a known fix:
+Scoped 2026-07-30; detailed step plan in `PLAN.md`. Sweeps all twelve open backlog items left by
+the v0.22.0 release reviews and the docs pass — correctness fixes in the path/sidecar/conversion
+machinery plus three user-hurting settings/auth bugs (the ERROR auto-retry loop, the password
+confirm-field mismatch, the credential hash in the settings export) — and ships one modest
+headline: **clips / notes / bookmarks export** *(FR14 follow-on)*. Annotations are fetched via
+`audible download --annotation` and saved as a raw-JSON sidecar (`<book>.annotations.json`), both
+automatically at download time (opt-in sidecar setting) and on demand per book from the detail
+modal.
 
-- **Split books into per-chapter files.** Libation's "split my books into multiple files by chapter" (+ minimum-file-duration merge). Deferred out of v0.22.0 because it breaks the load-bearing one-book/one-`filepath` model — it ripples through the DB schema, collision handling, output verification, and every library view — so it deserves its own dedicated release.
-- **Full Libation `<tag>` naming engine.** The complete formatter + conditional DSL (`<title short[U]>`, `<if series->…<-if series>`, name/date/number formatters). v0.22.0 only extends the simpler `{tag}` template; the full engine is a large parser to build and support.
-- **Multiple Audible accounts / profiles** — concurrent auth chains, per-account libraries. Significant architecture change. *(FR5; also a standing "future idea.")*
-- **Faster / event-driven library sync** — closer to real-time without hammering the API. Manual sync already exists as a workaround, so this is an enhancement, not a fix. *(FR1.)*
-- **Chapter-timestamp parity with Libation** — timestamps drift a few seconds per chapter vs. Libation. Touches the load-bearing `chunked_conversion_logic.py` core, so it needs a careful investigation (not a casual change) before it's schedulable. *(Bug 6.)*
-- **Clips / notes / bookmarks export** — Libation downloads annotations (`audible download --annotation`) as CSV/JSON; achievable but out of v0.22.0 scope. *(FR14 follow-on.)*
-- **Frontend framework migration** — TypeScript and/or Svelte, as deliberate planned work, not a drive-by refactor.
+---
+
+## Planned headline features (v0.24.0+)
+
+Sequence decided 2026-07-30 — one headline per release. Still context, not commitment: each release
+gets its own detailed `PLAN.md` when it opens, and priorities can shift.
+
+- **v0.24.0 — Split books into per-chapter files.** Libation's "split my books into multiple files
+  by chapter" (+ minimum-file-duration merge). The big one: it breaks the load-bearing
+  one-book/one-`filepath` model — rippling through the DB schema, collision handling, output
+  verification, and every library view — which is why it gets its own dedicated release.
+- **v0.25.0 — Full Libation `<tag>` naming engine + chapter-timestamp parity.** The complete
+  formatter + conditional DSL (`<title short[U]>`, `<if series->…<-if series>`, name/date/number
+  formatters) — a large parser to build and support; v0.22.0 only extended the simpler `{tag}`
+  template. Paired with the careful investigation of the few-seconds-per-chapter timestamp drift
+  vs. Libation, which touches the load-bearing `chunked_conversion_logic.py` core and needs
+  investigation, not a casual change. *(Bug 6.)*
+- **v0.26.0 — Multiple Audible accounts / profiles.** Concurrent auth chains, per-account
+  libraries. Significant architecture change, deliberately sequenced after the storage/path model
+  settles post-splitting. *(FR5; also a standing "future idea.")*
+- **v0.27.0 — Faster / event-driven library sync.** Closer to real-time without hammering the API.
+  Manual sync already exists as a workaround, so this is an enhancement, not a fix. *(FR1.)*
+
+## Unscheduled ideas
+
+- **Frontend framework migration** — TypeScript and/or Svelte, as deliberate planned work once the
+  feature roadmap quiets down — not a drive-by refactor, and not slotted to a version.
 
 ---
 
