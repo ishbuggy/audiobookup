@@ -7,7 +7,7 @@
 <br/>
 
 <p align="center">
-  <img src="src/static/img/audiobookup-main-screenshots.png" title="AudioBookup Screenshots">
+  <img src="docs/images/dashboard-grid.png" title="AudioBookup Dashboard">
 </p>
 
 This entire system runs as a single Docker container, providing a seamless user experience from first-run authentication to basic day-to-day library management, all through a clean web interface. It features persistent background jobs for syncing and downloading, intelligent parallel processing to maximize conversion speed, and provides granular, real-time progress updates directly in the UI.
