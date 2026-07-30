@@ -29,6 +29,8 @@ Once synced, your library dashboard shows every book you own along with its curr
 
 Selecting books to process (or letting automation do it) starts a background job. AudioBookup downloads each book from Audible, decrypts it, converts it to your chosen output format, embeds chapters and metadata, and writes it to disk — all while showing granular, real-time progress in the job panel. You can safely close the browser; the job keeps running on the server.
 
+Finished files carry extended tags — album, album artist, genre, publisher, and the Audible ASIN, alongside the usual title/author/narrator — so they slot cleanly into players like Plex, Audiobookshelf, and Apple Books. And if a re-encoded book arrives from Audible as one single chapter longer than 30 minutes, AudioBookup automatically splits it into evenly spaced 15-minute "Part N" chapters so you can still navigate and track your position (an "Original" lossless remux keeps its chapters exactly as delivered).
+
 ### Result
 
 Finished books land in your output folder, organized into a folder/file structure built from your naming template — no manual filing required.

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- **New documentation in `docs/`:** The README has been split into a full set of user guides — an overview of how AudioBookup works, a Docker Compose installation guide, a first-time setup walkthrough, a day-to-day usage guide, a complete settings reference covering every option (including the Advanced Mode ones), and a troubleshooting guide — all illustrated with up-to-date screenshots of the app. The README is now a short landing page pointing into them.
+- **Documentation corrections:** The first-time login flow is now described accurately (sign in with the default credentials first, then set your own password), and the local password-reset procedure has been fixed so it actually works as written.
+
 ## [0.22.0] - 2026-07-29
 
 This release brings AudioBookup's download and conversion options closer to parity with Libation, adding MP3 output, a download-quality request, optional sidecar files, chapter and metadata cleanups, an Audible-branding trim, and expanded file/folder naming — and reorganizes the Settings page into clearer sections. Requesting Widevine DRM, the xHE-AAC codec, or Spatial Audio remains unsupported: these require a licensing path that the underlying download toolchain cannot use, a permanent limitation rather than a deferred feature.

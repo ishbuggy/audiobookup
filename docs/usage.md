@@ -14,7 +14,7 @@ The dashboard is what you land on every time you open AudioBookup.
 
 ### Primary actions
 
-- **Sync Library** — refreshes your database from Audible and checks your files on disk, so the app's records match reality before you decide what to download.
+- **Sync Library** — runs a Deep Sync (see [overview.md](overview.md#the-core-workflow)): refreshes your database from Audible *and* checks your files on disk, so the app's records match reality before you decide what to download.
 
 - **Process Downloads** — opens a modal for picking which books to download and convert. See [Downloading and converting books](#downloading-and-converting-books) below.
 

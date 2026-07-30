@@ -19,7 +19,7 @@ High-level direction for the project: what's planned, why, and roughly when. Thi
 | v0.22.0 | Libation-parity download & processing options + settings IA | Shipped (2026-07-29) |
 | v0.23.0+ | Architectural features (see "Longer horizon") | Ideas |
 
-The v0.19 backend and v0.20 frontend tracks were developed backend-first and released together as **v0.20.0**; **v0.21.0** followed with container-image hardening. **v0.22.0** shipped 2026-07-29, driven by a settings-parity review of Libation (see `ref-docs/reports/v0.22.0/` and `ref-docs/libation/`). The next milestone is not yet scoped; candidates live under "Longer horizon" below.
+The v0.19 backend and v0.20 frontend tracks were developed backend-first and released together as **v0.20.0**; **v0.21.0** followed with container-image hardening. **v0.22.0** shipped 2026-07-29, driven by a settings-parity review of Libation (see `ref-docs/reports/v0.22.0/` and `ref-docs/libation/`). A **documentation pass** followed on 2026-07-30 (no version bump; it ships with the next release's notes): the README was split into a screenshot-illustrated `docs/` folder, and a docs sweep is now a standing part of every release plan. The next milestone is not yet scoped; candidates live under "Longer horizon" below.
 
 ---
 

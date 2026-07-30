@@ -135,8 +135,10 @@ Choices: High / Standard / Fast. Default: `High`.
 
 ![The Chapters & Metadata section, showing the Strip (Unabridged) toggle](images/settings-04-chapters.png)
 
+> **Automatic, not a setting:** if a re-encoded book arrives from Audible as one single chapter longer than 30 minutes, AudioBookup splits it into evenly spaced 15-minute "Part N" chapters so playback navigation still works. This always happens for such books (an "Original" lossless remux is never touched) and has no toggle here — mentioned so the extra chapters don't come as a surprise.
+
 **Strip "(Unabridged)"**
-Removes the "(Unabridged)" marker that Audible appends to many titles, from both the title and album tags. Purely cosmetic — has no effect on the audio itself.
+Removes the "(Unabridged)" marker that Audible appends to many titles, from both the title and album tags. Purely cosmetic — has no effect on the audio itself. A title you've customized yourself (via Edit Metadata) is never altered.
 Default: `Off`.
 `settings.json: conversion.chapters.strip_unabridged — default false`
 
