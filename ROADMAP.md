@@ -17,13 +17,13 @@ High-level direction for the project: what's planned, why, and roughly when. Thi
 | v0.19.0 / v0.20.0 | Backend correctness + frontend library views, editing & card actions | Shipped (2026-07-22, as v0.20.0) |
 | v0.21.0 | Image hardening (Debian trixie base, GPG-verified gosu, apt upgrade) | Shipped (2026-07-22) |
 | v0.22.0 | Libation-parity download & processing options + settings IA | Shipped (2026-07-29) |
-| v0.23.0 | Quality release: full backlog sweep + clips/notes/bookmarks export | In flight |
+| v0.23.0 | Quality release: full backlog sweep + clips/notes/bookmarks export | Shipped (2026-07-30) |
 | v0.24.0 | Split books into per-chapter files | Planned |
 | v0.25.0 | Full Libation `<tag>` naming engine + chapter-timestamp parity | Planned |
 | v0.26.0 | Multiple Audible accounts / profiles | Planned |
 | v0.27.0 | Faster / event-driven library sync | Planned |
 
-The v0.19 backend and v0.20 frontend tracks were developed backend-first and released together as **v0.20.0**; **v0.21.0** followed with container-image hardening. **v0.22.0** shipped 2026-07-29, driven by a settings-parity review of Libation (see `ref-docs/reports/v0.22.0/` and `ref-docs/libation/`). A **documentation pass** followed on 2026-07-30 (no version bump; it ships with the next release's notes): the README was split into a screenshot-illustrated `docs/` folder, and a docs sweep is now a standing part of every release plan. **v0.23.0** was scoped 2026-07-30 (detailed plan in `PLAN.md`) and the headline sequence through v0.27.0 was laid out the same day — see "Planned headline features" below.
+The v0.19 backend and v0.20 frontend tracks were developed backend-first and released together as **v0.20.0**; **v0.21.0** followed with container-image hardening. **v0.22.0** shipped 2026-07-29, driven by a settings-parity review of Libation (see `ref-docs/reports/v0.22.0/` and `ref-docs/libation/`). A **documentation pass** followed on 2026-07-30 (no version bump; it ships with the next release's notes): the README was split into a screenshot-illustrated `docs/` folder, and a docs sweep is now a standing part of every release plan. **v0.23.0** shipped 2026-07-30 (plan and reports archived in `ref-docs/reports/v0.23.0/`); the headline sequence through v0.27.0 was laid out the same day it was scoped — see "Planned headline features" below. **v0.24.0** (per-chapter file splitting) is next up.
 
 ---
 
@@ -60,16 +60,16 @@ settings re-categorized into clearer groups. Detailed step plan and settings sch
 
 ---
 
-## v0.23.0 — Quality release: full backlog sweep + clips/notes/bookmarks export (in flight)
+## v0.23.0 — Quality release: full backlog sweep + clips/notes/bookmarks export (shipped 2026-07-30)
 
-Scoped 2026-07-30; detailed step plan in `PLAN.md`. Sweeps all twelve open backlog items left by
-the v0.22.0 release reviews and the docs pass — correctness fixes in the path/sidecar/conversion
-machinery plus three user-hurting settings/auth bugs (the ERROR auto-retry loop, the password
-confirm-field mismatch, the credential hash in the settings export) — and ships one modest
-headline: **clips / notes / bookmarks export** *(FR14 follow-on)*. Annotations are fetched via
-`audible download --annotation` and saved as a raw-JSON sidecar (`<book>.annotations.json`), both
-automatically at download time (opt-in sidecar setting) and on demand per book from the detail
-modal.
+Swept all twelve open backlog items left by the v0.22.0 release reviews and the docs pass —
+correctness fixes in the path/sidecar/conversion machinery plus three user-hurting settings/auth
+bugs (the ERROR auto-retry loop, the password confirm-field mismatch, the credential hash in the
+settings export) — and shipped one modest headline: **clips / notes / bookmarks export** *(FR14
+follow-on)*. Annotations are fetched via `audible download --annotation` and saved as a raw-JSON
+sidecar (`<book>.annotations.json`), both automatically at download time (opt-in sidecar setting)
+and on demand per book from the detail modal. Plan, per-phase reports, and the double release
+review (Fable + adversarial multi-provider) are archived in `ref-docs/reports/v0.23.0/`.
 
 ---
 

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-07-30
+
+This is a quality-focused release: it sweeps the full backlog of fixes accumulated from the v0.22.0 release reviews — file-naming and companion-file correctness, conversion edge cases, and three genuinely user-hurting settings bugs — and ships one new feature: exporting the clips, notes, and bookmarks you've made in the Audible app.
+
 ### Added
 - **Export your clips, notes, and bookmarks:** AudioBookup can now save the clips, notes, and bookmarks you've made in the Audible app alongside the audiobook itself. A new advanced setting under Sidecar Files ("Save Annotations", off by default) fetches them automatically with every download, and a "Download Annotations" button in a downloaded book's detail view fetches them on demand for books you already have. They're saved as a companion `.annotations.json` file next to the audiobook, in Audible's own format, and travel with the book through renames and cleanups like the other companion files. Books without any clips or bookmarks simply get no file — that's normal, not an error.
 - **Clean up old files after a Force Re-download:** A Force Re-download now asks whether to delete the previous file and its companion files once the new one is ready, instead of leaving them behind forever — they're only actually removed if the re-download ends up at a new location (for example because your output format or naming template changed); overwriting in place leaves nothing to clean up. A new advanced setting, "Clean up Replaced Files" under Downloading, lets you skip the question and always clean up automatically, including for re-downloads that happen on their own through scheduled processing, where there's no prompt to answer.
