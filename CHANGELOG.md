@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Split books into one file per chapter:** A new "Split by Chapter" option (off by default) saves each chapter of a book as its own `.m4b` file inside a folder for that book, instead of one big audiobook file — handy for players that handle multi-file books better than embedded chapters. Each file is fully tagged (book details, its chapter's title, track numbers, and the cover), files are numbered so they always sort in playback order, and a companion setting merges very short chapters (like Audible's "Chapter 1" announcement stubs) into the chapter that follows so you don't end up with three-second files. A customizable naming template controls how the chapter files are named. Applies to the standard M4B format so far (MP3 and Original quality are in progress). One note: split books don't get a `.cue` sheet — with one file per chapter, there's nothing for it to add.
+
 ## [0.23.0] - 2026-07-30
 
 This is a quality-focused release: it sweeps the full backlog of fixes accumulated from the v0.22.0 release reviews — file-naming and companion-file correctness, conversion edge cases, and three genuinely user-hurting settings bugs — and ships one new feature: exporting the clips, notes, and bookmarks you've made in the Audible app.

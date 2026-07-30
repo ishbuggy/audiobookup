@@ -23,6 +23,7 @@ from .chapter_transforms import (
     drop_zero_length_chapters,
     flatten_chapter_tree,
     merge_credit_chapters,
+    merge_short_chapters,
     render_chapter_title,
     strip_unabridged,
 )
@@ -810,7 +811,10 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             chapters_list = kept_chapters
 
         # 2. Time-Based Auto-Chunking (see _should_auto_chunk for the gate).
-        if _should_auto_chunk(lossless, audio_file, chapters_list, effective_total_sec):
+        # The answer is kept in a variable because the per-chapter split gate
+        # below needs it too (D7: a synthetic "Part N" book is never split).
+        auto_chunked = _should_auto_chunk(lossless, audio_file, chapters_list, effective_total_sec)
+        if auto_chunked:
             log.info(f"PREPARE ({asin}): Single chapter detected. Applying auto-chunking (15m).")
             new_chapters = []
             num_chunks = int(effective_total_sec // AUTO_CHUNK_SIZE_SEC)
@@ -828,6 +832,68 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
                     }
                 )
             chapters_list = new_chapters
+
+        # 2b. Per-chapter splitting decision (v0.24.0). Everything here is inert
+        # while `conversion.chapters.split_by_chapter` is off — which is the
+        # default — so `split_output` stays False, the chapter list is exactly
+        # the one today's pipeline produces, and no extra file is written.
+        #
+        # The gates, in order:
+        #   - the title must actually be taking the chunked AAC re-encode. MP3
+        #     and the lossless remux keep their single-file output until Phase 3,
+        #     and the D6 merge below must not quietly reshape THEIR chapter
+        #     markers in the meantime.
+        #   - D7: a synthetic auto-chunked "Part N" book is never split. Those
+        #     markers exist only to give the re-encode parallel work; cutting
+        #     them into files would ship the book as a pile of arbitrary
+        #     15-minute slices.
+        #   - D6: the minimum-duration merge runs AFTER the existing transform
+        #     chain, folding the very list the user would otherwise have got.
+        #   - D7 again: at least two chapters must survive that merge. One
+        #     chapter is not a split, it is the single file we already make.
+        split_output = False
+        part_titles = None
+        book_tags_path = None
+        if chapter_settings.get("split_by_chapter", False) and not auto_chunked:
+            # Read off the settings, like the branding-trim gate above, rather
+            # than off the caller's `lossless` flag: they are the same axis (the
+            # orchestrator sets that flag from this very value), and one of them
+            # has to be authoritative here.
+            output_format = resolve_output_format(settings)
+            will_remux_lossless = output_format == "original" and audio_file.lower().endswith(".m4b")
+            if output_format == "mp3" or will_remux_lossless:
+                log.info(
+                    f"PREPARE ({asin}): Per-chapter splitting is on, but this title's output format still "
+                    f"produces a single file; leaving the chapter list untouched."
+                )
+            else:
+                # The setting is in SECONDS; the transform takes milliseconds.
+                # A hand-edited settings.json can hold anything, and anything
+                # unusable means "no merge" rather than an exception.
+                try:
+                    min_ms = max(0, int(float(chapter_settings.get("minimum_file_duration", 0) or 0))) * 1000
+                except (TypeError, ValueError):
+                    min_ms = 0
+                merged_chapters = merge_short_chapters(chapters_list, min_ms)
+                if len(merged_chapters) >= 2:
+                    merged_away = len(chapters_list) - len(merged_chapters)
+                    if merged_away:
+                        log.info(
+                            f"PREPARE ({asin}): Merged {merged_away} chapter(s) shorter than "
+                            f"{min_ms / 1000:g}s into the chapter that follows them."
+                        )
+                    chapters_list = merged_chapters
+                    split_output = True
+                    log.info(f"PREPARE ({asin}): Splitting this book into {len(chapters_list)} chapter file(s).")
+                else:
+                    # Deliberately keep the UNMERGED list here: the book is going
+                    # out as a single file after all, and its chapter markers
+                    # should be the ones every other single-file conversion
+                    # produces rather than a merge nothing consumed.
+                    log.info(
+                        f"PREPARE ({asin}): Per-chapter splitting is on, but fewer than two chapters survive the "
+                        f"minimum-duration merge; writing a single file."
+                    )
 
         # User metadata overrides (custom title/author) win over the Audible
         # values for the embedded tags, matching what the UI displays.
@@ -921,6 +987,10 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             # chapter title (today's byte-for-byte output).
             chapter_title_template = chapter_settings.get("chapter_title_template", "{ch_title}")
             ch_total = len(chapters_list)
+            # Kept so a split book's per-part titles are the SAME strings this
+            # writer puts in the chapter atoms (D8) — one rendering, one place it
+            # can drift from. Unused (and returned as None) when not splitting.
+            rendered_titles = []
             for idx, chapter in enumerate(chapters_list):
                 f.write("[CHAPTER]\nTIMEBASE=1/1000\n")
                 f.write(f"START={chapter.get('start_offset_ms', 0)}\n")
@@ -932,7 +1002,17 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
                     ch_title=chapter.get("title", "Chapter"),
                     book_title=title,
                 )
+                rendered_titles.append(rendered_title)
                 f.write(f"title={rendered_title}\n")
+
+        # 4. Split mode only: the book-level tag block on its own, for the
+        #    per-part FFMETADATA files the chunk encodes write (D8 — each part
+        #    carries the book's tags and its own title, with no chapter atoms,
+        #    because the file IS the chapter). Sliced off the file just written
+        #    rather than duplicating the tag writer above.
+        if split_output:
+            part_titles = rendered_titles
+            book_tags_path = _write_book_tags_file(temp_dir, chapter_txt_path)
 
         return {
             "decryption_args": decryption_args,
@@ -962,6 +1042,18 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             # annotations (None otherwise); copied next to the finished book by
             # BookProcessor._place_sidecar_files.
             "annotations_file": annotations_file,
+            # Per-chapter splitting (v0.24.0). False for every book today's
+            # pipeline produces, in which case the two keys below are None and
+            # nothing downstream behaves differently. True means each chapter in
+            # "chapters" becomes its own output file: the encode tags each chunk
+            # instead of stripping its metadata, and the orchestrator finalizes
+            # the chunks in place instead of merging them.
+            "split_output": split_output,
+            # The rendered per-part titles, index-aligned with "chapters".
+            "part_titles": part_titles,
+            # FFMETADATA holding the book-level tags with no chapter atoms; the
+            # base every per-part metadata file is built on.
+            "book_tags_file": book_tags_path,
         }, None
 
     except Exception as e:
@@ -972,6 +1064,91 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             return None, None
         log.error(f"PREPARE ({asin}): Failed during metadata/chapter phase: {e}", exc_info=True)
         return None, f"Failed during metadata/chapter processing: {e}"
+
+
+def _write_book_tags_file(temp_dir, chapter_file_path):
+    """
+    Write "<temp_dir>/book_tags.txt": the book-level tag block of the FFMETADATA
+    file at `chapter_file_path`, with the chapter atoms and the book's own
+    `title=` line removed. Returns the path.
+
+    Two removals, for two different reasons. The `[CHAPTER]` sections go because
+    a split book's part IS one chapter — interior chapter markers describing the
+    whole book would be wrong in every part (D8). The `title=` line goes because
+    each part overrides it with its own rendered chapter title; leaving the book
+    title in front of that would work only by relying on ffmpeg's last-key-wins
+    parsing of a repeated key. `album=` deliberately stays: it holds the book
+    title, which is what groups the parts together in a player.
+
+    Line-oriented, matching how ffmpeg reads the file the tag writer produces —
+    that writer does not escape the newlines inside `description=`, so ffmpeg
+    already sees each of those continuation lines as its own key.
+    """
+    kept = []
+    with open(chapter_file_path, encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("[CHAPTER]"):
+                break
+            if line.startswith("title="):
+                continue
+            kept.append(line)
+
+    book_tags_path = os.path.join(temp_dir, "book_tags.txt")
+    with open(book_tags_path, "w", encoding="utf-8") as f:
+        f.writelines(kept)
+    return book_tags_path
+
+
+def _write_part_metadata(asin, temp_dir, chunk_index, total_chunks, context):
+    """
+    Write the FFMETADATA file for ONE per-chapter output file and return its
+    path, or None if it could not be written (which fails the chunk, and with it
+    the book — an untagged part is not an acceptable output).
+
+    Contents: the book-level tags (see _write_book_tags_file), then this part's
+    own title — the very string the chapter atom would have carried, rendered
+    once by prepare from `conversion.chapters.chapter_title_template` — and
+    `track=N/M`. No `[CHAPTER]` section: the file is the chapter.
+
+    What `track=N/M` actually becomes on disk: the encode runs with
+    `-movflags +use_metadata_tags`, which makes the mp4 muxer write Apple `mdta`
+    keys instead of the classic iTunes `ilst` atoms, so the value is carried as
+    an `mdta` key rather than a `trkn` atom. That is the same tag shape today's
+    merged single-file books already ship with, and ffprobe (and the players
+    that read mdta) see it fine — but it means part ORDER must not be assumed to
+    come from a track atom. The durable ordering guarantee is the zero-padded
+    `{ch}` in the part filenames (see render_chapter_filename), which sorts
+    correctly in every file browser and player regardless of tags.
+    """
+    part_titles = context.get("part_titles") or []
+    part_title = part_titles[chunk_index] if chunk_index < len(part_titles) else ""
+
+    header = ";FFMETADATA1\n"
+    book_tags_file = context.get("book_tags_file")
+    if book_tags_file:
+        try:
+            with open(book_tags_file, encoding="utf-8") as f:
+                header = f.read()
+        except OSError as e:
+            # A part with only its title and track number is still a usable
+            # file, and the alternative (failing the book) is worse.
+            log.warning(f"ENCODE ({asin}): Could not read the book tag block: {e}. Tagging this part minimally.")
+            header = ";FFMETADATA1\n"
+    if not header.startswith(";FFMETADATA1"):
+        header = ";FFMETADATA1\n" + header
+    if not header.endswith("\n"):
+        header += "\n"
+
+    metadata_path = os.path.join(temp_dir, f"chunk_{chunk_index:03d}.ffmeta")
+    try:
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            f.write(header)
+            f.write(f"title={part_title}\n")
+            f.write(f"track={chunk_index + 1}/{total_chunks}\n")
+    except OSError as e:
+        log.error(f"ENCODE ({asin}): Could not write the metadata for chapter file {chunk_index + 1}: {e}")
+        return None
+    return metadata_path
 
 
 def encode_chapter_chunk(asin, job_id, temp_dir, chunk_info, context):
@@ -1008,13 +1185,53 @@ def encode_chapter_chunk(asin, job_id, temp_dir, chunk_info, context):
     # duration needs no adjustment: it comes from the recomputed chapter lengths,
     # whose final entry was already shortened by the outro.
     source_start_sec = chunk_info["start"] + context.get("trim_intro_ms", 0) / 1000.0
+
+    # Per-chapter splitting (v0.24.0). In split mode this chunk is not an
+    # intermediate that the merge will tag afterwards — it IS one of the book's
+    # output files — so it is tagged here, at encode time, from a per-part
+    # FFMETADATA input instead of being stripped with "-map_metadata -1".
+    # `+use_metadata_tags` matches the merge path, which needs it for the custom
+    # uppercase tags (PUBLISHER, AUDIBLE_ASIN, series...); `+faststart` puts the
+    # moov atom first so a part starts playing without reading the whole file.
+    # The cover is NOT added here for the same reason the merge doesn't add it:
+    # ffmpeg's mp4 muxer cannot write an attached picture alongside
+    # use_metadata_tags, so AtomicParsley embeds it per part at finalize time.
+    #
+    # The metadata input has to be spliced in BEFORE "-t": ffmpeg reads options
+    # positionally, so an "-i" following "-t" would turn that duration cap into
+    # an INPUT option on the metadata file and let the chunk run to the end of
+    # the master. With splitting off the assembled command below is byte-for-byte
+    # the one this path has always run.
+    #
+    # "-map_chapters -1" is load-bearing (D8: the file IS the chapter, so it
+    # carries no chapter atoms of its own): without it ffmpeg copies the chapter
+    # atoms of the first input that has any — the decrypted master, when the AAC
+    # Copy strategy preserved them — sliced against this chunk's -ss/-t window
+    # into a zero-length marker for the previous chapter, one spanning the file,
+    # and one pinned to its end. The merge path never saw this because its concat
+    # step rebuilds the chapter atoms from chapters.txt afterwards.
+    if context.get("split_output"):
+        metadata_path = _write_part_metadata(asin, temp_dir, chunk_index, total_chunks, context)
+        if not metadata_path:
+            return None
+        metadata_args = ["-i", metadata_path]
+        output_args = (
+            ["-map", "0:a", "-map_metadata", "1", "-map_chapters", "-1"]
+            + audio_flags
+            + ["-movflags", "+faststart+use_metadata_tags"]
+        )
+    else:
+        metadata_args = []
+        output_args = ["-map", "0:a"] + audio_flags + ["-map_metadata", "-1"]
+
     split_command = (
         ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
         + context["decryption_args"]
-        + ["-ss", str(source_start_sec), "-i", context["audio_file"], "-t", str(chunk_info["duration"])]
-        + ["-map", "0:a"]
-        + audio_flags
-        + ["-map_metadata", "-1", output_path]
+        + ["-ss", str(source_start_sec), "-i", context["audio_file"]]
+        + metadata_args
+        + ["-t", str(chunk_info["duration"])]
+        + output_args
+        + [output_path]
     )
 
     process = None
@@ -1534,6 +1751,12 @@ def _embed_cover_art(asin, job_id, output_path, cover_file):
 
     Best-effort: a missing cover or an AtomicParsley failure logs a warning but
     does not fail the book — a book without embedded art is still usable.
+
+    Despite the leading underscore this helper is DELIBERATELY consumed from
+    another module: processing_logic's split finalize (D8) covers each
+    per-chapter file with it while the part is still in the temp dir, so a split
+    book's art is embedded by exactly the same code path as a merged book's.
+    Treat it as having an external caller before renaming or reshaping it.
     """
     if not cover_file or not os.path.exists(cover_file):
         log.warning(f"MERGE ({asin}): No cover file available; skipping cover art embedding.")

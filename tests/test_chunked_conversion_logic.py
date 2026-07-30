@@ -489,6 +489,10 @@ class TestBrandingTrimPipeline:
                 return io.StringIO(voucher_json)
             if path.endswith(".json"):
                 return io.StringIO(chapter_json)
+            # Anything prepare wrote earlier in this run can be read back (the
+            # split path slices its book-tag block out of chapters.txt).
+            if path in written:
+                return io.StringIO(written[path])
             raise AssertionError(f"unexpected open of {path}")
 
         db_con = mock.MagicMock()
@@ -704,6 +708,287 @@ class TestBrandingTrimPipeline:
         assert [c["start_offset_ms"] for c in context["chapters"]] == [0, 597_957, 1_197_957]
         assert context["total_duration_sec"] == 3_592.896
         assert context["trim_intro_ms"] == 2_043
+
+
+def _split_settings(minimum_file_duration=0, output_format="m4b", **chapter_overrides):
+    """Settings block with per-chapter splitting on, for the prepare-level
+    split-decision tests."""
+    chapters = {"split_by_chapter": True, "minimum_file_duration": minimum_file_duration}
+    chapters.update(chapter_overrides)
+    return {"conversion": {"output_format": output_format, "chapters": chapters}}
+
+
+class TestSplitDecision:
+    """v0.24.0 Phase 2, D6/D7: prepare_book_assets decides whether a book is
+    split into one file per chapter, applies the minimum-duration merge that
+    goes with it, and carries the decision out in the context. With the setting
+    off — the default — none of it fires and the context is today's."""
+
+    # The same fully-mocked drive of prepare_book_assets as the branding-trim
+    # tests, borrowed rather than duplicated so both exercise one harness.
+    TEMP_DIR = TestBrandingTrimPipeline.TEMP_DIR
+    TOTAL_SEC = TestBrandingTrimPipeline.TOTAL_SEC
+    CHAPTERS = TestBrandingTrimPipeline.CHAPTERS
+    BOOK_INFO = TestBrandingTrimPipeline.BOOK_INFO
+    _run_prepare = TestBrandingTrimPipeline._run_prepare
+
+    def test_setting_off_never_splits(self):
+        context, error, _ = self._run_prepare({"conversion": {"output_format": "m4b", "chapters": {}}})
+        assert error is None
+        assert context["split_output"] is False
+        assert context["part_titles"] is None
+        assert context["book_tags_file"] is None
+        assert [c["title"] for c in context["chapters"]] == ["One", "Two", "Three"]
+
+    def test_eligible_book_splits(self):
+        context, error, _ = self._run_prepare(_split_settings())
+        assert error is None
+        assert context["split_output"] is True
+        assert len(context["chapters"]) == 3
+        # The part titles are the strings the chapter atoms carry, so the two
+        # renderings can never disagree.
+        assert context["part_titles"] == ["One", "Two", "Three"]
+        assert context["book_tags_file"] == f"{self.TEMP_DIR}/book_tags.txt"
+
+    def test_part_titles_follow_the_chapter_title_template(self):
+        context, _error, _ = self._run_prepare(
+            _split_settings(chapter_title_template="{ch} of {ch_total} - {ch_title}")
+        )
+        assert context["part_titles"] == ["1 of 3 - One", "2 of 3 - Two", "3 of 3 - Three"]
+
+    def test_short_chapters_are_merged_forward_before_splitting(self):
+        # A 2-second announcement marker in front of a real chapter: with the
+        # minimum at 3 seconds it folds forward, so three chapters become two
+        # files instead of one unplayable fragment plus two books' worth.
+        chapters = [
+            {"title": "Chapter Nineteen", "start_offset_ms": 0, "length_ms": 2_000},
+            {"title": "The Heist", "start_offset_ms": 2_000, "length_ms": 1_798_000},
+            {"title": "After", "start_offset_ms": 1_800_000, "length_ms": 1_800_000},
+        ]
+        context, error, _ = self._run_prepare(_split_settings(minimum_file_duration=3), chapters=chapters)
+        assert error is None
+        assert context["split_output"] is True
+        assert [c["title"] for c in context["chapters"]] == ["Chapter Nineteen The Heist", "After"]
+
+    def test_zero_minimum_disables_the_merge(self):
+        chapters = [
+            {"title": "Blip", "start_offset_ms": 0, "length_ms": 2_000},
+            {"title": "Real", "start_offset_ms": 2_000, "length_ms": 3_598_000},
+        ]
+        context, _error, _ = self._run_prepare(_split_settings(minimum_file_duration=0), chapters=chapters)
+        assert context["split_output"] is True
+        assert [c["title"] for c in context["chapters"]] == ["Blip", "Real"]
+
+    @pytest.mark.parametrize("junk", ["", "abc", None, {}])
+    def test_unusable_minimum_is_treated_as_no_merge(self, junk):
+        # A hand-edited settings.json must not raise its way through prepare.
+        chapters = [
+            {"title": "Blip", "start_offset_ms": 0, "length_ms": 2_000},
+            {"title": "Real", "start_offset_ms": 2_000, "length_ms": 3_598_000},
+        ]
+        context, error, _ = self._run_prepare(_split_settings(minimum_file_duration=junk), chapters=chapters)
+        assert error is None
+        assert context["split_output"] is True
+        assert len(context["chapters"]) == 2
+
+    def test_single_chapter_book_is_not_split(self):
+        # Short enough that auto-chunking doesn't fire either, so this really is
+        # the "fewer than two chapters" gate.
+        chapters = [{"title": "Only", "start_offset_ms": 0, "length_ms": 600_000}]
+        context, error, _ = self._run_prepare(_split_settings(), chapters=chapters, total_sec="600.0")
+        assert error is None
+        assert context["split_output"] is False
+        assert context["book_tags_file"] is None
+
+    def test_merge_collapsing_to_one_chapter_does_not_split_or_merge(self):
+        # Two chapters, the first below the minimum: the merge would leave a
+        # single chapter, which is not a split — so the book goes out as one
+        # file with the chapter markers every other single-file conversion gets.
+        chapters = [
+            {"title": "Tiny", "start_offset_ms": 0, "length_ms": 2_000},
+            {"title": "Rest", "start_offset_ms": 2_000, "length_ms": 3_598_000},
+        ]
+        context, error, _ = self._run_prepare(_split_settings(minimum_file_duration=600), chapters=chapters)
+        assert error is None
+        assert context["split_output"] is False
+        assert [c["title"] for c in context["chapters"]] == ["Tiny", "Rest"]
+
+    def test_auto_chunked_book_is_not_split(self):
+        # A chapterless 60-minute title becomes synthetic "Part N" markers to
+        # give the encode parallel work; those are not chapters and must not
+        # become files (D7).
+        chapters = [{"title": "Whole Book", "start_offset_ms": 0, "length_ms": 3_600_000}]
+        context, error, _ = self._run_prepare(_split_settings(), chapters=chapters)
+        assert error is None
+        assert context["split_output"] is False
+        assert [c["title"] for c in context["chapters"]][:2] == ["Part 1", "Part 2"]
+
+    def test_mp3_output_is_not_split_in_this_phase(self):
+        context, error, _ = self._run_prepare(_split_settings(output_format="mp3"))
+        assert error is None
+        assert context["split_output"] is False
+        assert [c["title"] for c in context["chapters"]] == ["One", "Two", "Three"]
+
+    def test_lossless_remux_is_not_split_in_this_phase(self):
+        settings = _split_settings(output_format="original")
+        context, error, _ = self._run_prepare(settings)
+        assert error is None
+        assert context["audio_file"].endswith(".m4b")
+        assert context["split_output"] is False
+
+    def test_lossless_falling_back_to_flac_still_splits(self):
+        # A FLAC master can't be remuxed losslessly, so that title takes the
+        # re-encode path after all — and the re-encode path can split.
+        settings = _split_settings(output_format="original")
+        context, error, _ = self._run_prepare(settings, flac_master=True)
+        assert error is None
+        assert context["audio_file"].endswith(".flac")
+        assert context["split_output"] is True
+
+    def test_book_tags_file_drops_the_chapters_and_the_book_title(self):
+        _context, _error, written = self._run_prepare(_split_settings())
+        tags = written[f"{self.TEMP_DIR}/book_tags.txt"]
+        assert tags.startswith(";FFMETADATA1\n")
+        # No chapter atoms: in split mode the file IS the chapter (D8).
+        assert "[CHAPTER]" not in tags
+        # The book's own title line is gone — each part writes its own — but the
+        # album (which groups the parts in a player) and the rest stay.
+        assert "\ntitle=" not in f"\n{tags}"
+        assert "album=Test Book\n" in tags
+        assert "artist=An Author\n" in tags
+        assert "AUDIBLE_ASIN=B0X\n" in tags
+
+
+class TestWriteBookTagsFile:
+    """The book-tag slice is line-oriented and stops at the first chapter atom."""
+
+    def test_slices_the_header_and_drops_title(self, tmp_path):
+        source = tmp_path / "chapters.txt"
+        source.write_text(
+            ";FFMETADATA1\ntitle=Book\nalbum=Book\nartist=A\n[CHAPTER]\nTIMEBASE=1/1000\ntitle=One\n",
+            encoding="utf-8",
+        )
+        path = ccl._write_book_tags_file(str(tmp_path), str(source))
+        assert path == str(tmp_path / "book_tags.txt")
+        assert (tmp_path / "book_tags.txt").read_text(encoding="utf-8") == ";FFMETADATA1\nalbum=Book\nartist=A\n"
+
+
+class TestEncodeChapterChunkSplitTagging:
+    """D8: in split mode each chunk is one of the book's output files, so it is
+    tagged at encode time from a per-part FFMETADATA input instead of having its
+    metadata stripped. With splitting off the command is unchanged."""
+
+    MASTER = "/tmp/x/master_intermediate.m4b"
+
+    def _context(self, tmp_path, **overrides):
+        book_tags = tmp_path / "book_tags.txt"
+        book_tags.write_text(";FFMETADATA1\nalbum=Test Book\nartist=An Author\n", encoding="utf-8")
+        context = {
+            "decryption_args": [],
+            "audio_file": self.MASTER,
+            "split_output": True,
+            "part_titles": ["One", "Two", "Three"],
+            "book_tags_file": str(book_tags),
+        }
+        context.update(overrides)
+        return context
+
+    def _encode(self, tmp_path, context, index=1):
+        chunk_info = {"index": index, "total_chunks": 3, "start": 600.0, "duration": 600.0}
+        proc = mock.MagicMock()
+        proc.returncode = 0
+        proc.communicate.return_value = (b"", b"")
+        with (
+            mock.patch.object(ccl, "load_settings", return_value={}),
+            mock.patch.object(ccl.subprocess, "Popen", return_value=proc) as popen,
+            mock.patch.object(ccl.process_registry, "register"),
+            mock.patch.object(ccl.process_registry, "unregister"),
+        ):
+            result = ccl.encode_chapter_chunk("B0X", 1, str(tmp_path), chunk_info, context)
+        return result, popen.call_args.args[0]
+
+    def test_split_chunk_is_tagged_from_a_metadata_input(self, tmp_path):
+        _result, cmd = self._encode(tmp_path, self._context(tmp_path))
+        assert "-map_metadata" in cmd
+        assert cmd[cmd.index("-map_metadata") + 1] == "1"
+        assert cmd[cmd.index("-movflags") + 1] == "+faststart+use_metadata_tags"
+
+    def test_split_chunk_drops_the_masters_chapter_atoms(self, tmp_path):
+        # Regression from the Phase 2 dev-container smoke: without an explicit
+        # "-map_chapters -1", ffmpeg copies the chapter atoms of the first input
+        # that has any — the decrypted master, when the AAC Copy strategy
+        # preserved them — sliced nonsensically against the chunk's -ss/-t
+        # window. A part carries no chapter atoms at all: the file IS the
+        # chapter (D8).
+        _result, cmd = self._encode(tmp_path, self._context(tmp_path))
+        assert "-map_chapters" in cmd
+        assert cmd[cmd.index("-map_chapters") + 1] == "-1"
+
+    def test_metadata_input_precedes_the_duration_cap(self, tmp_path):
+        # Load-bearing ordering: ffmpeg reads options positionally, so a "-i"
+        # after "-t" would make the duration an INPUT option on the metadata
+        # file and let the chunk run to the end of the master.
+        _result, cmd = self._encode(tmp_path, self._context(tmp_path))
+        assert cmd.index(str(tmp_path / "chunk_001.ffmeta")) < cmd.index("-t")
+        assert cmd[cmd.index("-t") + 1] == "600.0"
+
+    def test_part_metadata_carries_the_book_tags_title_and_track(self, tmp_path):
+        self._encode(tmp_path, self._context(tmp_path))
+        written = (tmp_path / "chunk_001.ffmeta").read_text(encoding="utf-8")
+        assert written.startswith(";FFMETADATA1\n")
+        assert "album=Test Book\n" in written
+        assert "artist=An Author\n" in written
+        # 1-based part number, and the total, so players order the files.
+        assert "title=Two\n" in written
+        assert "track=2/3\n" in written
+        assert "[CHAPTER]" not in written
+
+    def test_missing_book_tag_block_still_produces_a_tagged_part(self, tmp_path):
+        context = self._context(tmp_path, book_tags_file=str(tmp_path / "gone.txt"))
+        result, _cmd = self._encode(tmp_path, context)
+        assert result is not None
+        written = (tmp_path / "chunk_001.ffmeta").read_text(encoding="utf-8")
+        assert written == ";FFMETADATA1\ntitle=Two\ntrack=2/3\n"
+
+    def test_unwritable_metadata_fails_the_chunk(self, tmp_path):
+        # An untagged part is not an acceptable output, so the chunk fails —
+        # which fails the book — rather than encoding a nameless file.
+        chunk_info = {"index": 1, "total_chunks": 3, "start": 600.0, "duration": 600.0}
+        with (
+            mock.patch.object(ccl, "load_settings", return_value={}),
+            mock.patch.object(ccl, "_write_part_metadata", return_value=None),
+            mock.patch.object(ccl.subprocess, "Popen") as popen,
+        ):
+            result = ccl.encode_chapter_chunk("B0X", 1, str(tmp_path), chunk_info, self._context(tmp_path))
+        assert result is None
+        popen.assert_not_called()
+
+    def test_splitting_off_leaves_the_command_untouched(self, tmp_path):
+        context = {"decryption_args": [], "audio_file": self.MASTER}
+        _result, cmd = self._encode(tmp_path, context)
+        assert cmd == [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            "600.0",
+            "-i",
+            self.MASTER,
+            "-t",
+            "600.0",
+            "-map",
+            "0:a",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-map_metadata",
+            "-1",
+            str(tmp_path / "chunk_001.m4b"),
+        ]
+        assert not (tmp_path / "chunk_001.ffmeta").exists()
 
 
 class TestEncodeChapterChunkTrim:

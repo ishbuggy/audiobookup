@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -22,6 +23,7 @@ from .chapter_transforms import strip_unabridged
 
 # Import the task-oriented functions and the global announcer
 from .chunked_conversion_logic import (
+    _embed_cover_art,
     _yield_progress,
     encode_book_mp3,
     encode_chapter_chunk,
@@ -29,7 +31,7 @@ from .chunked_conversion_logic import (
     prepare_book_assets,
     remux_book_lossless,
 )
-from .db import get_db_connection
+from .db import get_db_connection, replace_book_files
 from .eta_estimator import estimate_conversion_time, record_conversion_time
 from .logger import log
 from .process_registry import process_registry
@@ -55,6 +57,16 @@ _reservation_lock = Lock()
 # A finished .m4b is far larger than this floor; it only catches an absent or
 # empty/stub output — the "ghost book" that reported success but isn't on disk.
 _MIN_OUTPUT_BYTES = 64 * 1024
+
+# The same floor, applied to one chapter file of a SPLIT book, only makes sense
+# once the chapter is long enough to plausibly reach it: three seconds of
+# 128 kbps AAC is roughly 48 KB, and the minimum-duration merge lets a chapter
+# that short become its own file. Parts under _FULL_SIZE_FLOOR_PART_MS are held
+# to _MIN_PART_BYTES instead — small enough that a genuinely short chapter
+# passes, large enough that a header-only file with no audio stream (a few
+# hundred bytes) still fails. See _verify_split_output_files.
+_MIN_PART_BYTES = 4 * 1024
+_FULL_SIZE_FLOOR_PART_MS = 60_000
 
 # Floor for the "don't wait forever" completion timeout: short books and books
 # with no known runtime get two hours regardless of any model below.
@@ -414,6 +426,44 @@ def build_base_output_path(
     return os.path.join("/data", f"{relative_path}{ext}")
 
 
+def normalize_chapter_file_template(template, asin):
+    """
+    Reduce a chapter filename template to the single filename segment
+    `render_chapter_filename` renders, guaranteeing it contains `{ch}`.
+
+    Two jobs, both of which must happen exactly once per book:
+
+    1. A template carrying folder levels loses everything before the last '/',
+       because this renders ONE filename segment and not a path. The strip is
+       done up front rather than after rendering, which is what makes the `{ch}`
+       guard below honest: checked against the whole template, "{ch}/{title}"
+       would satisfy the guard and then have its `{ch}` thrown away with the
+       directory level, rendering the identical name for every part of the book.
+       Splitting the template is equivalent to splitting the rendered string
+       because every substituted value has been through `_sanitize_filename`,
+       which rewrites '/' to '_' — no value can introduce a separator.
+    2. `{ch}` is mandatory in spirit: without it every part of a book renders the
+       same name. A template that omits it gets " - {ch}" appended, with a
+       warning naming the template the user actually set.
+
+    Idempotent, which is the point of it being separate: a caller splitting a
+    book normalizes once, logs the warning once, and passes the result to
+    `render_chapter_filename` for each of the N parts — where this runs again,
+    finds `{ch}` already present, and says nothing (backlog #37).
+    """
+    configured_template = template  # what the user set, for a legible warning
+    template = template.split("/")[-1]
+
+    if "{ch}" not in template:
+        log.warning(
+            f"NAMING ({asin}): Chapter filename template '{configured_template}' has no {{ch}} placeholder "
+            "in its filename segment; appending ' - {ch}' so part filenames stay unique and sortable."
+        )
+        template = f"{template} - {{ch}}"
+
+    return template
+
+
 def render_chapter_filename(
     template,
     part_number,
@@ -472,24 +522,11 @@ def render_chapter_filename(
     width = len(str(total))
     index = int(part_number)
 
-    # This function returns ONE filename segment, not a path, so a template
-    # carrying folder levels loses everything before the last '/'. Do that strip
-    # here, up front, rather than after rendering: it is what makes the {ch}
-    # guard below honest. Checked against the whole template, "{ch}/{title}"
-    # would satisfy the guard and then have its {ch} thrown away with the
-    # directory level, rendering the identical name for every part of the book.
-    # Splitting the template is equivalent to splitting the rendered string
-    # because every substituted value has been through _sanitize_filename, which
-    # rewrites '/' to '_' — no value can introduce a separator of its own.
-    configured_template = template  # what the user set, for a legible warning
-    template = template.split("/")[-1]
-
-    if "{ch}" not in template:
-        log.warning(
-            f"NAMING ({asin}): Chapter filename template '{configured_template}' has no {{ch}} placeholder "
-            "in its filename segment; appending ' - {ch}' so part filenames stay unique and sortable."
-        )
-        template = f"{template} - {{ch}}"
+    # Reduce the template to its filename segment and guarantee {ch} is in it.
+    # A caller rendering a whole book's parts normalizes once and passes the
+    # result in, in which case this call is a no-op that logs nothing; a caller
+    # handing over a raw template still gets the guard (and its warning) here.
+    template = normalize_chapter_file_template(template, asin)
 
     values = _build_naming_values(
         asin,
@@ -813,6 +850,14 @@ class BookProcessor:
         self.stop_event = stop_event
         self.temp_dir = None
         self.final_output_path = None
+        # Per-chapter splitting (v0.24.0). Both stay empty/None for a normal
+        # single-file book, and every finalize step below reads them as "is this
+        # book split?" — so an unsplit run takes exactly the paths it always has.
+        # `split_part_paths` is the book's output files in PLAYBACK order (which
+        # is also the 0-based `book_files.part_index` order); `split_output_dir`
+        # is the folder holding them, and what `audiobooks.filepath` records.
+        self.split_part_paths = []
+        self.split_output_dir = None
         # Set True when a same-author+title collision forced an ASIN suffix onto
         # our filename; persisted to the DB on success so the UI can flag it.
         self.is_duplicate = False
@@ -1258,6 +1303,20 @@ class BookProcessor:
             self._completion_event.set()
             return
 
+        # Per-chapter splitting (v0.24.0): prepare has already made the decision
+        # (see its D6/D7 gate) and reshaped the chapter list accordingly; what is
+        # left is turning that into concrete per-part output paths. It happens
+        # here, once, BEFORE any chunk is queued — a book that has nowhere to put
+        # its parts should fail now and not after N encodes.
+        if self.context.get("split_output"):
+            try:
+                self._plan_split_output(settings, book_details, author, title, chapters)
+            except (OSError, ValueError) as e:
+                log.error(f"TASK-PREPARE ({self.asin}): Could not prepare the per-chapter file paths: {e}")
+                self._update_db_on_failure("Failed to prepare the per-chapter file paths.")
+                self._completion_event.set()
+                return
+
         for i, chapter in enumerate(chapters):
             chunk_info = {
                 "index": i,
@@ -1273,6 +1332,76 @@ class BookProcessor:
             )
             task_runner.submit_task(encode_task)
         log.info(f"TASK-PREPARE ({self.asin}): Submitted {self.total_chunks} encoding tasks to the queue.")
+
+    def _plan_split_output(self, settings, book_details, author, title, chapters):
+        """
+        Turn prepare's split decision into this book's concrete per-part output
+        paths, recorded on the processor for the encode and finalize steps.
+
+        Placement (D5): the parts go in the folder the book naming template
+        already produced — the directory of the reserved single-file path — so a
+        split book sits exactly where the unsplit one would have, next to its
+        sidecars. The one exception is the flat-template guard: when that folder
+        resolves to the bare output root, a book with 40 chapters would dump 40
+        files straight into /data, so the parts get a subfolder named from the
+        rendered single-file base instead.
+
+        Naming (D4): each part's name comes from `naming.chapter_file_template`,
+        rendered by `render_chapter_filename` with this book's naming values. The
+        template is normalized ONCE here rather than per part — its missing-{ch}
+        guard logs a warning, and rendering N parts from a raw template would log
+        it N times (backlog #37).
+
+        Note the two index bases in the loop below: `{ch}` is 1-based (part 1 of
+        12 renders "01"), while the list position that becomes
+        `book_files.part_index` is 0-based. They are deliberately not the same
+        number, so they are not the same variable.
+        """
+        naming = settings.get("naming", {})
+        # `or` rather than a plain .get default: a cleared UI field saves "" and a
+        # hand-edited settings.json can hold null, and neither is a template.
+        template = normalize_chapter_file_template(
+            naming.get("chapter_file_template") or "{title} - {ch} - {ch_title}", self.asin
+        )
+
+        # The reserved single-file path decides both halves of where parts live:
+        # its directory (the book's folder) and its extension (the container the
+        # chunks were encoded into).
+        base_root, ext = os.path.splitext(self.final_output_path)
+        folder = os.path.dirname(base_root)
+        base_stem = os.path.basename(base_root)
+        if os.path.abspath(folder) == os.path.abspath("/data"):
+            folder = os.path.join(folder, base_stem)
+            log.info(
+                f"TASK-PREPARE ({self.asin}): The naming template puts this book in the output root; "
+                f"placing its chapter files in the '{base_stem}' subfolder instead."
+            )
+
+        total = len(chapters)
+        paths = []
+        for index, chapter in enumerate(chapters):
+            stem = render_chapter_filename(
+                template,
+                part_number=index + 1,
+                part_total=total,
+                chapter_title=chapter.get("title", ""),
+                asin=self.asin,
+                author=author,
+                title=title,
+                narrator=book_details["narrator"],
+                publisher=book_details["publisher"],
+                series=book_details["series"],
+                series_sequence=book_details["series_sequence"],
+                release_date=book_details["release_date"],
+                language=book_details["language"],
+                truncate_subtitle=naming.get("truncate_subtitle", False),
+            )
+            paths.append(os.path.join(folder, f"{stem}{ext}"))
+
+        os.makedirs(folder, exist_ok=True)
+        self.split_output_dir = folder
+        self.split_part_paths = paths
+        log.info(f"TASK-PREPARE ({self.asin}): Will write {total} chapter file(s) into '{folder}'.")
 
     def _encode_and_track_chunk(self, chunk_info):
         """The actual function for the ENCODE_CHAPTER task."""
@@ -1295,22 +1424,94 @@ class BookProcessor:
                 self._completion_event.set()  # Signal completion to unblock the main thread
                 return  # Stop processing further
 
-            # If this was the last chunk to be processed, spawn the final MERGE task.
+            # If this was the last chunk to be processed, spawn the final task.
+            # A split book takes the same slot at the same MERGE_BOOK priority,
+            # but finalizes the chunks in place instead of merging them: they are
+            # already the book's output files.
             if self.completed_chunks == self.total_chunks:
-                log.info(f"PROCESSOR ({self.asin}): All chunks encoded. Submitting final merge task.")
+                if self.split_part_paths:
+                    log.info(f"PROCESSOR ({self.asin}): All chapter files encoded. Submitting finalize task.")
+                    final_func = self._finalize_split
+                else:
+                    log.info(f"PROCESSOR ({self.asin}): All chunks encoded. Submitting final merge task.")
+                    final_func = self._merge_and_finalize
                 merge_task = Task(
                     priority=TaskPriority.MERGE_BOOK,
                     job_id=self.job_id,
-                    func=self._merge_and_finalize,
+                    func=final_func,
                 )
                 task_runner.submit_task(merge_task)
+
+    def _produced_output_paths(self):
+        """
+        Every audio file this run actually wrote into the library: the N chapter
+        files of a split book, or the single audiobook otherwise. The one place
+        the rest of the finalizer asks "what did we produce", so the failure
+        cleanup and the timestamp sweep can't disagree about it.
+        """
+        if self.split_part_paths:
+            return list(self.split_part_paths)
+        return [self.final_output_path] if self.final_output_path else []
+
+    def _prune_empty_split_dir(self):
+        """
+        Remove a split book's output folder once a failure has taken every part
+        back out of it, so a run that produced nothing leaves nothing.
+
+        _plan_split_output creates the folder before the first chunk is even
+        queued, which means a failed encode, a rolled-back promotion or a
+        discarded post-timeout set all leave an empty directory sitting in the
+        library — most visibly in D5's flat-template case, where that folder is a
+        level that did not exist before this run. _cleanup_empty_dirs does the
+        work and carries the guarantees that matter: it only ever rmdirs, so a
+        folder holding anything at all (another book's files, a stray sidecar) is
+        left alone, and it refuses to walk outside /data.
+
+        Unsplit runs never had a folder of their own to remove and are untouched.
+        """
+        if self.split_part_paths and self.split_output_dir:
+            _cleanup_empty_dirs(self.split_output_dir)
+
+    def _tracked_filepath(self):
+        """
+        What `audiobooks.filepath` records for this book. A split book has no
+        single file, so the column holds its FOLDER (D3) and the authoritative
+        per-file list lives in `book_files`; everything else records the
+        audiobook itself, exactly as it always has.
+        """
+        if self.split_part_paths:
+            return self.split_output_dir
+        return self.final_output_path
+
+    def _sidecar_base(self):
+        """
+        The extension-stripped base every sidecar hangs off.
+
+        For a single-file book that is the audiobook's own path without its
+        extension — today's behavior, unchanged. A split book has no such file,
+        so its sidecars keep the single-file-EQUIVALENT name (D9) and sit inside
+        the book's folder. That only differs from the plain answer when D5's
+        flat-template guard invented a subfolder: without it the folder already
+        IS the directory the single-file path pointed into, and the two agree.
+        """
+        base = os.path.splitext(self.final_output_path)[0]
+        if self.split_part_paths and self.split_output_dir:
+            return os.path.join(self.split_output_dir, os.path.basename(base))
+        return base
 
     def _verify_output_file(self):
         """
         Validate the finished file before we claim success, so a book is never
         marked DOWNLOADED while its file is missing, empty, or truncated (the
         "ghost book" and silent-truncation cases). Returns (ok, reason).
+
+        A split book has N files instead of one and is checked by
+        _verify_split_output_files, which applies the same two tests across the
+        whole set.
         """
+        if self.split_part_paths:
+            return self._verify_split_output_files()
+
         path = self.final_output_path
         if not path or not os.path.exists(path):
             return False, "Conversion reported success but no output file was found on disk."
@@ -1334,6 +1535,86 @@ class BookProcessor:
 
         return True, None
 
+    def _verify_split_output_files(self):
+        """
+        The multi-file form of _verify_output_file (D10): every part must exist
+        and clear a size floor, and the parts' durations must SUM to the book's
+        expected runtime under the same 95%/10-minute tolerance the single-file
+        check uses. One missing or truncated part fails the whole BOOK — and it
+        fails it here, before any row is written, so a split book is never
+        recorded DOWNLOADED with a hole in it.
+
+        The size floor is per part and duration-aware. _MIN_OUTPUT_BYTES was
+        chosen against a whole audiobook; a single chapter can legitimately be
+        tiny, since the D6 merge only folds chapters shorter than
+        `minimum_file_duration` (3 seconds by default) and three seconds of
+        128 kbps AAC is well under 64 KiB. Holding a short part to the whole-book
+        floor would fail perfectly good books, so short parts get a floor that
+        still catches what this check is FOR: the header-only file ffmpeg writes
+        when it encoded no audio at all.
+
+        The duration test runs at both scales, and the reason is that floor's
+        blind spot: a part the merge left under a minute only has to clear 4 KiB,
+        and a summed check cannot see one 45-second chapter that came out 2
+        seconds long. So each probed part is also held against its OWN chapter
+        length before the total is compared, which is what makes D10's "one
+        truncated part fails the book" literally true.
+        """
+        chapters = (self.context or {}).get("chapters") or []
+        total = len(self.split_part_paths)
+
+        for index, path in enumerate(self.split_part_paths):
+            if not os.path.exists(path):
+                return False, (
+                    f"Chapter file {index + 1} of {total} is missing; the conversion reported success but "
+                    f"did not produce every file."
+                )
+            length_ms = chapters[index].get("length_ms", 0) if index < len(chapters) else 0
+            floor = _MIN_OUTPUT_BYTES if length_ms >= _FULL_SIZE_FLOOR_PART_MS else _MIN_PART_BYTES
+            size = os.path.getsize(path)
+            if size < floor:
+                return False, (
+                    f"Chapter file {index + 1} of {total} is implausibly small ({size} bytes); "
+                    f"the conversion likely failed."
+                )
+
+        with get_db_connection() as con:
+            row = con.execute("SELECT runtime_min FROM audiobooks WHERE asin = ?", (self.asin,)).fetchone()
+        expected_min = row["runtime_min"] if row else None
+        if expected_min and expected_min > 0:
+            actual_sec = 0.0
+            for index, path in enumerate(self.split_part_paths):
+                part_sec = _probe_duration_seconds(path, self.job_id)
+                if part_sec is None:
+                    return False, (
+                        f"Chapter file {index + 1} of {total} could not be read back (corrupt or unreadable)."
+                    )
+                actual_sec += part_sec
+                # Per-part truncation, deliberately LENIENT. A part is never
+                # expected to match its chapter to the sample: the encoder's
+                # frame size and AAC priming shift the boundaries by fractions of
+                # a second, and the D6 chapter transforms (outro trim, minimum-
+                # duration merge) are already reflected in the length_ms this
+                # compares against. Five percent plus a five-second grace lets all
+                # of that through while still catching the real failure — a part
+                # that came out a fraction of its chapter. Chapters missing a
+                # length (an odd title, or a chapter list shorter than the part
+                # list) simply skip the test rather than guess.
+                expected_part_sec = (chapters[index].get("length_ms") or 0) / 1000.0 if index < len(chapters) else 0
+                if expected_part_sec > 0 and part_sec < expected_part_sec * 0.95 - 5:
+                    return False, (
+                        f"Chapter file {index + 1} of {total} is truncated "
+                        f"(expected ~{int(expected_part_sec)}s, got {int(part_sec)}s)."
+                    )
+            expected_sec = expected_min * 60
+            if actual_sec < expected_sec * 0.95 and (expected_sec - actual_sec) > 600:
+                return False, (
+                    f"The {total} chapter files are truncated "
+                    f"(expected ~{expected_min}m in total, got {int(actual_sec / 60)}m)."
+                )
+
+        return True, None
+
     def _place_supplementary_pdf(self):
         """
         Copy the companion PDF (if the download produced one) next to the
@@ -1343,7 +1624,7 @@ class BookProcessor:
         pdf_file = (self.context or {}).get("pdf_file")
         if not pdf_file or not os.path.exists(pdf_file):
             return
-        pdf_target = f"{os.path.splitext(self.final_output_path)[0]}.pdf"
+        pdf_target = f"{self._sidecar_base()}.pdf"
         try:
             shutil.copy2(pdf_file, pdf_target)
             log.info(f"PROCESSOR ({self.asin}): Saved companion PDF to {pdf_target}")
@@ -1360,7 +1641,7 @@ class BookProcessor:
         """
         context = self.context or {}
         conv = load_settings().get("conversion", {})
-        base = os.path.splitext(self.final_output_path)[0]
+        base = self._sidecar_base()
 
         # The title the two title-bearing sidecars carry, resolved exactly as the
         # FFMETADATA tag writer in chunked_conversion_logic.prepare_book_assets
@@ -1404,7 +1685,16 @@ class BookProcessor:
                     log.warning(f"PROCESSOR ({self.asin}): Could not save metadata JSON: {e}")
 
         # 3. .cue chapter sheet from the post-transform, output-timeline chapters.
-        if conv.get("create_cue_sheet", False):
+        #    Skipped for a split book (D9): a cue sheet describes the internal
+        #    track layout of ONE audio file, and a split book has no such file —
+        #    every chapter is already its own file, so a single-FILE cue would
+        #    name an arbitrary part and then describe a timeline it doesn't have.
+        if conv.get("create_cue_sheet", False) and self.split_part_paths:
+            log.info(
+                f"PROCESSOR ({self.asin}): Skipping the cue sheet — this book was split into per-chapter files, "
+                f"which a single-file cue sheet cannot describe."
+            )
+        elif conv.get("create_cue_sheet", False):
             chapters = context.get("chapters")
             if chapters:
                 book_info = context.get("book_info") or {}
@@ -1481,9 +1771,10 @@ class BookProcessor:
         # Both atime and mtime, so the pair stays consistent for tools that sort
         # on either. Sidecars only exist when their setting produced them, and are
         # matched however they are spelled on disk (an Audible cover saved as
-        # ".JPG" must be stamped like a ".jpg" one).
-        base = os.path.splitext(self.final_output_path)[0]
-        targets = [self.final_output_path] + [f"{base}{suffix}" for suffix in _existing_sidecar_suffixes(base)]
+        # ".JPG" must be stamped like a ".jpg" one). A split book stamps all of
+        # its chapter files, not just one.
+        base = self._sidecar_base()
+        targets = self._produced_output_paths() + [f"{base}{suffix}" for suffix in _existing_sidecar_suffixes(base)]
         for path in targets:
             if not os.path.exists(path):
                 continue
@@ -1527,12 +1818,17 @@ class BookProcessor:
             # sitting at the final path masquerading as a real book. It would
             # otherwise linger until a later retry's embedded-ASIN check chose to
             # overwrite it; removing it now keeps /data honest in the meantime.
-            if self.final_output_path and os.path.exists(self.final_output_path):
+            # A split book removes ALL of its parts, for the same reason: the
+            # ones that did land are a partial book nothing tracks.
+            for produced_path in self._produced_output_paths():
+                if not os.path.exists(produced_path):
+                    continue
                 try:
-                    os.remove(self.final_output_path)
-                    log.info(f"PROCESSOR ({self.asin}): Removed failed output file {self.final_output_path}.")
+                    os.remove(produced_path)
+                    log.info(f"PROCESSOR ({self.asin}): Removed failed output file {produced_path}.")
                 except OSError as e:
                     log.warning(f"PROCESSOR ({self.asin}): Could not remove failed output file: {e}")
+            self._prune_empty_split_dir()
             self._update_db_on_failure(reason)
             return
 
@@ -1557,8 +1853,27 @@ class BookProcessor:
             con.execute(
                 "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, "
                 "error_message = '', retry_count = 0, is_duplicate = ? WHERE asin = ?",
-                (self.final_output_path, int(self.is_duplicate), self.asin),
+                (self._tracked_filepath(), int(self.is_duplicate), self.asin),
             )
+            if self.split_part_paths:
+                # The book's per-file rows go in the SAME transaction as the row
+                # above (D3/D10), so the two can never be observed disagreeing
+                # about whether this book is split. A failure here propagates:
+                # part rows are the only record of where a split book's files
+                # are, and a book without them is not really downloaded.
+                replace_book_files(self.asin, self.split_part_paths, con=con)
+            else:
+                # The mirror case: a book that WAS split and has just been
+                # re-downloaded as a single file must lose its old part rows,
+                # since their presence is what marks a book as split. Best-effort
+                # only — the single file is already on disk and verified, and a
+                # database missing the child table (never true after start.sh
+                # runs, but a hand-restored library.db is a real thing) must not
+                # turn a finished download into an error.
+                try:
+                    replace_book_files(self.asin, [], con=con)
+                except sqlite3.Error as e:
+                    log.warning(f"PROCESSOR ({self.asin}): Could not clear stale per-chapter file rows: {e}")
         # Place any companion PDF and optional sidecars before the temp dir is
         # torn down (the raw master, cover, and metadata all live there).
         self._place_supplementary_pdf()
@@ -1603,7 +1918,16 @@ class BookProcessor:
         # written output would be deleted.
         previous_real = os.path.realpath(previous_path)
         new_real = os.path.realpath(self.final_output_path)
-        if previous_real == new_real:
+        # "Did we overwrite our own file?" is a question about what this run
+        # actually WROTE, which for a split book is its N parts — not
+        # final_output_path, which a split book only ever reserves and never
+        # writes. Comparing against the reserved path instead would make the
+        # single-file -> split re-download (the first thing anyone does with this
+        # feature) return here and strand the old whole-book file on disk beside
+        # the new parts, untracked. For an unsplit run the set is exactly
+        # {new_real}, so this is the same test it always was.
+        produced_real = {os.path.realpath(path) for path in self._produced_output_paths()}
+        if previous_real in produced_real:
             return  # The re-download overwrote its own file; nothing was left behind.
         # This exists() guard is also what implements the plan's "never for a
         # MISSING book" rule: a MISSING row's tracked file is gone from disk, so
@@ -1614,11 +1938,14 @@ class BookProcessor:
         # symlink realpath could not resolve) still makes two different-looking
         # paths the same inode. An OSError means the stat failed, so we cannot
         # prove they are the same file and fall through to the remaining guards.
-        try:
-            if os.path.exists(self.final_output_path) and os.path.samefile(previous_path, self.final_output_path):
-                return
-        except OSError:
-            pass
+        # Walked over the produced set for the same reason as above; for an
+        # unsplit run that is the single output file, exactly as before.
+        for produced_path in self._produced_output_paths():
+            try:
+                if os.path.exists(produced_path) and os.path.samefile(previous_path, produced_path):
+                    return
+            except OSError:
+                continue
         # Whatever the DB row claims, never delete outside the output directory.
         # Both sides are resolved so a symlinked /data still compares as inside it.
         data_root = os.path.realpath("/data")
@@ -1639,7 +1966,17 @@ class BookProcessor:
         # download's own output.
         old_base = os.path.splitext(previous_real)[0]
         new_base = os.path.splitext(new_real)[0]
-        if old_base != new_base:
+        # ...and the same trap once more for a split book, whose sidecars do NOT
+        # hang off final_output_path when D5's flat-template guard invented a
+        # subfolder: they sit at _sidecar_base() inside it. A previous single-file
+        # download living at that very base (an old "{author} - {title}/{author} -
+        # {title}" layout re-downloaded flat and split) leaves old_base equal to
+        # the base _place_sidecar_files wrote to moments ago, while new_base
+        # points one level up — so the "did the base move" test alone would sweep
+        # away this run's own cover, PDF and metadata. For every other run
+        # _sidecar_base() IS new_base and this extra term changes nothing.
+        sidecar_base = os.path.realpath(self._sidecar_base())
+        if old_base != new_base and old_base != sidecar_base:
             # ...and only when nothing ELSE still lives at the old base. Sidecars
             # are keyed by the base while audio files are not, so a second book
             # sitting there under a different audio extension shares these exact
@@ -1716,6 +2053,165 @@ class BookProcessor:
         # This is the final step, so we signal the main `run` method to unblock.
         self._completion_event.set()
         log.info(f"TASK-MERGE ({self.asin}): Finalization complete.")
+
+    def _finalize_split(self):
+        """
+        MERGE_BOOK task for a book split into per-chapter files. It takes the
+        merge's place in the pipeline but does the opposite of merging: each
+        encoded chunk already IS one of the book's output files, so this embeds
+        the cover in each, promotes them all into the book's folder, and then
+        runs the same verification and success finalization every other path
+        uses.
+
+        Promotion has to happen HERE, before the completion event is set: the
+        per-book temp dir is deleted the moment `run` unblocks, taking every
+        part still sitting in it.
+
+        The whole body runs inside a try/finally because the completion event is
+        the only thing that unblocks `run`: the part-row write is DELIBERATELY
+        allowed to raise (see _finalize_success), and an escaping exception would
+        otherwise leave `run` waiting out the full completion timeout — two hours
+        minimum, with the download worker's slot held — before reporting a
+        timeout for a book whose files are already on disk.
+        """
+        if self._cancelled():
+            return
+        log.info(f"TASK-SPLIT ({self.asin}): Starting.")
+        conversion_start_time = time.time()
+        _yield_progress(self.asin, "Finalizing chapter files...", 95, self.job_id)
+
+        try:
+            success = self._promote_split_parts()
+
+            if not success:
+                self._fail_or_cancel("Placing the per-chapter files failed.")
+            elif self._timed_out.is_set():
+                # The same guard _encode_mp3_and_finalize carries, and for the
+                # same reason: `run` has already given up on this book, written
+                # the ERROR row and walked away, so finalizing now would flip it
+                # back to DOWNLOADED, reset retry_count, and — the destructive
+                # part — run _cleanup_stale_files against the user's previous
+                # download. The chunked and remux paths are covered for free
+                # (their inputs die with the temp dir), but promotion has just
+                # moved this book's parts OUT of the temp dir into /data, where
+                # they outlive it exactly as the MP3 encoder's output does.
+                # Discard the orphans instead of finalizing them.
+                log.warning(
+                    f"TASK-SPLIT ({self.asin}): Chapter files were placed after the completion timeout was "
+                    f"already reported; discarding them instead of finalizing."
+                )
+                self._discard_timed_out_output()
+            else:
+                # Splitting spreads the same encode over N outputs and adds a
+                # promotion pass, so the wall-clock time isn't comparable to the
+                # single-file re-encode the estimator models — keep it out of the
+                # shared rolling average (D15, same reasoning as the remux and MP3
+                # paths' record_eta=False).
+                self._finalize_success(conversion_start_time, record_eta=False)
+        except Exception as e:
+            # A raised finalize is a FAILED book, not a hung one. The realistic
+            # cause is the part-row write hitting "database is locked": that
+            # transaction rolls back whole (parent row included), so nothing was
+            # recorded and the book must be marked ERROR so the retry logic can
+            # pick it up. Routed through _fail_or_cancel so a cancellation or a
+            # post-timeout echo is still suppressed, and so the once-only failure
+            # latch still applies.
+            log.error(f"PROCESSOR ({self.asin}): Finalizing the per-chapter files raised: {e}", exc_info=True)
+            try:
+                self._fail_or_cancel(f"Recording the finished chapter files failed: {e}")
+            except Exception as report_error:
+                # The failure write can raise for the very same reason the
+                # finalize did (a locked database). Nothing more can be done
+                # about it here, and it must not stop the event below.
+                log.error(f"PROCESSOR ({self.asin}): Could not record that failure either: {report_error}")
+        finally:
+            # This is the final step, so we signal the main `run` method to
+            # unblock — on every path out of the body above, including a raise.
+            self._completion_event.set()
+            log.info(f"TASK-SPLIT ({self.asin}): Finalization complete.")
+
+    def _promote_split_parts(self):
+        """
+        Embed the cover art in every encoded part and move each one to its final
+        path. Returns True only when all of them landed.
+
+        Each part is covered while it is still in the temp dir, so AtomicParsley
+        never rewrites a file that is already visible in the library, and is then
+        moved to "<target>.part" before an os.replace onto the real name — the
+        same atomic-promotion pattern the MP3 encoder uses, so a half-copied part
+        is never readable at its final path. shutil.move does the moving because
+        the temp dir and /data are separate volumes in the shipped container and
+        os.replace across devices raises EXDEV; the final os.replace stays within
+        one directory, so it stays atomic.
+
+        A failure part-way removes what already landed. Half a book in the
+        library is worse than none of it: nothing tracks the parts yet (the DB
+        write comes later, after verification), so they would sit there
+        untracked, and a later deep sync would find them.
+
+        Cancellation is re-checked between parts for the same reason. A cancel
+        SIGTERMs every registered subprocess, but a shutil.move has no process to
+        kill, so without this the loop would promote the whole remaining set and
+        then take _finalize_success's cancel branch — which deliberately leaves
+        the files alone — turning one cancelled book into N untracked files in
+        the library. Returning False here routes into _fail_or_cancel, which
+        recognizes the set stop_event and leaves the book's status untouched.
+        """
+        # The chunk paths arrive in completion order; their "chunk_NNN" names
+        # sort back into chapter order, which is the order the planned part
+        # paths are in (the same convention merge_book_chunks relies on).
+        chunk_paths = sorted(self.encoded_chunk_paths)
+        targets = self.split_part_paths
+        if len(chunk_paths) != len(targets):
+            log.error(
+                f"PROCESSOR ({self.asin}): Encoded {len(chunk_paths)} chapter file(s) but planned "
+                f"{len(targets)}; refusing to place a mismatched set."
+            )
+            return False
+
+        cover_file = (self.context or {}).get("cover_file")
+        promoted = []
+        try:
+            for chunk_path, target in zip(chunk_paths, targets):
+                # The stop_event is read directly rather than through
+                # _cancelled(), which sets the completion event as a side effect:
+                # unblocking `run` (and with it the temp-dir teardown) before the
+                # rollback below has finished is a race worth not having. The
+                # event is set by _finalize_split's finally either way.
+                if self.stop_event is not None and self.stop_event.is_set():
+                    log.info(
+                        f"PROCESSOR ({self.asin}): Cancelled while placing chapter files; "
+                        f"removing the {len(promoted)} already placed."
+                    )
+                    self._remove_promoted_parts(promoted, targets)
+                    return False
+                _embed_cover_art(self.asin, self.job_id, chunk_path, cover_file)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                staged = f"{target}.part"
+                shutil.move(chunk_path, staged)
+                os.replace(staged, target)
+                promoted.append(target)
+        except OSError as e:
+            log.error(f"PROCESSOR ({self.asin}): Could not place a chapter file: {e}")
+            self._remove_promoted_parts(promoted, targets)
+            return False
+
+        log.info(f"PROCESSOR ({self.asin}): Placed {len(promoted)} chapter file(s) in '{self.split_output_dir}'.")
+        return True
+
+    def _remove_promoted_parts(self, promoted, targets):
+        """
+        Best-effort teardown of an abandoned promotion: every part that already
+        landed, plus any ".part" staging file the interrupted move left behind,
+        and then the book's folder if that emptied it. Shared by the cancel and
+        the error branch of _promote_split_parts so the two can't drift apart.
+        """
+        for path in promoted + [f"{target}.part" for target in targets]:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        self._prune_empty_split_dir()
 
     def _remux_and_finalize(self):
         """
@@ -1796,14 +2292,37 @@ class BookProcessor:
         but perfectly readable, so a later deep sync would adopt it. Failing to
         delete it is not worth failing anything over: the run is already recorded
         as failed.
+
+        A split book is the same story with N files, so this walks whatever the
+        run actually produced rather than the single final path (which a split
+        book never writes). The timeout can land at any point around promotion —
+        before it starts, between two parts, or after the last one — so the set
+        on disk may be empty, partial or complete, and every branch here is a
+        per-path best-effort that simply skips what isn't there. The ".part"
+        staging names are swept too: a timeout landing between the move and the
+        replace leaves one behind, and it is just as untracked as a real part.
+        Finally the book's folder goes if removing the parts emptied it.
         """
-        if not self.final_output_path or not os.path.exists(self.final_output_path):
-            return
-        try:
-            os.remove(self.final_output_path)
-            log.info(f"PROCESSOR ({self.asin}): Removed post-timeout output file {self.final_output_path}.")
-        except OSError as e:
-            log.warning(f"PROCESSOR ({self.asin}): Could not remove post-timeout output file: {e}")
+        for path in self._produced_output_paths():
+            if not os.path.exists(path):
+                continue
+            try:
+                os.remove(path)
+                log.info(f"PROCESSOR ({self.asin}): Removed post-timeout output file {path}.")
+            except OSError as e:
+                log.warning(f"PROCESSOR ({self.asin}): Could not remove post-timeout output file: {e}")
+
+        for target in self.split_part_paths:
+            staged = f"{target}.part"
+            if not os.path.exists(staged):
+                continue
+            try:
+                os.remove(staged)
+                log.info(f"PROCESSOR ({self.asin}): Removed post-timeout staging file {staged}.")
+            except OSError as e:
+                log.warning(f"PROCESSOR ({self.asin}): Could not remove post-timeout staging file: {e}")
+
+        self._prune_empty_split_dir()
 
     def _fail_or_cancel(self, error_message):
         """

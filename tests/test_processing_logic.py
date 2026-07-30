@@ -2696,6 +2696,8 @@ class TestCleanupStaleFiles:
         present=None,
         remove_error=None,
         other_books=(),
+        split_parts=None,
+        split_dir=None,
     ):
         """Drive _cleanup_stale_files with the filesystem faked out, and return
         the set of paths it tried to unlink plus the empty-dir cleanup mock. The
@@ -2708,6 +2710,9 @@ class TestCleanupStaleFiles:
         processor = BookProcessor(asin="B0OURS", job_id=1)
         processor.final_output_path = new_path or self.NEW
         processor.cleanup_stale_files = param
+        if split_parts:
+            processor.split_part_paths = list(split_parts)
+            processor.split_output_dir = split_dir or os.path.dirname(split_parts[0])
 
         if present is None:
             present = {previous_path} if previous_path else set()
@@ -2926,6 +2931,82 @@ class TestCleanupStaleFiles:
         assert removed == {self.OLD, old_base + ".cue"}
         cleanup_dirs.assert_called_once_with("/data/Author/Old Title")
 
+    def test_single_to_split_removes_the_old_whole_book_file(self):
+        # W1: the transition every user of this feature makes first. The reserved
+        # single-file path is EXACTLY where the previous download sits, so the
+        # "we overwrote our own file" early return used to fire and leave the old
+        # whole-book .m4b on disk beside the new parts, tracked by nothing.
+        old = "/data/Author/Title/Title.m4b"
+        base = "/data/Author/Title/Title"
+        parts = [f"{base} - 01 - One.m4b", f"{base} - 02 - Two.m4b"]
+        removed, _cleanup_dirs = self._run(
+            old,
+            new_path=old,  # A split book only ever RESERVES this path.
+            param=True,
+            split_parts=parts,
+            split_dir="/data/Author/Title",
+            present={old, base + ".jpg", base + ".metadata.json", *parts},
+        )
+        # The old whole-book file goes...
+        assert removed == {old}
+        # ...and nothing this run just wrote does: not the parts, and — the
+        # critical subtlety — not the sidecars, which sit at the old file's very
+        # own base because a split book keeps the single-file-equivalent name.
+        assert not removed & set(parts)
+
+    def test_split_flat_guard_keeps_the_sidecars_it_just_wrote(self):
+        # The case where the old base and the new SIDECAR base coincide while the
+        # reserved path's base does not: an old "{author} - {title}/{author} -
+        # {title}" layout re-downloaded with a flat template and splitting on, so
+        # D5's guard puts the parts (and the sidecars) in the folder the previous
+        # single file was already living in.
+        folder = "/data/Bram Stoker - Dracula"
+        old = f"{folder}/Bram Stoker - Dracula.m4b"
+        base = f"{folder}/Bram Stoker - Dracula"
+        parts = [f"{folder}/Dracula - 01 - One.m4b"]
+        removed, _cleanup_dirs = self._run(
+            old,
+            new_path="/data/Bram Stoker - Dracula.m4b",
+            param=True,
+            split_parts=parts,
+            split_dir=folder,
+            present={old, base + ".jpg", base + ".pdf", base + ".metadata.json", *parts},
+        )
+        assert removed == {old}
+
+    def test_single_to_split_without_consent_leaves_everything(self):
+        old = "/data/Author/Title/Title.m4b"
+        base = "/data/Author/Title/Title"
+        parts = [f"{base} - 01 - One.m4b"]
+        removed, cleanup_dirs = self._run(
+            old,
+            new_path=old,
+            param=None,
+            setting=False,
+            split_parts=parts,
+            split_dir="/data/Author/Title",
+            present={old, base + ".jpg", *parts},
+        )
+        assert removed == set()
+        cleanup_dirs.assert_not_called()
+
+    def test_a_split_part_is_still_recognized_as_our_own_file(self):
+        # The other half of the produced-set comparison: when the tracked previous
+        # path IS one of this run's parts (a split book re-downloaded split, same
+        # names), it was overwritten in place and there is nothing stale.
+        base = "/data/Author/Title/Title"
+        parts = [f"{base} - 01 - One.m4b", f"{base} - 02 - Two.m4b"]
+        removed, cleanup_dirs = self._run(
+            parts[0],
+            new_path="/data/Author/Title/Title.m4b",
+            param=True,
+            split_parts=parts,
+            split_dir="/data/Author/Title",
+            present=set(parts),
+        )
+        assert removed == set()
+        cleanup_dirs.assert_not_called()
+
     def test_finalize_captures_the_previous_path_before_the_update(self):
         # The UPDATE overwrites filepath, so reading it afterwards would only ever
         # see the NEW path and the cleanup would never fire. This pins the order.
@@ -2948,3 +3029,736 @@ class TestCleanupStaleFiles:
             processor._finalize_success(conversion_start_time=0, record_eta=False)
 
         cleanup.assert_called_once_with(self.OLD)
+
+
+# --- v0.24.0 Phase 2: per-chapter splitting ---------------------------------
+
+SPLIT_CHAPTERS = [
+    {"title": "One", "start_offset_ms": 0, "length_ms": 600_000},
+    {"title": "Two", "start_offset_ms": 600_000, "length_ms": 600_000},
+    {"title": "Three", "start_offset_ms": 1_200_000, "length_ms": 600_000},
+]
+
+
+def _run_split_prepare(chapters=None, naming=None, split_output=True, book_row=BOOK_ROW):
+    """
+    Drive BookProcessor._prepare_and_spawn_encode_tasks with a context that
+    prepare already marked (or didn't mark) as split, so the planning of the
+    per-part output paths can be asserted on. Everything external is mocked;
+    nothing touches disk.
+    """
+    chapters = SPLIT_CHAPTERS if chapters is None else chapters
+    processor = BookProcessor(asin="B0OURS", job_id=1)
+    processor.download_complete_event = Event()
+
+    con = mock.MagicMock()
+    con.__enter__.return_value = con
+    con.execute.return_value.fetchone.return_value = book_row
+
+    context = {
+        "audio_file": "/tmp/x/master_intermediate.m4b",
+        "chapters": chapters,
+        "split_output": split_output,
+    }
+    submitted = []
+
+    with (
+        mock.patch.object(
+            processing_logic,
+            "load_settings",
+            return_value={"naming": naming or {}, "conversion": {"output_format": "m4b"}},
+        ),
+        mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+        mock.patch.object(processing_logic, "prepare_book_assets", return_value=(context, None)),
+        mock.patch("os.path.exists", return_value=False),
+        mock.patch("os.makedirs") as makedirs,
+        mock.patch.object(processing_logic, "_yield_progress"),
+        mock.patch.object(processing_logic.task_runner, "submit_task", side_effect=submitted.append),
+    ):
+        processor._prepare_and_spawn_encode_tasks()
+
+    return processor, submitted, makedirs
+
+
+class TestSplitOutputPlanning:
+    """D4/D5: the split decision prepare made becomes concrete per-part output
+    paths, named from `naming.chapter_file_template` and placed in the folder the
+    book naming template already produced."""
+
+    def test_unsplit_context_plans_nothing(self):
+        processor, submitted, _ = _run_split_prepare(split_output=False)
+        assert processor.split_part_paths == []
+        assert processor.split_output_dir is None
+        # ...and the chunk fan-out is exactly today's.
+        assert processor.total_chunks == 3
+        assert all(t.func == processor._encode_and_track_chunk for t in submitted)
+
+    def test_parts_land_beside_the_single_file_path(self):
+        processor, _submitted, _ = _run_split_prepare()
+        assert processor.split_output_dir == "/data/Bram Stoker/Dracula"
+        assert processor.split_part_paths == [
+            "/data/Bram Stoker/Dracula/Dracula - 1 - One.m4b",
+            "/data/Bram Stoker/Dracula/Dracula - 2 - Two.m4b",
+            "/data/Bram Stoker/Dracula/Dracula - 3 - Three.m4b",
+        ]
+
+    def test_part_numbers_are_one_based_and_zero_padded_to_the_count(self):
+        chapters = [{"title": f"Ch {i}", "start_offset_ms": 0, "length_ms": 60_000} for i in range(1, 13)]
+        processor, _submitted, _ = _run_split_prepare(chapters=chapters)
+        names = [os.path.basename(p) for p in processor.split_part_paths]
+        assert names[0] == "Dracula - 01 - Ch 1.m4b"
+        assert names[-1] == "Dracula - 12 - Ch 12.m4b"
+
+    def test_custom_chapter_template_is_honoured(self):
+        naming = {"chapter_file_template": "{ch} - {ch_title} ({ch_total})"}
+        processor, _submitted, _ = _run_split_prepare(naming=naming)
+        assert os.path.basename(processor.split_part_paths[1]) == "2 - Two (3).m4b"
+
+    def test_flat_template_puts_the_parts_in_a_subfolder(self):
+        # D5: a template that renders straight into the output root would dump N
+        # chapter files into /data; they get a folder named from the book instead.
+        naming = {"template": "{author} - {title}"}
+        processor, _submitted, makedirs = _run_split_prepare(naming=naming)
+        assert processor.final_output_path == "/data/Bram Stoker - Dracula.m4b"
+        assert processor.split_output_dir == "/data/Bram Stoker - Dracula"
+        assert processor.split_part_paths[0] == "/data/Bram Stoker - Dracula/Dracula - 1 - One.m4b"
+        makedirs.assert_any_call("/data/Bram Stoker - Dracula", exist_ok=True)
+
+    def test_nested_template_needs_no_guard(self):
+        processor, _submitted, _ = _run_split_prepare()
+        # The book already has its own folder, so the parts share it with the
+        # sidecars rather than gaining a redundant level.
+        assert processor.split_output_dir == os.path.dirname(processor.final_output_path)
+
+    def test_missing_ch_placeholder_warns_exactly_once_per_book(self, caplog):
+        # Backlog #37: the guard lives in the renderer, which runs once per part;
+        # normalizing the template once per book keeps the warning to one line
+        # instead of one per chapter file.
+        naming = {"chapter_file_template": "{title} - {ch_title}"}
+        with caplog.at_level(logging.WARNING):
+            processor, _submitted, _ = _run_split_prepare(naming=naming)
+        warnings = [r for r in caplog.records if "no {ch} placeholder" in r.getMessage()]
+        assert len(warnings) == 1
+        # ...and the appended {ch} still keeps the names unique and sortable.
+        assert os.path.basename(processor.split_part_paths[0]) == "Dracula - One - 1.m4b"
+
+    def test_present_ch_placeholder_warns_never(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            _run_split_prepare()
+        assert [r for r in caplog.records if "no {ch} placeholder" in r.getMessage()] == []
+
+    def test_split_book_still_encodes_one_chunk_per_chapter(self):
+        processor, submitted, _ = _run_split_prepare()
+        assert processor.total_chunks == 3
+        assert all(t.func == processor._encode_and_track_chunk for t in submitted)
+        assert all(t.priority == processing_logic.TaskPriority.ENCODE_CHAPTER for t in submitted)
+
+
+class TestSplitFinalTaskSelection:
+    """The last chunk to finish submits the finalize-split task in place of the
+    merge, at the same MERGE_BOOK priority."""
+
+    def _run(self, split_part_paths):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.total_chunks = 1
+        processor.split_part_paths = split_part_paths
+        submitted = []
+        with (
+            mock.patch.object(processing_logic, "encode_chapter_chunk", return_value="/tmp/x/chunk_000.m4b"),
+            mock.patch.object(processing_logic, "_yield_progress"),
+            mock.patch.object(processing_logic.task_runner, "submit_task", side_effect=submitted.append),
+        ):
+            processor._encode_and_track_chunk({"index": 0, "total_chunks": 1, "start": 0, "duration": 1})
+        return processor, submitted
+
+    def test_unsplit_book_submits_the_merge(self):
+        processor, submitted = self._run([])
+        assert len(submitted) == 1
+        assert submitted[0].func == processor._merge_and_finalize
+        assert submitted[0].priority == processing_logic.TaskPriority.MERGE_BOOK
+
+    def test_split_book_submits_the_finalize_instead(self):
+        processor, submitted = self._run(["/data/A/T/T - 1 - One.m4b"])
+        assert len(submitted) == 1
+        assert submitted[0].func == processor._finalize_split
+        assert submitted[0].priority == processing_logic.TaskPriority.MERGE_BOOK
+
+
+class TestPromoteSplitParts:
+    """Parts are covered in the temp dir, then moved into the library through a
+    ".part" staging name — and a failure part-way leaves nothing behind."""
+
+    def _processor(self, tmp_path, part_count=2):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        temp_dir = tmp_path / "temp"
+        out_dir = tmp_path / "out" / "Dracula"
+        temp_dir.mkdir()
+        chunks = []
+        for index in range(part_count):
+            chunk = temp_dir / f"chunk_{index:03d}.m4b"
+            chunk.write_bytes(f"audio {index}".encode())
+            chunks.append(str(chunk))
+        processor.temp_dir = str(temp_dir)
+        # Deliberately NOT in index order: chunks are appended as they finish.
+        processor.encoded_chunk_paths = list(reversed(chunks))
+        processor.split_output_dir = str(out_dir)
+        processor.split_part_paths = [str(out_dir / f"Dracula - {i + 1}.m4b") for i in range(part_count)]
+        processor.context = {"cover_file": None}
+        return processor, out_dir
+
+    def test_all_parts_land_in_chapter_order(self, tmp_path):
+        processor, out_dir = self._processor(tmp_path)
+        with mock.patch.object(processing_logic, "_embed_cover_art") as cover:
+            assert processor._promote_split_parts() is True
+        assert (out_dir / "Dracula - 1.m4b").read_bytes() == b"audio 0"
+        assert (out_dir / "Dracula - 2.m4b").read_bytes() == b"audio 1"
+        # No staging files left, and the temp copies are gone.
+        assert sorted(p.name for p in out_dir.iterdir()) == ["Dracula - 1.m4b", "Dracula - 2.m4b"]
+        assert list((tmp_path / "temp").iterdir()) == []
+        # The cover is embedded per part, while each is still in the temp dir.
+        assert cover.call_count == 2
+
+    def test_a_failed_move_removes_what_already_landed(self, tmp_path):
+        processor, out_dir = self._processor(tmp_path)
+        real_move = processing_logic.shutil.move
+        calls = []
+
+        def failing_move(src, dst):
+            calls.append(src)
+            if len(calls) == 2:
+                raise OSError("No space left on device")
+            return real_move(src, dst)
+
+        with (
+            mock.patch.object(processing_logic, "_embed_cover_art"),
+            mock.patch.object(processing_logic.shutil, "move", side_effect=failing_move),
+        ):
+            assert processor._promote_split_parts() is False
+        # Half a book in the library is worse than none of it.
+        assert not (out_dir / "Dracula - 1.m4b").exists()
+        assert not (out_dir / "Dracula - 2.m4b").exists()
+
+    def test_a_cancel_mid_promotion_removes_what_already_landed(self, tmp_path):
+        # M4: a cancel cannot SIGTERM a shutil.move, so without a per-part recheck
+        # the loop promotes the whole remaining set and _finalize_success's cancel
+        # branch then leaves every one of them in the library, untracked.
+        processor, out_dir = self._processor(tmp_path)
+        processor.stop_event = Event()
+        real_move = processing_logic.shutil.move
+
+        def move_then_cancel(src, dst):
+            result = real_move(src, dst)
+            processor.stop_event.set()  # The cancel lands after the first part.
+            return result
+
+        with (
+            mock.patch.object(processing_logic, "_embed_cover_art"),
+            mock.patch.object(processing_logic.shutil, "move", side_effect=move_then_cancel),
+        ):
+            assert processor._promote_split_parts() is False
+
+        assert not (out_dir / "Dracula - 1.m4b").exists()
+        assert not (out_dir / "Dracula - 2.m4b").exists()
+
+    def test_a_mismatched_chunk_count_refuses_to_place_anything(self, tmp_path):
+        processor, out_dir = self._processor(tmp_path)
+        processor.encoded_chunk_paths = processor.encoded_chunk_paths[:1]
+        with mock.patch.object(processing_logic, "_embed_cover_art") as cover:
+            assert processor._promote_split_parts() is False
+        cover.assert_not_called()
+        assert not out_dir.exists()
+
+
+class TestSplitOutputVerification:
+    """D10: every part is checked before any row is written, and the durations
+    are summed against the book's runtime under the existing tolerance."""
+
+    def _processor(self, tmp_path, sizes=(200_000, 200_000), chapters=None):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        processor.final_output_path = str(out_dir / "Dracula.m4b")
+        processor.split_output_dir = str(out_dir)
+        processor.split_part_paths = []
+        for index, size in enumerate(sizes):
+            part = out_dir / f"Dracula - {index + 1}.m4b"
+            if size is not None:
+                part.write_bytes(b"\0" * size)
+            processor.split_part_paths.append(str(part))
+        processor.context = {
+            "chapters": chapters
+            or [{"title": "x", "start_offset_ms": 0, "length_ms": 1_800_000} for _ in range(len(sizes))]
+        }
+        return processor
+
+    def _verify(self, processor, runtime_min=60, durations=(1800.0, 1800.0)):
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = {"runtime_min": runtime_min}
+        probes = list(durations)
+        with (
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "_probe_duration_seconds", side_effect=lambda *_a, **_k: probes.pop(0)),
+        ):
+            return processor._verify_output_file()
+
+    def test_all_parts_present_and_long_enough_passes(self, tmp_path):
+        assert self._verify(self._processor(tmp_path)) == (True, None)
+
+    def test_a_missing_part_fails_the_book(self, tmp_path):
+        processor = self._processor(tmp_path, sizes=(200_000, None))
+        ok, reason = self._verify(processor)
+        assert ok is False
+        assert "Chapter file 2 of 2 is missing" in reason
+
+    def test_a_stub_part_fails_the_book(self, tmp_path):
+        processor = self._processor(tmp_path, sizes=(200_000, 500))
+        ok, reason = self._verify(processor)
+        assert ok is False
+        assert "implausibly small" in reason
+
+    def test_a_short_chapter_is_not_held_to_the_whole_book_floor(self, tmp_path):
+        # The minimum-duration merge lets a 3-second chapter become its own file,
+        # and three seconds of AAC is well under the 64 KiB whole-book floor.
+        processor = self._processor(
+            tmp_path,
+            sizes=(200_000, 40_000),
+            chapters=[
+                {"title": "long", "start_offset_ms": 0, "length_ms": 3_596_000},
+                {"title": "short", "start_offset_ms": 3_596_000, "length_ms": 4_000},
+            ],
+        )
+        assert self._verify(processor, durations=(3596.0, 4.0)) == (True, None)
+
+    def test_an_empty_short_part_still_fails(self, tmp_path):
+        processor = self._processor(
+            tmp_path,
+            sizes=(200_000, 300),
+            chapters=[
+                {"title": "long", "start_offset_ms": 0, "length_ms": 3_596_000},
+                {"title": "short", "start_offset_ms": 3_596_000, "length_ms": 4_000},
+            ],
+        )
+        ok, reason = self._verify(processor, durations=(3596.0, 4.0))
+        assert ok is False
+        assert "implausibly small" in reason
+
+    def test_an_unreadable_part_fails_the_book(self, tmp_path):
+        ok, reason = self._verify(self._processor(tmp_path), durations=(1800.0, None))
+        assert ok is False
+        assert "could not be read back" in reason
+
+    def test_summed_durations_are_compared_not_individual_ones(self, tmp_path):
+        # Each part is a fraction of the runtime; only the sum is meaningful.
+        assert self._verify(self._processor(tmp_path), durations=(1790.0, 1795.0)) == (True, None)
+
+    def test_a_truncated_set_fails_the_book(self, tmp_path):
+        ok, reason = self._verify(self._processor(tmp_path), durations=(600.0, 600.0))
+        assert ok is False
+        assert "truncated" in reason
+
+    def test_unknown_runtime_skips_the_duration_check(self, tmp_path):
+        assert self._verify(self._processor(tmp_path), runtime_min=None, durations=()) == (True, None)
+
+    def test_one_truncated_part_fails_the_book_even_when_the_sum_survives(self, tmp_path):
+        # M3: a 30-minute chapter that came out 2 seconds long clears the size
+        # floor and barely dents the summed total, so only the per-part check
+        # sees it. This is what makes D10's "one truncated part fails the book"
+        # literally true.
+        processor = self._processor(
+            tmp_path,
+            sizes=(200_000, 200_000, 200_000),
+            chapters=[
+                {"title": "one", "start_offset_ms": 0, "length_ms": 1_800_000},
+                {"title": "two", "start_offset_ms": 1_800_000, "length_ms": 1_800_000},
+                {"title": "three", "start_offset_ms": 3_600_000, "length_ms": 60_000},
+            ],
+        )
+        ok, reason = self._verify(processor, runtime_min=61, durations=(1800.0, 1800.0, 2.0))
+        assert ok is False
+        assert "Chapter file 3 of 3 is truncated" in reason
+
+    def test_normal_encoder_slack_still_passes(self, tmp_path):
+        # The tolerance is deliberately lenient: frame/priming slack shifts a
+        # part's real duration off its chapter length by a second or two, and a
+        # short part loses proportionally more of it.
+        processor = self._processor(
+            tmp_path,
+            sizes=(200_000, 40_000),
+            chapters=[
+                {"title": "long", "start_offset_ms": 0, "length_ms": 1_800_000},
+                {"title": "short", "start_offset_ms": 1_800_000, "length_ms": 8_000},
+            ],
+        )
+        assert self._verify(processor, runtime_min=30, durations=(1798.4, 6.1)) == (True, None)
+
+    def test_a_chapter_without_a_length_skips_the_per_part_check(self, tmp_path):
+        # Nothing to compare against, so the part is judged by the size floor and
+        # the summed total alone rather than by a guessed length.
+        processor = self._processor(
+            tmp_path,
+            chapters=[
+                {"title": "one", "start_offset_ms": 0},
+                {"title": "two", "start_offset_ms": 1_800_000, "length_ms": 1_800_000},
+            ],
+        )
+        assert self._verify(processor, durations=(1800.0, 1800.0)) == (True, None)
+
+
+class TestSplitFinalizeSuccess:
+    """The finalize-split task shares the success path with every other format:
+    verify first, then ONE transaction carrying the parent row and the part rows
+    (D3/D10), and no ETA pollution (D15)."""
+
+    PARTS = ["/data/A/Dracula/Dracula - 1 - One.m4b", "/data/A/Dracula/Dracula - 2 - Two.m4b"]
+
+    def _run(self, promoted=True, verify=(True, None), replace_error=None, fail_error=None):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = "/data/A/Dracula/A - Dracula.m4b"
+        processor.split_output_dir = "/data/A/Dracula"
+        processor.split_part_paths = list(self.PARTS)
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = {"runtime_min": 60, "filepath": None}
+        with (
+            mock.patch.object(processor, "_promote_split_parts", return_value=promoted),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "replace_book_files", side_effect=replace_error) as replace,
+            mock.patch.object(processing_logic, "record_conversion_time") as record_eta,
+            mock.patch.object(processing_logic, "_yield_progress") as progress,
+            mock.patch.object(processing_logic, "_cleanup_empty_dirs") as prune,
+            mock.patch.object(processor, "_verify_output_file", return_value=verify),
+            mock.patch.object(processor, "_place_supplementary_pdf") as pdf,
+            mock.patch.object(processor, "_place_sidecar_files") as sidecars,
+            mock.patch.object(processor, "_apply_file_timestamps") as timestamps,
+            mock.patch.object(processor, "_cleanup_stale_files") as cleanup,
+            mock.patch.object(processor, "_update_db_on_failure", side_effect=fail_error) as fail,
+            mock.patch("os.path.exists", return_value=False),
+        ):
+            processor._finalize_split()
+        downloaded = [c for c in con.execute.call_args_list if "status = 'DOWNLOADED'" in c.args[0]]
+        return {
+            "processor": processor,
+            "con": con,
+            "downloaded": downloaded,
+            "replace": replace,
+            "record_eta": record_eta,
+            "progress": progress,
+            "prune": prune,
+            "pdf": pdf,
+            "sidecars": sidecars,
+            "timestamps": timestamps,
+            "cleanup": cleanup,
+            "fail": fail,
+        }
+
+    def test_success_tracks_the_folder_and_writes_the_part_rows(self):
+        r = self._run()
+        r["fail"].assert_not_called()
+        assert len(r["downloaded"]) == 1
+        # audiobooks.filepath holds the FOLDER for a split book (D3).
+        assert r["downloaded"][0].args[1][0] == "/data/A/Dracula"
+        # ...and the authoritative per-file list goes in the SAME transaction.
+        r["replace"].assert_called_once_with("B0OURS", self.PARTS, con=r["con"])
+
+    def test_part_rows_are_written_in_playback_order(self):
+        r = self._run()
+        assert r["replace"].call_args.args[1] == self.PARTS
+
+    def test_success_does_not_pollute_eta_history(self):
+        # D15: a split conversion's wall clock isn't comparable to the
+        # single-file re-encode the estimator models.
+        self._run()["record_eta"].assert_not_called()
+
+    def test_success_places_sidecars_and_stamps_timestamps(self):
+        r = self._run()
+        r["pdf"].assert_called_once()
+        r["sidecars"].assert_called_once()
+        r["timestamps"].assert_called_once()
+        r["cleanup"].assert_called_once()
+
+    def test_finalize_reports_progress_at_ninety_five(self):
+        r = self._run()
+        assert 95 in [c.args[2] for c in r["progress"].call_args_list]
+
+    def test_failed_verification_writes_nothing(self):
+        # The whole point of D10: one bad part fails the BOOK before any row is
+        # touched, so no half-tracked split book can exist.
+        r = self._run(verify=(False, "Chapter file 2 of 2 is missing; ..."))
+        assert r["downloaded"] == []
+        r["replace"].assert_not_called()
+        r["fail"].assert_called_once_with("Chapter file 2 of 2 is missing; ...")
+
+    def test_failed_promotion_reports_and_writes_nothing(self):
+        r = self._run(promoted=False)
+        assert r["downloaded"] == []
+        r["replace"].assert_not_called()
+        r["fail"].assert_called_once_with("Placing the per-chapter files failed.")
+
+    def test_the_completion_event_is_always_set(self):
+        assert self._run(promoted=False)["processor"]._completion_event.is_set()
+        assert self._run()["processor"]._completion_event.is_set()
+
+    def test_failed_verification_removes_every_part(self):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = "/data/A/Dracula/A - Dracula.m4b"
+        processor.split_output_dir = "/data/A/Dracula"
+        processor.split_part_paths = list(self.PARTS)
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = {"runtime_min": 60, "filepath": None}
+        with (
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "_yield_progress"),
+            mock.patch.object(processing_logic, "_cleanup_empty_dirs") as prune,
+            mock.patch.object(processor, "_verify_output_file", return_value=(False, "truncated")),
+            mock.patch.object(processor, "_update_db_on_failure"),
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("os.remove") as remove,
+        ):
+            processor._finalize_success(conversion_start_time=0, record_eta=False)
+        assert [c.args[0] for c in remove.call_args_list] == self.PARTS
+        # M5: removing every part empties the folder _plan_split_output created
+        # before the first chunk was queued — most visibly D5's flat-guard
+        # subfolder, a level that did not exist before this run.
+        prune.assert_called_once_with("/data/A/Dracula")
+
+    def test_an_unsplit_failed_verification_prunes_no_directory(self):
+        # The unsplit path never had a folder of its own and must stay exactly as
+        # it was: the single failed file goes, nothing else is touched.
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = "/data/A/Dracula/A - Dracula.m4b"
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = {"runtime_min": 60, "filepath": None}
+        with (
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "_yield_progress"),
+            mock.patch.object(processing_logic, "_cleanup_empty_dirs") as prune,
+            mock.patch.object(processor, "_verify_output_file", return_value=(False, "truncated")),
+            mock.patch.object(processor, "_update_db_on_failure"),
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("os.remove") as remove,
+        ):
+            processor._finalize_success(conversion_start_time=0, record_eta=False)
+        assert [c.args[0] for c in remove.call_args_list] == ["/data/A/Dracula/A - Dracula.m4b"]
+        prune.assert_not_called()
+
+    def test_a_raising_part_row_write_fails_the_book_instead_of_hanging_it(self):
+        # W2: the part-row write is deliberately allowed to propagate, and the
+        # realistic cause is "database is locked". Before, that exception unwound
+        # past the completion event and `run` sat on it for the full completion
+        # timeout — two hours minimum — before reporting a bogus timeout.
+        r = self._run(replace_error=sqlite3.OperationalError("database is locked"))
+        assert r["processor"]._completion_event.is_set()
+        r["fail"].assert_called_once()
+        assert "database is locked" in r["fail"].call_args.args[0]
+        # The transaction rolled back, so nothing follows a failed write.
+        r["cleanup"].assert_not_called()
+
+    def test_a_raising_failure_report_still_sets_the_completion_event(self):
+        # ...and the failure write can hit the very same locked database. There is
+        # nothing left to do about it, but the book must still stop blocking `run`.
+        r = self._run(
+            replace_error=sqlite3.OperationalError("database is locked"),
+            fail_error=sqlite3.OperationalError("database is locked"),
+        )
+        assert r["processor"]._completion_event.is_set()
+
+
+class TestPostTimeoutSplitFinalize:
+    """B1: the split finalize needs the same post-timeout guard the MP3 encode
+    carries, and for the same reason.
+
+    The chunked and remux paths are covered incidentally — their inputs live in
+    the temp dir `run` has already deleted, so they simply fail — but promotion
+    moves a split book's parts OUT of the temp dir into /data, where they outlive
+    it. Without the guard a run that already recorded ERROR flips the book back
+    to DOWNLOADED, resets retry_count, and runs the stale-file cleanup, deleting
+    the user's previous copy on behalf of a run the system gave up on."""
+
+    def _finalize(self, tmp_path, timed_out, on_disk=(0, 1), staged=()):
+        """Drive _finalize_split with promotion already done and the parts named
+        by `on_disk` sitting in the book's folder — the timeout can land before,
+        during or after promotion, so the set on disk may be empty, partial or
+        complete. `staged` names any ".part" a half-finished move left behind."""
+        processor = BookProcessor(asin="B0OURS", job_id=7)
+        out_dir = tmp_path / "Dracula"
+        out_dir.mkdir()
+        processor.final_output_path = str(tmp_path / "Bram Stoker - Dracula.m4b")
+        processor.split_output_dir = str(out_dir)
+        processor.split_part_paths = [
+            str(out_dir / "Dracula - 01 - One.m4b"),
+            str(out_dir / "Dracula - 02 - Two.m4b"),
+        ]
+        for index in on_disk:
+            with open(processor.split_part_paths[index], "w", encoding="utf-8") as handle:
+                handle.write("finished part")
+        for index in staged:
+            with open(f"{processor.split_part_paths[index]}.part", "w", encoding="utf-8") as handle:
+                handle.write("half-moved part")
+        if timed_out:
+            processor._timed_out.set()
+
+        with (
+            mock.patch.object(processor, "_promote_split_parts", return_value=True),
+            mock.patch.object(processor, "_finalize_success") as finalize,
+            mock.patch.object(processor, "_cleanup_stale_files") as cleanup,
+            mock.patch.object(processing_logic, "_yield_progress"),
+        ):
+            processor._finalize_split()
+        return processor, finalize, cleanup
+
+    def test_a_post_timeout_finalize_does_not_finalize(self, tmp_path):
+        processor, finalize, cleanup = self._finalize(tmp_path, timed_out=True)
+        finalize.assert_not_called()
+        # The destructive step the guard exists for: the previous download stays.
+        cleanup.assert_not_called()
+        # Every orphaned part is discarded, so a later deep sync can't adopt them
+        # as a DOWNLOADED book the DB says failed.
+        assert [p for p in processor.split_part_paths if os.path.exists(p)] == []
+        assert processor._completion_event.is_set()
+
+    def test_a_partly_promoted_set_is_discarded_too(self, tmp_path):
+        # The timeout landed between two parts: one file placed, one staged.
+        processor, finalize, _cleanup = self._finalize(tmp_path, timed_out=True, on_disk=(0,), staged=(1,))
+        finalize.assert_not_called()
+        assert [p for p in processor.split_part_paths if os.path.exists(p)] == []
+        assert not os.path.exists(f"{processor.split_part_paths[1]}.part")
+
+    def test_nothing_promoted_yet_is_a_clean_no_op(self, tmp_path):
+        processor, finalize, _cleanup = self._finalize(tmp_path, timed_out=True, on_disk=())
+        finalize.assert_not_called()
+        assert processor._completion_event.is_set()
+
+    def test_a_normal_finalize_still_succeeds(self, tmp_path):
+        processor, finalize, _cleanup = self._finalize(tmp_path, timed_out=False)
+        finalize.assert_called_once()
+        assert finalize.call_args.kwargs == {"record_eta": False}
+        assert all(os.path.exists(p) for p in processor.split_part_paths)
+
+
+class TestUnsplitFinalizeStillClearsPartRows:
+    """The mirror of the split write: a book re-downloaded as a single file must
+    lose the part rows a previous split download left, or it stays 'split'
+    forever — but that clear can never fail a finished download."""
+
+    def _run(self, replace_side_effect=None):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = "/data/A/Dracula/A - Dracula.m4b"
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = {"runtime_min": 60, "filepath": None}
+        with (
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "replace_book_files", side_effect=replace_side_effect) as replace,
+            mock.patch.object(processing_logic, "_yield_progress"),
+            mock.patch.object(processor, "_verify_output_file", return_value=(True, None)),
+            mock.patch.object(processor, "_place_supplementary_pdf"),
+            mock.patch.object(processor, "_place_sidecar_files"),
+            mock.patch.object(processor, "_apply_file_timestamps"),
+            mock.patch.object(processor, "_cleanup_stale_files"),
+        ):
+            processor._finalize_success(conversion_start_time=0, record_eta=False)
+        downloaded = [c for c in con.execute.call_args_list if "status = 'DOWNLOADED'" in c.args[0]]
+        return downloaded, replace
+
+    def test_single_file_finalize_clears_the_rows(self):
+        downloaded, replace = self._run()
+        assert downloaded[0].args[1][0] == "/data/A/Dracula/A - Dracula.m4b"
+        replace.assert_called_once_with("B0OURS", [], con=mock.ANY)
+
+    def test_a_failing_clear_does_not_fail_the_download(self):
+        downloaded, _replace = self._run(replace_side_effect=sqlite3.OperationalError("no such table: book_files"))
+        assert len(downloaded) == 1
+
+
+class TestSplitSidecarPlacement:
+    """D9: sidecars keep the single-file-equivalent base inside the book's
+    folder, and the cue sheet — which describes ONE file's internal layout — is
+    skipped for a split book."""
+
+    def _processor(self, tmp_path, split, folder="Dracula"):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        out = tmp_path / "out" / folder
+        out.mkdir(parents=True)
+        processor.final_output_path = str(out / "Bram Stoker - Dracula.m4b")
+        if split:
+            processor.split_output_dir = str(out)
+            processor.split_part_paths = [str(out / "Dracula - 1 - One.m4b")]
+        processor.context = {
+            "book_info": {"title": "Dracula", "authors": [{"name": "Bram Stoker"}]},
+            "chapters": [{"title": "One", "start_offset_ms": 0}],
+        }
+        return processor, out
+
+    def _settings(self):
+        return {"conversion": {"create_cue_sheet": True, "save_metadata_json": True}}
+
+    def test_unsplit_book_still_gets_a_cue_sheet(self, tmp_path):
+        processor, out = self._processor(tmp_path, split=False)
+        with mock.patch.object(processing_logic, "load_settings", return_value=self._settings()):
+            processor._place_sidecar_files()
+        assert (out / "Bram Stoker - Dracula.cue").exists()
+
+    def test_split_book_skips_the_cue_sheet(self, tmp_path):
+        processor, out = self._processor(tmp_path, split=True)
+        with mock.patch.object(processing_logic, "load_settings", return_value=self._settings()):
+            processor._place_sidecar_files()
+        assert not (out / "Bram Stoker - Dracula.cue").exists()
+        # The other sidecars still land, at the single-file-equivalent base.
+        assert (out / "Bram Stoker - Dracula.metadata.json").exists()
+
+    def test_flat_guard_moves_the_sidecar_base_into_the_book_folder(self, tmp_path):
+        # With D5's guard the parts live one level below the single-file path, so
+        # the sidecars follow them in rather than being stranded in /data.
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        root = tmp_path / "data"
+        book_dir = root / "Bram Stoker - Dracula"
+        book_dir.mkdir(parents=True)
+        processor.final_output_path = str(root / "Bram Stoker - Dracula.m4b")
+        processor.split_output_dir = str(book_dir)
+        processor.split_part_paths = [str(book_dir / "Dracula - 1 - One.m4b")]
+        assert processor._sidecar_base() == str(book_dir / "Bram Stoker - Dracula")
+
+    def test_plain_split_keeps_todays_sidecar_base(self, tmp_path):
+        processor, out = self._processor(tmp_path, split=True)
+        assert processor._sidecar_base() == str(out / "Bram Stoker - Dracula")
+
+
+class TestSplitPartsAreNotSidecars:
+    """Watch-item: _existing_sidecar_suffixes prefix-matches on the base, and a
+    part filename can legitimately start with that base. The exact-suffix
+    membership test is the only thing keeping a chapter file from being swept,
+    moved or stamped as if it were a sidecar."""
+
+    def test_a_part_sharing_the_sidecar_prefix_is_not_a_sidecar(self, tmp_path):
+        base = tmp_path / "Bram Stoker - Dracula"
+        (tmp_path / "Bram Stoker - Dracula.jpg").write_bytes(b"img")
+        # Worst case: a chapter template that begins with the very base name.
+        (tmp_path / "Bram Stoker - Dracula - 01 - One.m4b").write_bytes(b"audio")
+        (tmp_path / "Bram Stoker - Dracula - 02 - Two.m4b").write_bytes(b"audio")
+        assert processing_logic._existing_sidecar_suffixes(str(base)) == [".jpg"]
+
+    def test_timestamps_stamp_the_parts_once_and_the_sidecar_once(self, tmp_path):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        base = tmp_path / "Bram Stoker - Dracula"
+        parts = [tmp_path / "Bram Stoker - Dracula - 01 - One.m4b", tmp_path / "Bram Stoker - Dracula - 02 - Two.m4b"]
+        for part in parts:
+            part.write_bytes(b"audio")
+        (tmp_path / "Bram Stoker - Dracula.jpg").write_bytes(b"img")
+        processor.final_output_path = f"{base}.m4b"
+        processor.split_output_dir = str(tmp_path)
+        processor.split_part_paths = [str(p) for p in parts]
+        processor.context = {"book_info": {"release_date": "2020-01-02"}}
+        with (
+            mock.patch.object(
+                processing_logic,
+                "load_settings",
+                return_value={"conversion": {"file_timestamp_source": "release_date"}},
+            ),
+            mock.patch("os.utime") as utime,
+        ):
+            processor._apply_file_timestamps()
+        stamped = sorted(c.args[0] for c in utime.call_args_list)
+        assert stamped == sorted([str(p) for p in parts] + [str(tmp_path / "Bram Stoker - Dracula.jpg")])
