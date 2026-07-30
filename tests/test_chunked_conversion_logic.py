@@ -469,6 +469,10 @@ class TestBrandingTrimPipeline:
             subprocess.CompletedProcess(["ffprobe"], 0, total_sec, ""),
             subprocess.CompletedProcess(["ffmpeg"], 0, "", ""),
             subprocess.CompletedProcess(["ffprobe"], 0, total_sec, ""),
+            # Only an MP3 split reaches a fifth registered call (the source
+            # bitrate/sample-rate probe its per-part LAME flags need). Every
+            # other run leaves this entry unconsumed, so it changes nothing.
+            subprocess.CompletedProcess(["ffprobe"], 0, "bit_rate=128000\nsample_rate=44100\n", ""),
         ]
         popen_procs = [download_proc, decrypt_proc]
         if flac_master:
@@ -503,7 +507,7 @@ class TestBrandingTrimPipeline:
         with (
             mock.patch.object(ccl, "load_settings", return_value=settings),
             mock.patch.object(ccl.subprocess, "Popen", side_effect=popen_procs),
-            mock.patch.object(ccl, "_run_registered", side_effect=run_results),
+            mock.patch.object(ccl, "_run_registered", side_effect=run_results) as run_registered,
             mock.patch.object(ccl.process_registry, "register"),
             mock.patch.object(ccl.process_registry, "unregister"),
             mock.patch.object(ccl.os, "scandir", side_effect=lambda _d: iter(entries)),
@@ -513,6 +517,11 @@ class TestBrandingTrimPipeline:
             mock.patch.object(ccl, "_yield_progress"),
         ):
             context, error = ccl.prepare_book_assets("B0X", 1, self.TEMP_DIR)
+        # How many of the side-effect entries above were actually consumed. The
+        # list is deliberately one longer than most runs need, so a test that
+        # cares about the fifth (MP3-only) probe pins this instead of trusting
+        # that the entry stayed unconsumed everywhere else.
+        self.run_registered_calls = run_registered.call_count
         return context, error, written
 
     @staticmethod
@@ -823,27 +832,80 @@ class TestSplitDecision:
         assert context["split_output"] is False
         assert [c["title"] for c in context["chapters"]][:2] == ["Part 1", "Part 2"]
 
-    def test_mp3_output_is_not_split_in_this_phase(self):
+    def test_aac_output_splits_with_reencoded_parts(self):
+        context, _error, _ = self._run_prepare(_split_settings(output_format="m4b"))
+        assert context["split_output"] is True
+        assert context["split_encode_mode"] == "aac"
+        # Only the MP3 variant needs the master's own audio parameters.
+        assert context["mp3_source_bitrate_bps"] is None
+        assert context["mp3_source_sample_rate"] is None
+
+    def test_mp3_output_splits_with_lame_parts(self):
+        # Phase 3: the format no longer blocks the split — MP3 gets N LAME
+        # encodes in place of its single pass.
         context, error, _ = self._run_prepare(_split_settings(output_format="mp3"))
         assert error is None
-        assert context["split_output"] is False
+        assert context["split_output"] is True
+        assert context["split_encode_mode"] == "mp3"
         assert [c["title"] for c in context["chapters"]] == ["One", "Two", "Three"]
 
-    def test_lossless_remux_is_not_split_in_this_phase(self):
+    def test_mp3_split_probes_the_master_once_for_the_whole_book(self):
+        # One probe, carried in the context: N parts probing independently would
+        # let a single failed probe give one book parts at two bitrates.
+        context, _error, _ = self._run_prepare(_split_settings(output_format="mp3"))
+        assert context["mp3_source_bitrate_bps"] == 128_000
+        assert context["mp3_source_sample_rate"] == 44_100
+        # Exactly one registered subprocess more than the non-MP3 prepare path
+        # runs: the four shared ones plus this probe. Pinning the count means a
+        # future fifth call on the shared path can't hide in the spare entry.
+        assert self.run_registered_calls == 5
+
+    def test_mp3_split_source_probe_cancellation_is_a_clean_cancel(self):
+        # A SIGTERMed probe is the job stopping, not an unreadable master: the
+        # book must come back as a cancel (None, None), never as an ERROR.
+        with mock.patch.object(ccl, "_probe_source_audio_params", side_effect=ccl._ProbeCancelled):
+            context, error, _ = self._run_prepare(_split_settings(output_format="mp3"))
+        assert context is None
+        assert error is None
+
+    def test_lossless_remux_splits_with_copy_cut_parts(self):
+        # D14 passed, so the lossless path splits too — by cutting the AAC
+        # master with "-c copy" rather than re-encoding it.
         settings = _split_settings(output_format="original")
         context, error, _ = self._run_prepare(settings)
         assert error is None
         assert context["audio_file"].endswith(".m4b")
-        assert context["split_output"] is False
+        assert context["split_output"] is True
+        assert context["split_encode_mode"] == "copy"
 
-    def test_lossless_falling_back_to_flac_still_splits(self):
-        # A FLAC master can't be remuxed losslessly, so that title takes the
-        # re-encode path after all — and the re-encode path can split.
+    def test_lossless_falling_back_to_flac_splits_by_re_encoding(self):
+        # A FLAC master can't be cut into .m4b parts with -c copy, so that title
+        # takes the AAC re-encode path after all — the D14 spike's stated scope
+        # limit, and the behavior Phase 2 already had.
         settings = _split_settings(output_format="original")
         context, error, _ = self._run_prepare(settings, flac_master=True)
         assert error is None
         assert context["audio_file"].endswith(".flac")
         assert context["split_output"] is True
+        assert context["split_encode_mode"] == "aac"
+
+    @pytest.mark.parametrize("output_format", ["m4b", "mp3", "original"])
+    def test_auto_chunked_book_is_not_split_in_any_format(self, output_format):
+        # D7 holds for all three variants: synthetic "Part N" markers exist to
+        # give the encode parallel work and must never become files.
+        chapters = [{"title": "Whole Book", "start_offset_ms": 0, "length_ms": 3_600_000}]
+        context, error, _ = self._run_prepare(_split_settings(output_format=output_format), chapters=chapters)
+        assert error is None
+        assert context["split_output"] is False
+        assert context["split_encode_mode"] is None
+
+    @pytest.mark.parametrize("output_format", ["m4b", "mp3", "original"])
+    def test_setting_off_never_splits_in_any_format(self, output_format):
+        context, error, _ = self._run_prepare({"conversion": {"output_format": output_format, "chapters": {}}})
+        assert error is None
+        assert context["split_output"] is False
+        assert context["split_encode_mode"] is None
+        assert [c["title"] for c in context["chapters"]] == ["One", "Two", "Three"]
 
     def test_book_tags_file_drops_the_chapters_and_the_book_title(self):
         _context, _error, written = self._run_prepare(_split_settings())
@@ -989,6 +1051,210 @@ class TestEncodeChapterChunkSplitTagging:
             str(tmp_path / "chunk_001.m4b"),
         ]
         assert not (tmp_path / "chunk_001.ffmeta").exists()
+
+
+class TestEncodeChapterChunkSplitVariants:
+    """v0.24.0 Phase 3: the same cut, three ways. "copy" cuts the AAC master
+    without re-encoding it, "mp3" runs LAME per part and muxes the cover inline,
+    and "aac" is Phase 2's re-encode, unchanged."""
+
+    MASTER = "/tmp/x/master_intermediate.m4b"
+    CHUNK = {"index": 1, "total_chunks": 3, "start": 600.0, "duration": 600.0}
+
+    def _context(self, tmp_path, mode, cover_file=None, **overrides):
+        book_tags = tmp_path / "book_tags.txt"
+        book_tags.write_text(";FFMETADATA1\nalbum=Test Book\nartist=An Author\n", encoding="utf-8")
+        context = {
+            "decryption_args": [],
+            "audio_file": self.MASTER,
+            "split_output": True,
+            "split_encode_mode": mode,
+            "part_titles": ["One", "Two", "Three"],
+            "book_tags_file": str(book_tags),
+            "cover_file": cover_file,
+        }
+        context.update(overrides)
+        return context
+
+    def _encode(self, tmp_path, context, settings=None):
+        proc = mock.MagicMock()
+        proc.returncode = 0
+        proc.communicate.return_value = (b"", b"")
+        with (
+            mock.patch.object(ccl, "load_settings", return_value=settings or {}),
+            mock.patch.object(ccl.subprocess, "Popen", return_value=proc) as popen,
+            mock.patch.object(ccl.process_registry, "register"),
+            mock.patch.object(ccl.process_registry, "unregister"),
+        ):
+            result = ccl.encode_chapter_chunk("B0X", 1, str(tmp_path), self.CHUNK, context)
+        return result, popen.call_args.args[0]
+
+    # --- Lossless ("copy") ------------------------------------------------
+
+    def test_copy_cut_is_the_whole_command(self, tmp_path):
+        # Pinned whole, because the spike proved this exact shape accurate to
+        # within 8 ms: "-ss" BEFORE the input (input seeking, which is what
+        # makes it both fast and frame-accurate) and "-t" after it.
+        _result, cmd = self._encode(tmp_path, self._context(tmp_path, "copy"))
+        assert cmd == [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            "600.0",
+            "-i",
+            self.MASTER,
+            "-i",
+            str(tmp_path / "chunk_001.ffmeta"),
+            "-t",
+            "600.0",
+            "-map",
+            "0:a",
+            "-map_metadata",
+            "1",
+            "-map_chapters",
+            "-1",
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart+use_metadata_tags",
+            str(tmp_path / "chunk_001.m4b"),
+        ]
+
+    def test_copy_cut_carries_no_encoder_flags(self, tmp_path):
+        # The whole point of the lossless variant: nothing re-encodes, whatever
+        # the AAC quality setting says.
+        settings = {"conversion": {"quality": "Low"}}
+        _result, cmd = self._encode(tmp_path, self._context(tmp_path, "copy"), settings=settings)
+        assert "-c:a" not in cmd
+        assert "-b:a" not in cmd
+        assert "aac" not in cmd
+
+    def test_copy_cut_still_drops_the_masters_chapter_track(self, tmp_path):
+        # Load-bearing for a second reason here (D14 spike): the AAC-copy master
+        # carries a QuickTime chapter TRACK, and copying without this leaves a
+        # dangling tref/chap reference that warns on every later read.
+        _result, cmd = self._encode(tmp_path, self._context(tmp_path, "copy"))
+        assert cmd[cmd.index("-map_chapters") + 1] == "-1"
+
+    def test_copy_cut_never_inlines_a_cover(self, tmp_path):
+        # mp4 can't hold an attached picture next to +use_metadata_tags, so the
+        # cover still comes from AtomicParsley at promotion time.
+        cover = tmp_path / "cover.jpg"
+        cover.write_bytes(b"jpeg")
+        _result, cmd = self._encode(tmp_path, self._context(tmp_path, "copy", cover_file=str(cover)))
+        assert str(cover) not in cmd
+        assert "attached_pic" not in cmd
+
+    # --- MP3 --------------------------------------------------------------
+
+    def test_mp3_part_is_the_whole_command(self, tmp_path):
+        cover = tmp_path / "cover.jpg"
+        cover.write_bytes(b"jpeg")
+        context = self._context(
+            tmp_path,
+            "mp3",
+            cover_file=str(cover),
+            mp3_source_bitrate_bps=None,
+            mp3_source_sample_rate=None,
+        )
+        _result, cmd = self._encode(tmp_path, context)
+        assert cmd == [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            "600.0",
+            "-i",
+            self.MASTER,
+            "-i",
+            str(tmp_path / "chunk_001.ffmeta"),
+            "-i",
+            str(cover),
+            "-t",
+            "600.0",
+            "-map",
+            "0:a",
+            "-map_metadata",
+            "1",
+            "-map_chapters",
+            "-1",
+            "-map",
+            "2:v",
+            "-c:v",
+            "copy",
+            "-disposition:v",
+            "attached_pic",
+            "-metadata:s:v",
+            "title=Album cover",
+            "-metadata:s:v",
+            "comment=Cover (front)",
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "2",
+            "-compression_level",
+            "0",
+            "-id3v2_version",
+            "3",
+            str(tmp_path / "chunk_001.mp3"),
+        ]
+
+    def test_mp3_part_reuses_the_shared_lame_flag_matrix(self, tmp_path):
+        # Same resolver the single-pass encoder uses, fed the source parameters
+        # prepare probed once for the book.
+        settings = {
+            "conversion": {
+                "mp3": {"target": "bitrate", "bitrate_kbps": 96, "match_source_bitrate": True, "max_sample_rate": 22050}
+            }
+        }
+        context = self._context(tmp_path, "mp3", mp3_source_bitrate_bps=128_000, mp3_source_sample_rate=44_100)
+        _result, cmd = self._encode(tmp_path, context, settings=settings)
+        expected = ccl.build_mp3_flags(settings["conversion"]["mp3"], 128_000, 44_100)
+        start = cmd.index("libmp3lame") + 1
+        assert cmd[start : start + len(expected)] == expected
+        assert expected[:2] == ["-b:a", "128k"]
+
+    def test_mp3_part_carries_no_mp4_flags(self, tmp_path):
+        # "-movflags" is an mp4 muxer option; ffmpeg rejects it for an .mp3.
+        _result, cmd = self._encode(tmp_path, self._context(tmp_path, "mp3"))
+        assert "-movflags" not in cmd
+        assert cmd[-1].endswith(".mp3")
+
+    def test_mp3_part_without_a_cover_maps_no_picture(self, tmp_path):
+        _result, cmd = self._encode(tmp_path, self._context(tmp_path, "mp3"))
+        assert "attached_pic" not in cmd
+        assert "2:v" not in cmd
+        # ...and the metadata input is still the only extra one.
+        assert cmd.count("-i") == 2
+
+    def test_mp3_part_tags_come_from_the_same_metadata_writer(self, tmp_path):
+        self._encode(tmp_path, self._context(tmp_path, "mp3"))
+        written = (tmp_path / "chunk_001.ffmeta").read_text(encoding="utf-8")
+        assert "album=Test Book\n" in written
+        assert "title=Two\n" in written
+        assert "track=2/3\n" in written
+        assert "[CHAPTER]" not in written
+
+    # --- AAC (Phase 2, unchanged) -----------------------------------------
+
+    def test_aac_mode_is_phase_twos_command(self, tmp_path):
+        _result, cmd = self._encode(tmp_path, self._context(tmp_path, "aac"))
+        assert cmd[cmd.index("-c:a") + 1] == "aac"
+        assert cmd[cmd.index("-movflags") + 1] == "+faststart+use_metadata_tags"
+        assert cmd[-1] == str(tmp_path / "chunk_001.m4b")
+
+    def test_missing_mode_key_still_re_encodes_as_aac(self, tmp_path):
+        # Defensive: a context that predates the key must not raise or silently
+        # produce an uncut copy.
+        context = self._context(tmp_path, "aac")
+        del context["split_encode_mode"]
+        _result, cmd = self._encode(tmp_path, context)
+        assert cmd[cmd.index("-c:a") + 1] == "aac"
 
 
 class TestEncodeChapterChunkTrim:

@@ -839,10 +839,6 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
         # the one today's pipeline produces, and no extra file is written.
         #
         # The gates, in order:
-        #   - the title must actually be taking the chunked AAC re-encode. MP3
-        #     and the lossless remux keep their single-file output until Phase 3,
-        #     and the D6 merge below must not quietly reshape THEIR chapter
-        #     markers in the meantime.
         #   - D7: a synthetic auto-chunked "Part N" book is never split. Those
         #     markers exist only to give the re-encode parallel work; cutting
         #     them into files would ship the book as a pile of arbitrary
@@ -851,49 +847,104 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
         #     chain, folding the very list the user would otherwise have got.
         #   - D7 again: at least two chapters must survive that merge. One
         #     chapter is not a split, it is the single file we already make.
+        #
+        # All three output formats pass this gate (Phase 3 — Phase 2 shipped the
+        # AAC path alone and skipped the other two here, because reshaping their
+        # chapter markers before anything could split them would have changed
+        # their single-file output). What differs per format is only HOW each
+        # part is cut, which is what `split_encode_mode` below names:
+        #   "aac"  — the chunked AAC re-encode, exactly as Phase 2 (also where a
+        #            lossless title whose decrypt fell back to FLAC ends up, since
+        #            a FLAC master cannot be copied into an .m4b part).
+        #   "copy" — the lossless variant: the same cut with "-c copy" instead of
+        #            encode flags, straight off the AAC master (D14's spike put
+        #            the worst boundary error at 7.7 ms).
+        #   "mp3"  — N independent LAME encodes in place of the single-pass one.
         split_output = False
         part_titles = None
         book_tags_path = None
+        split_encode_mode = None
+        mp3_source_bitrate_bps = None
+        mp3_source_sample_rate = None
         if chapter_settings.get("split_by_chapter", False) and not auto_chunked:
             # Read off the settings, like the branding-trim gate above, rather
             # than off the caller's `lossless` flag: they are the same axis (the
             # orchestrator sets that flag from this very value), and one of them
             # has to be authoritative here.
             output_format = resolve_output_format(settings)
+            # Named for the unsplit path it was written for, where this exact
+            # condition is what sends a book to the lossless remux. In SPLIT mode
+            # it only means "the master is AAC, so its chapters can be copy-cut"
+            # — such a book never reaches _remux_and_finalize at all. Same test,
+            # two destinations; kept as one name so the call sites stay put.
             will_remux_lossless = output_format == "original" and audio_file.lower().endswith(".m4b")
-            if output_format == "mp3" or will_remux_lossless:
+            # The setting is in SECONDS; the transform takes milliseconds.
+            # A hand-edited settings.json can hold anything, and anything
+            # unusable means "no merge" rather than an exception.
+            try:
+                min_ms = max(0, int(float(chapter_settings.get("minimum_file_duration", 0) or 0))) * 1000
+            except (TypeError, ValueError):
+                min_ms = 0
+            merged_chapters = merge_short_chapters(chapters_list, min_ms)
+            if len(merged_chapters) >= 2:
+                merged_away = len(chapters_list) - len(merged_chapters)
+                if merged_away:
+                    log.info(
+                        f"PREPARE ({asin}): Merged {merged_away} chapter(s) shorter than "
+                        f"{min_ms / 1000:g}s into the chapter that follows them."
+                    )
+                chapters_list = merged_chapters
+                split_output = True
+                if output_format == "mp3":
+                    split_encode_mode = "mp3"
+                elif will_remux_lossless:
+                    # See above: here the flag reads as "the master is AAC and
+                    # can be cut with -c copy", not "this book will be remuxed".
+                    split_encode_mode = "copy"
+                else:
+                    split_encode_mode = "aac"
                 log.info(
-                    f"PREPARE ({asin}): Per-chapter splitting is on, but this title's output format still "
-                    f"produces a single file; leaving the chapter list untouched."
+                    f"PREPARE ({asin}): Splitting this book into {len(chapters_list)} chapter file(s) "
+                    f"({split_encode_mode} parts)."
                 )
             else:
-                # The setting is in SECONDS; the transform takes milliseconds.
-                # A hand-edited settings.json can hold anything, and anything
-                # unusable means "no merge" rather than an exception.
-                try:
-                    min_ms = max(0, int(float(chapter_settings.get("minimum_file_duration", 0) or 0))) * 1000
-                except (TypeError, ValueError):
-                    min_ms = 0
-                merged_chapters = merge_short_chapters(chapters_list, min_ms)
-                if len(merged_chapters) >= 2:
-                    merged_away = len(chapters_list) - len(merged_chapters)
-                    if merged_away:
-                        log.info(
-                            f"PREPARE ({asin}): Merged {merged_away} chapter(s) shorter than "
-                            f"{min_ms / 1000:g}s into the chapter that follows them."
-                        )
-                    chapters_list = merged_chapters
-                    split_output = True
-                    log.info(f"PREPARE ({asin}): Splitting this book into {len(chapters_list)} chapter file(s).")
-                else:
-                    # Deliberately keep the UNMERGED list here: the book is going
-                    # out as a single file after all, and its chapter markers
-                    # should be the ones every other single-file conversion
-                    # produces rather than a merge nothing consumed.
-                    log.info(
-                        f"PREPARE ({asin}): Per-chapter splitting is on, but fewer than two chapters survive the "
-                        f"minimum-duration merge; writing a single file."
-                    )
+                # Deliberately keep the UNMERGED list here: the book is going
+                # out as a single file after all, and its chapter markers
+                # should be the ones every other single-file conversion
+                # produces rather than a merge nothing consumed.
+                log.info(
+                    f"PREPARE ({asin}): Per-chapter splitting is on, but fewer than two chapters survive the "
+                    f"minimum-duration merge; writing a single file."
+                )
+
+        # The MP3 quality flags depend on the master's own bitrate/sample rate
+        # (see build_mp3_flags), which the single-pass encoder probes once for
+        # the whole book. Probe once here for the same reason: N parts asking N
+        # times would cost N ffprobes for one answer that cannot change, and a
+        # probe that failed for only some of them would give a single book parts
+        # at two different bitrates.
+        #
+        # What this freezes into the context is the PROBE RESULT, not the quality
+        # settings: those are still read per chunk in encode_chapter_chunk, the
+        # same way the AAC path has always read conversion.quality per chunk.
+        if split_encode_mode == "mp3":
+            try:
+                mp3_source_bitrate_bps, mp3_source_sample_rate = _probe_source_audio_params(audio_file, job_id)
+            except _ProbeCancelled:
+                # A cancelled probe is the job stopping, not an unreadable
+                # master: take the clean cancel exit rather than falling into the
+                # generic handler below, which would mark the book ERROR.
+                log.info(f"PREPARE ({asin}): Cancelled during the MP3 source probe.")
+                return None, None
+            if mp3_source_bitrate_bps is None and mp3_source_sample_rate is None:
+                # Not fatal — build_mp3_flags falls back per its spec — but with
+                # "match source bitrate" on, a silent failure quietly changes
+                # every part's bitrate. Say so once, so app.log can answer "why
+                # are these not at the source bitrate?" later.
+                log.warning(
+                    f"PREPARE ({asin}): Could not read the master's audio parameters; the chapter files will "
+                    f"use the configured MP3 bitrate instead of matching the source."
+                )
 
         # User metadata overrides (custom title/author) win over the Audible
         # values for the embedded tags, matching what the UI displays.
@@ -1054,6 +1105,17 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             # FFMETADATA holding the book-level tags with no chapter atoms; the
             # base every per-part metadata file is built on.
             "book_tags_file": book_tags_path,
+            # How each part is cut: "aac" (re-encode), "copy" (lossless cut off
+            # the AAC master) or "mp3" (per-part LAME). None when not splitting;
+            # encode_chapter_chunk reads it as "aac" in that case, which is the
+            # single behavior that path had before splitting existed.
+            "split_encode_mode": split_encode_mode,
+            # The master's own bitrate/sample rate, probed once for the whole
+            # book. Populated only for "mp3" parts (the one variant whose flags
+            # depend on them); either value may be None when the probe could not
+            # read it, which build_mp3_flags handles.
+            "mp3_source_bitrate_bps": mp3_source_bitrate_bps,
+            "mp3_source_sample_rate": mp3_source_sample_rate,
         }, None
 
     except Exception as e:
@@ -1110,15 +1172,18 @@ def _write_part_metadata(asin, temp_dir, chunk_index, total_chunks, context):
     once by prepare from `conversion.chapters.chapter_title_template` — and
     `track=N/M`. No `[CHAPTER]` section: the file is the chapter.
 
-    What `track=N/M` actually becomes on disk: the encode runs with
-    `-movflags +use_metadata_tags`, which makes the mp4 muxer write Apple `mdta`
-    keys instead of the classic iTunes `ilst` atoms, so the value is carried as
-    an `mdta` key rather than a `trkn` atom. That is the same tag shape today's
-    merged single-file books already ship with, and ffprobe (and the players
-    that read mdta) see it fine — but it means part ORDER must not be assumed to
-    come from a track atom. The durable ordering guarantee is the zero-padded
-    `{ch}` in the part filenames (see render_chapter_filename), which sorts
-    correctly in every file browser and player regardless of tags.
+    What `track=N/M` actually becomes on disk depends on the container. An .m4b
+    part is written with `-movflags +use_metadata_tags`, which makes the mp4
+    muxer write Apple `mdta` keys instead of the classic iTunes `ilst` atoms, so
+    the value is carried as an `mdta` key rather than a `trkn` atom; that is the
+    same tag shape today's merged single-file books already ship with. An .mp3
+    part gets an ordinary id3v2 `TRCK` frame instead. Either way part ORDER must
+    not be assumed to come from a track atom: the durable ordering guarantee is
+    the zero-padded `{ch}` in the part filenames (see render_chapter_filename),
+    which sorts correctly in every file browser and player regardless of tags.
+
+    The same file serves all three split variants — the tags a part carries do
+    not depend on how its audio was cut.
     """
     part_titles = context.get("part_titles") or []
     part_title = part_titles[chunk_index] if chunk_index < len(part_titles) else ""
@@ -1156,6 +1221,12 @@ def encode_chapter_chunk(asin, job_id, temp_dir, chunk_info, context):
     Handles Phase 2 of conversion: encoding a single chapter of the book.
     This function is designed to be run in parallel in the global worker pool.
 
+    In split mode the chunk is not an intermediate but one of the book's final
+    files, and the context's "split_encode_mode" says how to cut it: "aac" (the
+    re-encode this function has always done), "copy" (lossless, no encode) or
+    "mp3" (per-part LAME, replacing the single-pass encoder). Everything else —
+    the seek, the duration cap, the per-part tagging — is shared by all three.
+
     Args:
         asin (str): The ASIN of the book.
         job_id (int): The parent job ID for logging.
@@ -1178,7 +1249,19 @@ def encode_chapter_chunk(asin, job_id, temp_dir, chunk_info, context):
         "Low": ["-c:a", "aac", "-b:a", "64k"],
     }.get(quality, ["-c:a", "aac", "-b:a", "128k"])
 
-    output_path = os.path.join(temp_dir, f"chunk_{chunk_index:03d}.m4b")
+    # Which of the three split variants this chunk is (v0.24.0 Phase 3; see the
+    # 2b gate in prepare_book_assets). Outside split mode there is exactly one
+    # behavior — the AAC re-encode this path has always done — so the mode is
+    # not even consulted, and an older context that predates the key reads as
+    # "aac" rather than raising.
+    split_output = bool(context.get("split_output"))
+    split_mode = (context.get("split_encode_mode") or "aac") if split_output else "aac"
+
+    # The container follows the variant, because ffmpeg picks the muxer off the
+    # extension: MP3 parts must be written as ".mp3" (and are the book's final
+    # files), everything else stays in the ".m4b" the merge path also consumes.
+    chunk_ext = ".mp3" if split_mode == "mp3" else ".m4b"
+    output_path = os.path.join(temp_dir, f"chunk_{chunk_index:03d}{chunk_ext}")
     # Branding trim (Phase 6): chunk starts are in the trimmed OUTPUT timeline,
     # so the seek into the (untrimmed) master has to add the intro span back.
     # 0 when the trim is inactive, leaving the seek exactly as it was. The
@@ -1190,36 +1273,83 @@ def encode_chapter_chunk(asin, job_id, temp_dir, chunk_info, context):
     # intermediate that the merge will tag afterwards — it IS one of the book's
     # output files — so it is tagged here, at encode time, from a per-part
     # FFMETADATA input instead of being stripped with "-map_metadata -1".
-    # `+use_metadata_tags` matches the merge path, which needs it for the custom
-    # uppercase tags (PUBLISHER, AUDIBLE_ASIN, series...); `+faststart` puts the
-    # moov atom first so a part starts playing without reading the whole file.
-    # The cover is NOT added here for the same reason the merge doesn't add it:
-    # ffmpeg's mp4 muxer cannot write an attached picture alongside
-    # use_metadata_tags, so AtomicParsley embeds it per part at finalize time.
     #
     # The metadata input has to be spliced in BEFORE "-t": ffmpeg reads options
     # positionally, so an "-i" following "-t" would turn that duration cap into
     # an INPUT option on the metadata file and let the chunk run to the end of
-    # the master. With splitting off the assembled command below is byte-for-byte
-    # the one this path has always run.
+    # the master. The same goes for the MP3 variant's cover input below. With
+    # splitting off the assembled command is byte-for-byte the one this path has
+    # always run.
     #
-    # "-map_chapters -1" is load-bearing (D8: the file IS the chapter, so it
-    # carries no chapter atoms of its own): without it ffmpeg copies the chapter
-    # atoms of the first input that has any — the decrypted master, when the AAC
-    # Copy strategy preserved them — sliced against this chunk's -ss/-t window
-    # into a zero-length marker for the previous chapter, one spanning the file,
-    # and one pinned to its end. The merge path never saw this because its concat
-    # step rebuilds the chapter atoms from chapters.txt afterwards.
-    if context.get("split_output"):
+    # "-map_chapters -1" is load-bearing twice over (D8: the file IS the chapter,
+    # so it carries no chapter atoms of its own). Without it ffmpeg copies the
+    # chapter atoms of the first input that has any — the decrypted master, when
+    # the AAC Copy strategy preserved them — sliced against this chunk's -ss/-t
+    # window into a zero-length marker for the previous chapter, one spanning the
+    # file, and one pinned to its end. On the "-c copy" variant it also drops the
+    # master's QuickTime chapter TRACK, which would otherwise leave a dangling
+    # tref/chap reference that makes every later ffmpeg/ffprobe read of the part
+    # warn (D14's spike). The merge path never saw either problem because its
+    # concat step rebuilds the chapter atoms from chapters.txt afterwards.
+    if split_output:
         metadata_path = _write_part_metadata(asin, temp_dir, chunk_index, total_chunks, context)
         if not metadata_path:
             return None
         metadata_args = ["-i", metadata_path]
-        output_args = (
-            ["-map", "0:a", "-map_metadata", "1", "-map_chapters", "-1"]
-            + audio_flags
-            + ["-movflags", "+faststart+use_metadata_tags"]
-        )
+
+        # Cover art, MP3 only. The mp4 muxer cannot write an attached picture
+        # alongside +use_metadata_tags, so .m4b parts get theirs from
+        # AtomicParsley at finalize time exactly as the merged single file does;
+        # MP3 has no such conflict and carries the APIC frame straight out of
+        # this one pass, which is why _promote_split_parts skips AtomicParsley
+        # for .mp3 parts. Input order: 0 = master, 1 = FFMETADATA, 2 = cover.
+        cover_file = context.get("cover_file")
+        inline_cover = split_mode == "mp3" and bool(cover_file and os.path.exists(cover_file))
+        if inline_cover:
+            metadata_args += ["-i", cover_file]
+
+        output_args = ["-map", "0:a", "-map_metadata", "1", "-map_chapters", "-1"]
+        if inline_cover:
+            output_args += [
+                "-map",
+                "2:v",
+                "-c:v",
+                "copy",
+                "-disposition:v",
+                "attached_pic",
+                "-metadata:s:v",
+                "title=Album cover",
+                "-metadata:s:v",
+                "comment=Cover (front)",
+            ]
+
+        if split_mode == "copy":
+            # The lossless variant: no encode at all, just a cut. The surrounding
+            # flags are the same ones the AAC variant uses, and D14's spike
+            # confirmed they do not move the cut (identical PCM at the boundary).
+            output_args += ["-c", "copy"]
+        elif split_mode == "mp3":
+            # The same LAME flag matrix the single-pass encoder resolves, off the
+            # source parameters prepare probed once for the whole book.
+            output_args += (
+                ["-c:a", "libmp3lame"]
+                + build_mp3_flags(
+                    settings.get("conversion", {}).get("mp3", {}),
+                    context.get("mp3_source_bitrate_bps"),
+                    context.get("mp3_source_sample_rate"),
+                )
+                + ["-id3v2_version", "3"]
+            )
+        else:
+            output_args += audio_flags
+
+        if split_mode != "mp3":
+            # mp4 only: `+use_metadata_tags` matches the merge path, which needs
+            # it for the custom uppercase tags (PUBLISHER, AUDIBLE_ASIN,
+            # series...); `+faststart` puts the moov atom first so a part starts
+            # playing without reading the whole file. Neither exists for MP3,
+            # where the id3v2 frames above already carry both.
+            output_args += ["-movflags", "+faststart+use_metadata_tags"]
     else:
         metadata_args = []
         output_args = ["-map", "0:a"] + audio_flags + ["-map_metadata", "-1"]
@@ -1754,9 +1884,11 @@ def _embed_cover_art(asin, job_id, output_path, cover_file):
 
     Despite the leading underscore this helper is DELIBERATELY consumed from
     another module: processing_logic's split finalize (D8) covers each
-    per-chapter file with it while the part is still in the temp dir, so a split
+    per-chapter .m4b with it while the part is still in the temp dir, so a split
     book's art is embedded by exactly the same code path as a merged book's.
     Treat it as having an external caller before renaming or reshaping it.
+    (AtomicParsley is mp4-only, so .mp3 parts are not routed here at all — they
+    mux their APIC frame inline during the encode.)
     """
     if not cover_file or not os.path.exists(cover_file):
         log.warning(f"MERGE ({asin}): No cover file available; skipping cover art embedding.")

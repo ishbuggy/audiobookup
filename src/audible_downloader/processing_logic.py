@@ -75,7 +75,10 @@ _COMPLETION_TIMEOUT_FLOOR_SEC = 7200
 # The MP3 path's completion budget, as a multiple of the book's own runtime.
 # Three times real time comfortably covers the download, the decrypt and a
 # single-pass LAME encode even on slow hardware; see _completion_timeout for
-# why that path cannot use the AAC estimator's rate.
+# why that path cannot use the AAC estimator's rate. A SPLIT MP3 book (v0.24.0)
+# takes the same budget while doing N parallel LAME encodes instead of one pass
+# — which is strictly less wall-clock work for the same audio, so the budget
+# stays conservative rather than becoming tight.
 _MP3_TIMEOUT_RUNTIME_MULTIPLE = 3
 
 # Every file that can end up sharing a finished audiobook's base name: the
@@ -1059,7 +1062,11 @@ class BookProcessor:
           single-threaded LAME pass over a very long book runs well past that
           ceiling, and the wait would abort an encode that is progressing fine.
           Scale off the book's own runtime instead, which is the one quantity
-          that actually bounds a single-pass encode.
+          that actually bounds a single-pass encode. A split MP3 book (v0.24.0)
+          keys off the same format and so takes the same budget, even though its
+          work is N parallel LAME encodes rather than one pass — it finishes
+          sooner than the single pass the multiple was sized for, so the budget
+          only gets more generous, never tighter.
 
         The MP3 budget takes the LARGER of the runtime model and the old estimator
         model, so the change can only ever lengthen the grace period. The runtime
@@ -1245,8 +1252,16 @@ class BookProcessor:
         #               book quietly re-encodes to .m4b via the chunk path below)
         #   mp3      -> single-pass LAME encode (one task, no chunk/merge)
         #   m4b      -> the per-chapter AAC re-encode + merge (default)
+        #
+        # ...unless this book is being split (v0.24.0 Phase 3), which overrides
+        # the first two: a split book has no single file to remux or to encode in
+        # one pass, so all three formats route through the chunk fan-out below
+        # and differ only in how each chunk is cut (the context's
+        # "split_encode_mode"). The chunks then finalize in place rather than
+        # merging, exactly as the AAC split already does.
         master_is_aac = str(self.context.get("audio_file", "")).lower().endswith(".m4b")
-        if fmt == "original" and master_is_aac:
+        split_output = bool(self.context.get("split_output"))
+        if fmt == "original" and master_is_aac and not split_output:
             log.info(f"TASK-PREPARE ({self.asin}): Original format — skipping encode, submitting remux task.")
             _yield_progress(self.asin, "Finalizing (lossless)...", 90, self.job_id)
             remux_task = Task(
@@ -1256,7 +1271,7 @@ class BookProcessor:
             )
             task_runner.submit_task(remux_task)
             return
-        if fmt == "mp3":
+        if fmt == "mp3" and not split_output:
             log.info(f"TASK-PREPARE ({self.asin}): MP3 format — submitting single-pass MP3 encode task.")
             _yield_progress(self.asin, "Encoding MP3...", 30, self.job_id)
             # One task per book at ENCODE_CHAPTER priority: it *is* the encode
@@ -1269,7 +1284,11 @@ class BookProcessor:
             )
             task_runner.submit_task(mp3_task)
             return
-        if fmt == "original":
+        # A lossless title reaching the fan-out has one of two reasons, and only
+        # the FLAC one is a fallback worth reporting: a split lossless book takes
+        # this path deliberately, cutting its parts with "-c copy" and never
+        # re-encoding anything.
+        if fmt == "original" and not master_is_aac:
             log.info(
                 f"TASK-PREPARE ({self.asin}): Original format requested but the fast decrypt fell back to FLAC; "
                 f"re-encoding this title to .m4b."
@@ -1364,10 +1383,21 @@ class BookProcessor:
             naming.get("chapter_file_template") or "{title} - {ch} - {ch_title}", self.asin
         )
 
-        # The reserved single-file path decides both halves of where parts live:
-        # its directory (the book's folder) and its extension (the container the
-        # chunks were encoded into).
-        base_root, ext = os.path.splitext(self.final_output_path)
+        # The reserved single-file path decides WHERE the parts live — its
+        # directory is the book's folder — but not what they are called at the
+        # end. Its extension came from a load_settings() taken before the
+        # download started, while prepare_book_assets took its own read once the
+        # download and decrypt had finished and picked the container each part is
+        # actually encoded into ("split_encode_mode"). A user flipping Output
+        # Format mid-download would otherwise get LAME audio in files named
+        # ".m4b" (or the reverse) — mislabeled files the scanner and the UI both
+        # take at face value. So derive the extension from prepare's decision,
+        # using the same expression encode_chapter_chunk names its chunks with:
+        # container, chunk extension and part filename then agree by
+        # construction, and _promote_split_parts' AtomicParsley skip (which keys
+        # off the chunk extension) stays correct in both flip directions.
+        base_root = os.path.splitext(self.final_output_path)[0]
+        ext = ".mp3" if (self.context.get("split_encode_mode") or "aac") == "mp3" else ".m4b"
         folder = os.path.dirname(base_root)
         base_stem = os.path.basename(base_root)
         if os.path.abspath(folder) == os.path.abspath("/data"):
@@ -2132,17 +2162,18 @@ class BookProcessor:
 
     def _promote_split_parts(self):
         """
-        Embed the cover art in every encoded part and move each one to its final
-        path. Returns True only when all of them landed.
+        Embed the cover art in every encoded .m4b part and move each one to its
+        final path. Returns True only when all of them landed.
 
-        Each part is covered while it is still in the temp dir, so AtomicParsley
-        never rewrites a file that is already visible in the library, and is then
-        moved to "<target>.part" before an os.replace onto the real name — the
-        same atomic-promotion pattern the MP3 encoder uses, so a half-copied part
-        is never readable at its final path. shutil.move does the moving because
-        the temp dir and /data are separate volumes in the shipped container and
-        os.replace across devices raises EXDEV; the final os.replace stays within
-        one directory, so it stays atomic.
+        Each .m4b part is covered while it is still in the temp dir, so
+        AtomicParsley never rewrites a file that is already visible in the
+        library; .mp3 parts already carry their cover from the encode itself.
+        Every part is then moved to "<target>.part" before an os.replace onto the
+        real name — the same atomic-promotion pattern the MP3 encoder uses, so a
+        half-copied part is never readable at its final path. shutil.move does the
+        moving because the temp dir and /data are separate volumes in the shipped
+        container and os.replace across devices raises EXDEV; the final os.replace
+        stays within one directory, so it stays atomic.
 
         A failure part-way removes what already landed. Half a book in the
         library is worse than none of it: nothing tracks the parts yet (the DB
@@ -2185,7 +2216,13 @@ class BookProcessor:
                     )
                     self._remove_promoted_parts(promoted, targets)
                     return False
-                _embed_cover_art(self.asin, self.job_id, chunk_path, cover_file)
+                # AtomicParsley writes the mp4 "covr" atom and understands
+                # nothing else, so an .mp3 part is left alone here: its cover is
+                # already inside it as an id3v2 APIC frame, muxed during the
+                # encode (see encode_chapter_chunk). Running AtomicParsley over
+                # one would at best waste a process per part.
+                if os.path.splitext(chunk_path)[1].lower() != ".mp3":
+                    _embed_cover_art(self.asin, self.job_id, chunk_path, cover_file)
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 staged = f"{target}.part"
                 shutil.move(chunk_path, staged)

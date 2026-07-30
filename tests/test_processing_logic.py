@@ -3040,12 +3040,24 @@ SPLIT_CHAPTERS = [
 ]
 
 
-def _run_split_prepare(chapters=None, naming=None, split_output=True, book_row=BOOK_ROW):
+def _run_split_prepare(
+    chapters=None,
+    naming=None,
+    split_output=True,
+    book_row=BOOK_ROW,
+    output_format="m4b",
+    audio_file="/tmp/x/master_intermediate.m4b",
+    split_encode_mode=None,
+):
     """
     Drive BookProcessor._prepare_and_spawn_encode_tasks with a context that
     prepare already marked (or didn't mark) as split, so the planning of the
     per-part output paths can be asserted on. Everything external is mocked;
     nothing touches disk.
+
+    `output_format` and `audio_file` exist for the Phase 3 routing matrix: which
+    task a book gets depends on its format AND on whether the master is the
+    AAC ".m4b" one (a FLAC fallback can't be remuxed or copy-cut).
     """
     chapters = SPLIT_CHAPTERS if chapters is None else chapters
     processor = BookProcessor(asin="B0OURS", job_id=1)
@@ -3056,9 +3068,10 @@ def _run_split_prepare(chapters=None, naming=None, split_output=True, book_row=B
     con.execute.return_value.fetchone.return_value = book_row
 
     context = {
-        "audio_file": "/tmp/x/master_intermediate.m4b",
+        "audio_file": audio_file,
         "chapters": chapters,
         "split_output": split_output,
+        "split_encode_mode": split_encode_mode,
     }
     submitted = []
 
@@ -3066,7 +3079,7 @@ def _run_split_prepare(chapters=None, naming=None, split_output=True, book_row=B
         mock.patch.object(
             processing_logic,
             "load_settings",
-            return_value={"naming": naming or {}, "conversion": {"output_format": "m4b"}},
+            return_value={"naming": naming or {}, "conversion": {"output_format": output_format}},
         ),
         mock.patch.object(processing_logic, "get_db_connection", return_value=con),
         mock.patch.object(processing_logic, "prepare_book_assets", return_value=(context, None)),
@@ -3154,6 +3167,135 @@ class TestSplitOutputPlanning:
         assert all(t.priority == processing_logic.TaskPriority.ENCODE_CHAPTER for t in submitted)
 
 
+class TestSplitFormatRouting:
+    """v0.24.0 Phase 3, the routing matrix: three output formats x split on/off.
+
+    With splitting OFF every format keeps the exact task it has always taken —
+    one remux task, one single-pass MP3 task, or the chunk fan-out. With it ON
+    all three route through the SAME chunk fan-out (there is no single file to
+    remux or to encode in one pass), and the last chunk finalizes the parts in
+    place instead of merging them.
+    """
+
+    def _funcs(self, submitted):
+        return {t.func.__name__ for t in submitted}
+
+    # --- Splitting off: today's pipeline, untouched ------------------------
+
+    def test_unsplit_m4b_takes_the_chunk_fan_out(self):
+        processor, submitted, _ = _run_split_prepare(split_output=False, output_format="m4b")
+        assert self._funcs(submitted) == {"_encode_and_track_chunk"}
+        assert len(submitted) == 3
+        assert processor.split_part_paths == []
+
+    def test_unsplit_mp3_takes_the_single_pass_encode(self):
+        processor, submitted, _ = _run_split_prepare(split_output=False, output_format="mp3")
+        assert [t.func for t in submitted] == [processor._encode_mp3_and_finalize]
+        assert submitted[0].priority == processing_logic.TaskPriority.ENCODE_CHAPTER
+        # Nothing was chunked, and nothing was planned as a part.
+        assert processor.total_chunks == 0
+        assert processor.split_part_paths == []
+
+    def test_unsplit_original_takes_the_remux(self):
+        processor, submitted, _ = _run_split_prepare(split_output=False, output_format="original")
+        assert [t.func for t in submitted] == [processor._remux_and_finalize]
+        assert submitted[0].priority == processing_logic.TaskPriority.MERGE_BOOK
+        assert processor.total_chunks == 0
+
+    # --- Splitting on: one fan-out for all three ---------------------------
+
+    def test_split_m4b_fans_out(self):
+        processor, submitted, _ = _run_split_prepare(output_format="m4b", split_encode_mode="aac")
+        assert self._funcs(submitted) == {"_encode_and_track_chunk"}
+        assert len(submitted) == 3
+        assert processor.split_part_paths[0].endswith(".m4b")
+
+    def test_split_mp3_fans_out_instead_of_encoding_in_one_pass(self):
+        processor, submitted, _ = _run_split_prepare(output_format="mp3", split_encode_mode="mp3")
+        assert self._funcs(submitted) == {"_encode_and_track_chunk"}
+        assert len(submitted) == 3
+        # The single-pass task is not queued at all...
+        assert processor._encode_mp3_and_finalize not in [t.func for t in submitted]
+        # ...and the planned parts carry the format's own extension.
+        assert [os.path.basename(p) for p in processor.split_part_paths] == [
+            "Dracula - 1 - One.mp3",
+            "Dracula - 2 - Two.mp3",
+            "Dracula - 3 - Three.mp3",
+        ]
+
+    def test_split_original_fans_out_instead_of_remuxing(self):
+        processor, submitted, _ = _run_split_prepare(output_format="original", split_encode_mode="copy")
+        assert self._funcs(submitted) == {"_encode_and_track_chunk"}
+        assert processor._remux_and_finalize not in [t.func for t in submitted]
+        assert processor.split_part_paths[0].endswith(".m4b")
+
+    def test_split_original_is_not_reported_as_a_flac_fallback(self, caplog):
+        # The "fell back to FLAC" line describes a real degradation; a lossless
+        # split takes the fan-out on purpose and must not claim it re-encoded.
+        with caplog.at_level(logging.INFO):
+            _run_split_prepare(output_format="original", split_encode_mode="copy")
+        assert [r for r in caplog.records if "fell back to FLAC" in r.getMessage()] == []
+
+    def test_split_original_with_a_flac_master_still_reports_the_fallback(self, caplog):
+        # That title genuinely cannot be copy-cut, so it re-encodes to .m4b —
+        # the D14 spike's stated scope limit — and says so.
+        with caplog.at_level(logging.INFO):
+            processor, submitted, _ = _run_split_prepare(
+                output_format="original",
+                split_encode_mode="aac",
+                audio_file="/tmp/x/master_intermediate.flac",
+            )
+        assert [r for r in caplog.records if "fell back to FLAC" in r.getMessage()]
+        assert self._funcs(submitted) == {"_encode_and_track_chunk"}
+        assert processor.split_part_paths[0].endswith(".m4b")
+
+
+class TestSplitPartExtensionFollowsPrepare:
+    """A part's filename extension comes from prepare's `split_encode_mode`, not
+    from the extension of the reserved single-file path.
+
+    The two are separate reads of the output format, minutes apart: the reserved
+    path is named before the download starts, while prepare picks the container
+    once the download and decrypt have finished. A user flipping Output Format in
+    between must not end up with LAME audio in files named ".m4b" (or the
+    reverse) — the extension, the chunk's container and the encode mode agree by
+    construction, in both flip directions.
+    """
+
+    def test_flip_to_mp3_names_the_parts_mp3_despite_a_reserved_m4b_path(self):
+        # Reserved as .m4b (format was M4B at reservation time), but prepare's
+        # later read chose the LAME variant.
+        processor, _submitted, _ = _run_split_prepare(output_format="m4b", split_encode_mode="mp3")
+        assert processor.final_output_path.endswith(".m4b")
+        assert [os.path.basename(p) for p in processor.split_part_paths] == [
+            "Dracula - 1 - One.mp3",
+            "Dracula - 2 - Two.mp3",
+            "Dracula - 3 - Three.mp3",
+        ]
+
+    def test_flip_away_from_mp3_names_the_parts_m4b_despite_a_reserved_mp3_path(self):
+        # The inverse: reserved as .mp3, but prepare chose the AAC re-encode.
+        processor, _submitted, _ = _run_split_prepare(output_format="mp3", split_encode_mode="aac")
+        assert processor.final_output_path.endswith(".mp3")
+        assert [os.path.basename(p) for p in processor.split_part_paths] == [
+            "Dracula - 1 - One.m4b",
+            "Dracula - 2 - Two.m4b",
+            "Dracula - 3 - Three.m4b",
+        ]
+
+    def test_flip_from_mp3_to_original_names_the_parts_m4b(self):
+        # The third mode: copy-cut parts are mp4, so they follow the same rule.
+        processor, _submitted, _ = _run_split_prepare(output_format="mp3", split_encode_mode="copy")
+        assert processor.final_output_path.endswith(".mp3")
+        assert all(p.endswith(".m4b") for p in processor.split_part_paths)
+
+    def test_a_context_without_a_mode_still_plans_m4b_parts(self):
+        # Same degrade-to-AAC default encode_chapter_chunk applies to an older
+        # context that predates the key, so the names can't disagree with it.
+        processor, _submitted, _ = _run_split_prepare(output_format="m4b", split_encode_mode=None)
+        assert all(p.endswith(".m4b") for p in processor.split_part_paths)
+
+
 class TestSplitFinalTaskSelection:
     """The last chunk to finish submits the finalize-split task in place of the
     merge, at the same MERGE_BOOK priority."""
@@ -3188,21 +3330,21 @@ class TestPromoteSplitParts:
     """Parts are covered in the temp dir, then moved into the library through a
     ".part" staging name — and a failure part-way leaves nothing behind."""
 
-    def _processor(self, tmp_path, part_count=2):
+    def _processor(self, tmp_path, part_count=2, ext=".m4b"):
         processor = BookProcessor(asin="B0OURS", job_id=1)
         temp_dir = tmp_path / "temp"
         out_dir = tmp_path / "out" / "Dracula"
         temp_dir.mkdir()
         chunks = []
         for index in range(part_count):
-            chunk = temp_dir / f"chunk_{index:03d}.m4b"
+            chunk = temp_dir / f"chunk_{index:03d}{ext}"
             chunk.write_bytes(f"audio {index}".encode())
             chunks.append(str(chunk))
         processor.temp_dir = str(temp_dir)
         # Deliberately NOT in index order: chunks are appended as they finish.
         processor.encoded_chunk_paths = list(reversed(chunks))
         processor.split_output_dir = str(out_dir)
-        processor.split_part_paths = [str(out_dir / f"Dracula - {i + 1}.m4b") for i in range(part_count)]
+        processor.split_part_paths = [str(out_dir / f"Dracula - {i + 1}{ext}") for i in range(part_count)]
         processor.context = {"cover_file": None}
         return processor, out_dir
 
@@ -3216,6 +3358,26 @@ class TestPromoteSplitParts:
         assert sorted(p.name for p in out_dir.iterdir()) == ["Dracula - 1.m4b", "Dracula - 2.m4b"]
         assert list((tmp_path / "temp").iterdir()) == []
         # The cover is embedded per part, while each is still in the temp dir.
+        assert cover.call_count == 2
+
+    def test_mp3_parts_skip_the_atomicparsley_pass(self, tmp_path):
+        # Phase 3: AtomicParsley only understands mp4. An .mp3 part already
+        # carries its cover as an id3v2 APIC frame, muxed during the encode.
+        processor, out_dir = self._processor(tmp_path, ext=".mp3")
+        processor.context = {"cover_file": str(tmp_path / "cover.jpg")}
+        with mock.patch.object(processing_logic, "_embed_cover_art") as cover:
+            assert processor._promote_split_parts() is True
+        cover.assert_not_called()
+        # ...and the parts still land exactly as the .m4b ones do.
+        assert (out_dir / "Dracula - 1.mp3").read_bytes() == b"audio 0"
+        assert (out_dir / "Dracula - 2.mp3").read_bytes() == b"audio 1"
+        assert list((tmp_path / "temp").iterdir()) == []
+
+    def test_m4b_parts_still_get_the_atomicparsley_pass(self, tmp_path):
+        processor, _out_dir = self._processor(tmp_path, ext=".m4b")
+        processor.context = {"cover_file": str(tmp_path / "cover.jpg")}
+        with mock.patch.object(processing_logic, "_embed_cover_art") as cover:
+            assert processor._promote_split_parts() is True
         assert cover.call_count == 2
 
     def test_a_failed_move_removes_what_already_landed(self, tmp_path):
