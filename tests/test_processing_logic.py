@@ -1771,12 +1771,17 @@ class TestCompletionTimeout:
         assert timeout == 7200
 
 
-class TestTimeoutKillsSubprocesses:
-    """v0.23.0 M1 (second half): when the wait does expire, the temp dir is torn
-    down on the way out — an ffmpeg still running against it would burn CPU and
-    hold the unlinked files' disk space with nothing to deliver."""
+class TestTimeoutFailureHandling:
+    """v0.23.0 M1 (second half): what an expired completion wait does — exactly one
+    deterministic failure write, and NO subprocess kill.
 
-    def test_timeout_terminates_the_jobs_processes_and_marks_error(self, tmp_path):
+    The kill was built and then pulled before shipping: the process registry is
+    keyed by job rather than by book, so terminating the job would also SIGTERM a
+    concurrent book's healthy download (max_parallel_downloads defaults to 2),
+    failing it with no stated reason. It is deferred to backlog #19 behind per-book
+    process tracking, and pinned as absent here so it cannot half-return."""
+
+    def test_timeout_marks_error_without_killing_the_jobs_processes(self, tmp_path):
         processor = BookProcessor(asin="B0OURS", job_id=7)
         with (
             mock.patch.object(processing_logic, "TEMP_DIR", str(tmp_path)),
@@ -1786,37 +1791,30 @@ class TestTimeoutKillsSubprocesses:
             mock.patch.object(processor, "_update_db_on_failure") as fail,
         ):
             processor.run()
-        kill.assert_called_once_with(7)
+        kill.assert_not_called()
         assert "timed out" in fail.call_args.args[0]
 
-    def test_post_kill_step_failures_are_not_reported_again(self, tmp_path):
-        # W1: the kill SIGTERMs this book's own encoder, which reports its -15 as a
-        # plain step failure with the stop_event unset (nobody cancelled anything).
-        # Every such report used to write its own ERROR row — and since that write
-        # is the only place retry_count is bumped, one timeout consumed the entire
-        # automatic-retry budget (once per in-flight chunk on the AAC path), while
-        # whichever writer landed last decided the message the user saw. The
-        # timeout handler must be the single writer.
+    def test_late_step_failures_are_not_reported_again(self, tmp_path):
+        # W1: the abandoned tasks keep running after the timeout, so they can still
+        # report a step failure later — with the stop_event unset, because nobody
+        # cancelled anything. Every such report used to write its own ERROR row, and
+        # since that write is the only place retry_count is bumped, one timeout
+        # consumed the entire automatic-retry budget (once per in-flight chunk on the
+        # AAC path) while whichever writer landed last decided the message the user
+        # saw. The timeout handler must be the single writer.
         processor = BookProcessor(asin="B0OURS", job_id=7)
         reported = []
-
-        def kill_provokes_the_step_failures(job_id):
-            # What the dying tasks do on their way out, from the worker threads.
-            processor._fail_or_cancel("A chapter chunk failed to encode.")
-            processor._fail_or_cancel("MP3 encode failed.")
-
         with (
             mock.patch.object(processing_logic, "TEMP_DIR", str(tmp_path)),
             mock.patch.object(processor, "_completion_timeout", return_value=0),
             mock.patch.object(processing_logic.task_runner, "submit_task"),
-            mock.patch.object(
-                processing_logic.process_registry,
-                "kill_job_processes",
-                side_effect=kill_provokes_the_step_failures,
-            ),
             mock.patch.object(processor, "_update_db_on_failure", side_effect=reported.append),
         ):
             processor.run()
+            # What the still-running tasks do when they eventually give up, from the
+            # worker threads.
+            processor._fail_or_cancel("A chapter chunk failed to encode.")
+            processor._fail_or_cancel("MP3 encode failed.")
 
         # Exactly one failure write, and it is the deterministic timeout message.
         assert len(reported) == 1
@@ -1830,7 +1828,7 @@ class TestTimeoutKillsSubprocesses:
             processor._fail_or_cancel("MP3 encode failed.")
         fail.assert_called_once_with("MP3 encode failed.")
 
-    def test_normal_completion_kills_nothing(self, tmp_path):
+    def test_normal_completion_reports_nothing(self, tmp_path):
         processor = BookProcessor(asin="B0OURS", job_id=7)
         processor._completion_event.set()
         with (

@@ -620,15 +620,15 @@ class BookProcessor:
         self.encoded_chunk_paths = []
         self._lock = Lock()
         self._completion_event = Event()
-        # Set by `run`'s timeout handler BEFORE it SIGTERMs the job's processes,
-        # so the step failures that kill provokes don't each record their own
-        # ERROR. Without it a timeout writes the failure once per killed encoder
-        # (once for an MP3 pass, once per in-flight chunk on the AAC path) plus
-        # once from the handler itself, and since the failure write is also the
-        # only place retry_count is bumped, the book burns its whole automatic
-        # retry budget on a single timeout. An Event rather than a bare bool
-        # because the writer is the waiting thread and the readers are worker
-        # threads.
+        # Set by `run`'s timeout handler BEFORE it reports the failure, so a late
+        # step failure from the abandoned encode doesn't record its own ERROR on
+        # top of it. A timed-out book's tasks are left running (see `run`), so
+        # whenever they do fail they arrive with the stop_event unset — once for an
+        # MP3 pass, once per in-flight chunk on the AAC path — and since the failure
+        # write is also the only place retry_count is bumped, the book would burn
+        # its whole automatic retry budget on a single timeout. An Event rather than
+        # a bare bool because the writer is the waiting thread and the readers are
+        # worker threads.
         self._timed_out = Event()
 
     def _cancelled(self):
@@ -836,29 +836,22 @@ class BookProcessor:
                 if not completed:
                     # Nothing is coming, and the temp dir this book's tasks are
                     # working in is about to be deleted by the context manager
-                    # above. Stop the subprocesses first: an ffmpeg left running
-                    # would keep burning CPU (and holding the unlinked temp files'
-                    # disk space) for hours with nothing to deliver.
+                    # above.
                     #
-                    # Claim the failure report before killing anything, so the
-                    # dying encoder's own step failure doesn't also write an ERROR
-                    # row (see _fail_or_cancel and self._timed_out).
+                    # This book's subprocesses are deliberately left running, so an
+                    # abandoned ffmpeg keeps burning CPU (and holding the unlinked
+                    # temp files' disk space) until it exits on its own. That is
+                    # pre-existing behavior, and it stays that way because the
+                    # process registry is keyed by JOB, not by book: SIGTERMing the
+                    # job would also kill a concurrent book's perfectly healthy
+                    # download (max_parallel_downloads defaults to 2). Narrowing
+                    # the kill to this book's own processes needs per-book process
+                    # tracking, deferred to backlog #19.
                     #
-                    # The registry is keyed by job, not by book, so in a bulk job
-                    # this can also terminate the NEXT book's in-flight download.
-                    # Be clear about what that costs, because it is not a clean
-                    # failure: that book's audible-cli/ffmpeg reads its -15 as a
-                    # cancellation, so its row is left untouched (still NEW, no
-                    # ERROR, no message, no retry bump) while the job item is
-                    # marked FAILED — a failed job containing a book with no
-                    # stated reason. It is re-attempted only if a later scheduled
-                    # auto-process run picks the row up, never as a consequence of
-                    # this job. Accepted anyway, because an orphaned encode is
-                    # invisible and unkillable from the UI; narrowing the kill to
-                    # this book's own processes needs per-book process tracking
-                    # (deferred to the backlog).
+                    # Claim the failure report before raising, so a late step
+                    # failure from that still-running encode doesn't also write an
+                    # ERROR row (see _fail_or_cancel and self._timed_out).
                     self._timed_out.set()
-                    process_registry.kill_job_processes(self.job_id)
                     raise RuntimeError("Processing timed out.")
         except Exception as e:
             log.error(f"PROCESSOR ({self.asin}): A critical error occurred in the processor run: {e}", exc_info=True)
@@ -1548,13 +1541,14 @@ class BookProcessor:
         on the prepare path.
 
         A completion timeout is the mirror image: there the stop_event is NOT set
-        (nobody cancelled anything), but the timeout handler has already killed
-        this book's processes and reported the failure itself, so the -15 arriving
-        here is an echo of a failure that is already recorded. Writing it again
-        would bump retry_count a second time (or once per in-flight chunk) and
-        overwrite the deterministic "Processing timed out." with whichever step
-        happened to report last. The prepare path needs no equivalent guard: it
-        already reads its own -15 as cancellation and writes nothing.
+        (nobody cancelled anything), but the timeout handler has already reported
+        the failure and walked away, leaving this book's tasks running. Whenever one
+        of those abandoned steps eventually fails, the report arriving here is an
+        echo of a failure that is already recorded. Writing it again would bump
+        retry_count a second time (or once per in-flight chunk) and overwrite the
+        deterministic "Processing timed out." with whichever step happened to report
+        last. The prepare path needs no equivalent guard: it already reads its own
+        -15 as cancellation and writes nothing.
         """
         if self.stop_event is not None and self.stop_event.is_set():
             log.info(f"PROCESSOR ({self.asin}): Step cancelled; leaving book status unchanged.")
