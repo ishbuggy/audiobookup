@@ -1225,9 +1225,8 @@ def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context, stop_eve
     failed or cancelled encode can never leave a truncated book at the library
     path for a later deep sync to adopt; the ".part" file itself is discarded in
     the `finally`, so an exception escaping this function can't orphan it either.
-    Progress is driven by
-    ffmpeg's `-progress pipe:1` stream, occupying the 30..90 band; the final
-    verify/finalize takes it to 100.
+    Progress is driven by ffmpeg's `-progress pipe:1` stream, occupying the 30..90
+    band; the final verify/finalize takes it to 100.
 
     `stop_event` is the job's cancellation flag (optional; a caller that doesn't
     pass one behaves exactly as before). The registry's cancel is a one-shot

@@ -221,6 +221,23 @@ class TestNamingPlaceholderExpansion:
         path = build_base_output_path({"naming": {"template": "{author}"}}, "B0OURS", "...", "Dracula", None, None)
         assert path == "/data/Unknown Author - Dracula.m4b"
 
+    def test_fallback_is_generic_when_the_assembled_name_also_strips_away(self):
+        # M10, the half the first fix left open: "-" survives _sanitize_filename
+        # and is truthy, so neither half takes the "Unknown ..." branch, but the
+        # assembled "- - -" reduces to nothing under the same strip set — the
+        # fallback used to rebuild and emit the very name it had just rejected.
+        path = build_base_output_path({"naming": {"template": "{author}/{title}"}}, "B0OURS", "-", "-", None, None)
+        assert path == "/data/Unknown Author - Unknown Title.m4b"
+
+    def test_partially_strippable_fallback_is_left_alone(self):
+        # The other direction: only a fallback that strips to nothing is replaced.
+        # Here the title survives, so the assembled name still says something and
+        # is used as-is rather than swapped for the generic one.
+        path = build_base_output_path(
+            {"naming": {"template": "{author}/{author}"}}, "B0OURS", "-", "Dracula", None, None
+        )
+        assert path == "/data/- - Dracula.m4b"
+
     @pytest.mark.parametrize(
         ("release_date", "expected"),
         [
@@ -771,6 +788,54 @@ class TestRenameToMatchMetadata:
         params = self._rename_update()
         assert params == ("/data/New/New.m4b", 0, "B0OURS")
 
+    def test_noop_rename_onto_its_own_suffixed_name_touches_nothing(self):
+        # B1 regression: the book already sits at its ASIN-suffixed name (it
+        # collided at download time), and the other book still holds the plain
+        # base — so re-deriving the target and re-applying the suffix lands on the
+        # path the book is already at. The old code moved the file onto itself,
+        # logged a phantom "Moved file", and re-wrote is_duplicate = 1, undoing a
+        # "Resolve duplicate -> Keep" that had just cleared the flag.
+        current = "/data/New/New_B0OURS.m4b"
+        row = self._row(filepath=current)
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        executed = []
+
+        def execute(query, params=None):
+            executed.append((query, params))
+            cursor = mock.MagicMock()
+            if "WHERE filepath" in query:
+                cursor.fetchone.return_value = {"asin": "B0OTHER"}
+            else:
+                cursor.fetchone.return_value = row
+            return cursor
+
+        con.execute.side_effect = execute
+        present = {current, "/data/New/New.m4b"}
+
+        with (
+            mock.patch.object(
+                processing_logic, "load_settings", return_value={"naming": {"apply_custom_to_filenames": True}}
+            ),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "build_base_output_path", return_value="/data/New/New.m4b"),
+            mock.patch("os.path.exists", side_effect=lambda p: p in present),
+            mock.patch("os.makedirs") as makedirs,
+            mock.patch.object(processing_logic.shutil, "move") as move,
+            mock.patch.object(processing_logic, "_cleanup_empty_dirs") as cleanup,
+        ):
+            result = processing_logic.rename_book_to_match_metadata("B0OURS")
+
+        assert result is None
+        move.assert_not_called()
+        makedirs.assert_not_called()
+        cleanup.assert_not_called()
+        # No DB write at all: the is_duplicate flag keeps whatever value the
+        # duplicate resolver left in the row.
+        assert [query for query, _params in executed if query.startswith("UPDATE audiobooks")] == []
+        # The claim taken while resolving the collision is still released.
+        assert processing_logic._reserved_output_paths == set()
+
     """H5 regression: an existing file at the target path must only be
     overwritten when it verifiably belongs to the same book."""
 
@@ -1146,8 +1211,13 @@ class TestNoUsableChapters:
         assert "no usable chapters" in message
         # Not the old claim that the book simply had no chapter information...
         assert message != "Book has no chapter information."
-        # ...and the cleanup is named as the other possibility.
-        assert "cleanup" in message
+        # ...and the drop is named as the other possibility, by what the user can
+        # observe rather than by the step that did it: "chapter cleanup" is the UI's
+        # label for the OPTIONAL transform toggles, and blaming those would send the
+        # user off to disable settings that may not have been involved at all.
+        assert "zero-length" in message
+        assert "dropped" in message
+        assert "cleanup" not in message
         # No encode work was queued, and the wait is released.
         submit.assert_not_called()
         assert processor._completion_event.is_set()
@@ -1648,9 +1718,23 @@ class TestCompletionTimeout:
 
     def test_mp3_scales_off_the_source_duration(self):
         timeout, estimator = self._timeout(output_format="mp3")
+        # 3x runtime (90h) beats 4x the estimate (20h) here, so the runtime model
+        # wins the max()...
         assert timeout == self.LONG_RUNTIME_MIN * 60 * 3
-        # The AAC model is not consulted at all on this path.
-        estimator.assert_not_called()
+        # ...but the estimator IS consulted, because the MP3 budget is the larger
+        # of the two models (see test_mp3_never_undercuts_the_old_estimate_model).
+        estimator.assert_called_once_with(self.LONG_RUNTIME_MIN)
+
+    def test_mp3_never_undercuts_the_old_estimate_model(self):
+        # Minor 5: the runtime model is the TIGHTER one once the machine's recorded
+        # AAC rate passes 45 s/min — the slow-hardware case this timeout exists
+        # for. Taking the max keeps the change monotonic: 50 s/min here, so the old
+        # 4x-estimate budget is the one that must stand.
+        slow_estimate = self.LONG_RUNTIME_MIN * 50
+        assert 4 * slow_estimate > self.LONG_RUNTIME_MIN * 60 * 3  # what makes this the binding model
+        timeout, estimator = self._timeout(output_format="mp3", estimate=slow_estimate)
+        assert timeout == 4 * slow_estimate
+        estimator.assert_called_once_with(self.LONG_RUNTIME_MIN)
 
     def test_mp3_budget_exceeds_the_books_own_runtime(self):
         # The regression itself: 4x the AAC estimate is 20h for a 30h book, so a
@@ -1704,6 +1788,47 @@ class TestTimeoutKillsSubprocesses:
             processor.run()
         kill.assert_called_once_with(7)
         assert "timed out" in fail.call_args.args[0]
+
+    def test_post_kill_step_failures_are_not_reported_again(self, tmp_path):
+        # W1: the kill SIGTERMs this book's own encoder, which reports its -15 as a
+        # plain step failure with the stop_event unset (nobody cancelled anything).
+        # Every such report used to write its own ERROR row — and since that write
+        # is the only place retry_count is bumped, one timeout consumed the entire
+        # automatic-retry budget (once per in-flight chunk on the AAC path), while
+        # whichever writer landed last decided the message the user saw. The
+        # timeout handler must be the single writer.
+        processor = BookProcessor(asin="B0OURS", job_id=7)
+        reported = []
+
+        def kill_provokes_the_step_failures(job_id):
+            # What the dying tasks do on their way out, from the worker threads.
+            processor._fail_or_cancel("A chapter chunk failed to encode.")
+            processor._fail_or_cancel("MP3 encode failed.")
+
+        with (
+            mock.patch.object(processing_logic, "TEMP_DIR", str(tmp_path)),
+            mock.patch.object(processor, "_completion_timeout", return_value=0),
+            mock.patch.object(processing_logic.task_runner, "submit_task"),
+            mock.patch.object(
+                processing_logic.process_registry,
+                "kill_job_processes",
+                side_effect=kill_provokes_the_step_failures,
+            ),
+            mock.patch.object(processor, "_update_db_on_failure", side_effect=reported.append),
+        ):
+            processor.run()
+
+        # Exactly one failure write, and it is the deterministic timeout message.
+        assert len(reported) == 1
+        assert "Processing timed out." in reported[0]
+
+    def test_step_failures_are_still_reported_without_a_timeout(self, tmp_path):
+        # The other side of the guard: an ordinary step failure (no timeout, no
+        # cancel) still records its own message and retry bump.
+        processor = BookProcessor(asin="B0OURS", job_id=7)
+        with mock.patch.object(processor, "_update_db_on_failure") as fail:
+            processor._fail_or_cancel("MP3 encode failed.")
+        fail.assert_called_once_with("MP3 encode failed.")
 
     def test_normal_completion_kills_nothing(self, tmp_path):
         processor = BookProcessor(asin="B0OURS", job_id=7)

@@ -317,6 +317,13 @@ def build_base_output_path(
         # away to nothing, which used to leave the file literally named " - ".
         # Re-apply the same fallbacks the tags use so the name always says something.
         filename = f"{author_val or 'Unknown Author'} - {title_val or 'Unknown Title'}"
+        # ...and check the rebuilt name the same way, because it can strip away
+        # too: author "-" and title "-" are both truthy (neither took the
+        # "Unknown ..." branch above) yet the assembled "- - -" reduces to nothing
+        # under this strip set, which would name the file "- - -.m4b". Only the
+        # fully generic name is guaranteed to survive.
+        if not re.sub(r"\s+", " ", filename).strip(" .-_,"):
+            filename = "Unknown Author - Unknown Title"
 
     relative_path = os.path.join(*cleaned_dirs, filename) if cleaned_dirs else filename
     return os.path.join("/data", f"{relative_path}{ext}")
@@ -422,6 +429,18 @@ def rename_book_to_match_metadata(asin):
         _reserved_output_paths.add(reserved_base)
 
     try:
+        # The collision suffix can re-derive the name the book ALREADY has: a book
+        # that collided at download time sits at "<base>_<asin>", and a later
+        # metadata edit re-renders the same "<base>" target, finds the other book
+        # still holding it, and appends the same ASIN. The equality check above
+        # compared the UNsuffixed target, so only this one catches it. Bail before
+        # touching anything: the move would be a self-rename, the log line would
+        # claim a move that never happened, and — the reason this is a bug rather
+        # than a cosmetic quirk — the is_duplicate write below would set the flag
+        # again on a book whose duplicate the user just resolved with "Keep"
+        # (routes.py clears the flag and then calls this function).
+        if os.path.abspath(target) == os.path.abspath(current_path):
+            return None
         os.makedirs(os.path.dirname(target), exist_ok=True)
         shutil.move(current_path, target)
         # Move every sidecar sharing the old base name alongside the audiobook,
@@ -601,6 +620,16 @@ class BookProcessor:
         self.encoded_chunk_paths = []
         self._lock = Lock()
         self._completion_event = Event()
+        # Set by `run`'s timeout handler BEFORE it SIGTERMs the job's processes,
+        # so the step failures that kill provokes don't each record their own
+        # ERROR. Without it a timeout writes the failure once per killed encoder
+        # (once for an MP3 pass, once per in-flight chunk on the AAC path) plus
+        # once from the handler itself, and since the failure write is also the
+        # only place retry_count is bumped, the book burns its whole automatic
+        # retry budget on a single timeout. An Event rather than a bare bool
+        # because the writer is the waiting thread and the readers are worker
+        # threads.
+        self._timed_out = Event()
 
     def _cancelled(self):
         """
@@ -761,6 +790,12 @@ class BookProcessor:
           Scale off the book's own runtime instead, which is the one quantity
           that actually bounds a single-pass encode.
 
+        The MP3 budget takes the LARGER of the runtime model and the old estimator
+        model, so the change can only ever lengthen the grace period. The runtime
+        model alone is the tighter of the two once the recorded AAC rate passes
+        45 s/min (0.75x real time) — exactly the slow arm64 hardware this timeout
+        was widened for, which is the one machine class that must not lose time.
+
         A missing or zero runtime leaves nothing to scale, so both paths fall back
         to the floor.
         """
@@ -770,10 +805,11 @@ class BookProcessor:
         if not runtime_min or runtime_min <= 0:
             return _COMPLETION_TIMEOUT_FLOOR_SEC
 
+        estimate_budget = 4 * estimate_conversion_time(runtime_min)
         if resolve_output_format(load_settings()) == "mp3":
-            budget = int(runtime_min * 60 * _MP3_TIMEOUT_RUNTIME_MULTIPLE)
+            budget = max(int(runtime_min * 60 * _MP3_TIMEOUT_RUNTIME_MULTIPLE), estimate_budget)
         else:
-            budget = 4 * estimate_conversion_time(runtime_min)
+            budget = estimate_budget
         return max(_COMPLETION_TIMEOUT_FLOOR_SEC, budget)
 
     def run(self):
@@ -804,11 +840,24 @@ class BookProcessor:
                     # would keep burning CPU (and holding the unlinked temp files'
                     # disk space) for hours with nothing to deliver.
                     #
+                    # Claim the failure report before killing anything, so the
+                    # dying encoder's own step failure doesn't also write an ERROR
+                    # row (see _fail_or_cancel and self._timed_out).
+                    #
                     # The registry is keyed by job, not by book, so in a bulk job
-                    # this can also cut short the NEXT book's in-flight download.
-                    # That is the better trade: it fails cleanly and is retried,
-                    # whereas an orphaned encode is invisible and unkillable from
-                    # the UI.
+                    # this can also terminate the NEXT book's in-flight download.
+                    # Be clear about what that costs, because it is not a clean
+                    # failure: that book's audible-cli/ffmpeg reads its -15 as a
+                    # cancellation, so its row is left untouched (still NEW, no
+                    # ERROR, no message, no retry bump) while the job item is
+                    # marked FAILED — a failed job containing a book with no
+                    # stated reason. It is re-attempted only if a later scheduled
+                    # auto-process run picks the row up, never as a consequence of
+                    # this job. Accepted anyway, because an orphaned encode is
+                    # invisible and unkillable from the UI; narrowing the kill to
+                    # this book's own processes needs per-book process tracking
+                    # (deferred to the backlog).
+                    self._timed_out.set()
                     process_registry.kill_job_processes(self.job_id)
                     raise RuntimeError("Processing timed out.")
         except Exception as e:
@@ -973,10 +1022,16 @@ class BookProcessor:
             # offset, or early starts the branding trim clamped to 0). Prepare
             # reports the count it dropped to app.log but hands back only the final
             # list, so name both causes rather than assert the wrong one.
+            #
+            # The message names the observable ("came out zero-length") rather than
+            # the step: "chapter cleanups" is the UI's label for the OPTIONAL
+            # transform toggles, and a message phrased around those sends the user
+            # off to disable settings that may have had nothing to do with it — the
+            # zero-length drop is unconditional.
             log.warning(f"TASK-PREPARE ({self.asin}): No usable chapters after chapter processing. Cannot process.")
             self._update_db_on_failure(
-                "Book has no usable chapters: the title reported none, or every chapter was empty "
-                "and dropped during chapter cleanup (see the log for which)."
+                "Book has no usable chapters: the title reported none, or every chapter came out "
+                "zero-length and was dropped (see the log for which)."
             )
             self._completion_event.set()
             return
@@ -1491,9 +1546,24 @@ class BookProcessor:
         NEW/MISSING and is retried) instead of stranding it in ERROR with a
         misleading "... failed." message. Mirrors the (None, None) cancel handling
         on the prepare path.
+
+        A completion timeout is the mirror image: there the stop_event is NOT set
+        (nobody cancelled anything), but the timeout handler has already killed
+        this book's processes and reported the failure itself, so the -15 arriving
+        here is an echo of a failure that is already recorded. Writing it again
+        would bump retry_count a second time (or once per in-flight chunk) and
+        overwrite the deterministic "Processing timed out." with whichever step
+        happened to report last. The prepare path needs no equivalent guard: it
+        already reads its own -15 as cancellation and writes nothing.
         """
         if self.stop_event is not None and self.stop_event.is_set():
             log.info(f"PROCESSOR ({self.asin}): Step cancelled; leaving book status unchanged.")
+            return
+        if self._timed_out.is_set():
+            log.info(
+                f"PROCESSOR ({self.asin}): Step failed after the completion timeout was already reported "
+                f"({error_message}); not recording it again."
+            )
             return
         self._update_db_on_failure(error_message)
 

@@ -1175,10 +1175,14 @@ class TestBuildMp3Flags:
 
     @pytest.mark.parametrize("junk_cap", [True, False, "44100", None, float("nan"), float("inf")])
     def test_sample_rate_gate_rejects_non_integer_caps(self, junk_cap):
-        # v0.23.0 ND1: a hand-edited settings.json can carry any JSON value here.
-        # `bool` is an `int` subclass, so a bare `true` would otherwise be
-        # formatted straight onto the command line as "-ar True" and fail every
-        # encode; json.load() also accepts NaN/Infinity. None of these is a rate.
+        # v0.23.0 ND1: a hand-edited settings.json can carry any JSON value here,
+        # and none of these is a rate. Only True/False are the actual regression
+        # (with the float cases in the next test): `bool` is an `int` subclass, so
+        # a bare `true` passed the old numeric gate and was formatted straight onto
+        # the command line as "-ar True", failing every encode. None, "44100", NaN
+        # and Infinity were all rejected before this change too (json.load() does
+        # accept NaN/Infinity, so they can reach here) — they are kept to pin that
+        # pre-existing behaviour rather than to cover the fix.
         assert "-ar" not in build_mp3_flags({"target": "quality", "max_sample_rate": junk_cap}, None, 48000)
 
     @pytest.mark.parametrize(("float_cap", "emitted"), [(44100.0, "44100"), (44100.9, "44100")])
