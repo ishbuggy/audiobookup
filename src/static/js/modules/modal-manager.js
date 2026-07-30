@@ -236,7 +236,7 @@ async function handleBookClick(event) {
                             `${introHtml} and the previous file is left on disk.` +
                                 `<label style="display: block; margin-top: 15px; font-weight: normal">` +
                                 `<input type="checkbox" id="redownload-cleanup-checkbox" style="margin-right: 8px" />` +
-                                `If the new file is written to a different location, also delete the previous file and its companion files (PDF, cover, cue sheet, metadata).` +
+                                `If the new file is written to a different location, also delete the previous file and its companion files (PDF, cover, cue sheet, metadata, annotations, and any retained original AAX/AAXC files).` +
                                 `</label>`,
                             () => {
                                 const checkbox = document.getElementById("redownload-cleanup-checkbox");
@@ -259,7 +259,7 @@ async function handleBookClick(event) {
                     } else {
                         if (confirm(`${introText} and the previous file is left on disk.`)) {
                             const alsoDelete = confirm(
-                                "If the new file is written to a different location, also delete the previous file and its companion files (PDF, cover, cue sheet, metadata)?",
+                                "If the new file is written to a different location, also delete the previous file and its companion files (PDF, cover, cue sheet, metadata, annotations, and any retained original AAX/AAXC files)?",
                             );
                             runDownload({ cleanup_stale_files: alsoDelete });
                         }

@@ -437,7 +437,15 @@ def rename_book_to_match_metadata(asin):
             target = f"{target_root}_{_sanitize_filename(asin)}{target_ext}"
             target_root = os.path.splitext(target)[0]
         reserved_base = target_root
-        _reserved_output_paths.add(reserved_base)
+        # Only release in the `finally` what this call actually claimed. The
+        # suffixed target can already be reserved — by this same book's in-flight
+        # force re-download, which hit its own collision and reserved the identical
+        # "<base>_<asin>" — and a set add is silently a no-op there. Discarding it
+        # afterwards would drop the downloader's live claim and re-open the window
+        # for a third same-name book to take the base mid-download.
+        claimed_reservation = reserved_base not in _reserved_output_paths
+        if claimed_reservation:
+            _reserved_output_paths.add(reserved_base)
 
     try:
         # The collision suffix can re-derive the name the book ALREADY has: a book
@@ -489,9 +497,11 @@ def rename_book_to_match_metadata(asin):
         return None
     finally:
         # The claim only had to survive the move and the DB update; release it
-        # either way so the name is available again immediately.
-        with _reservation_lock:
-            _reserved_output_paths.discard(reserved_base)
+        # either way so the name is available again immediately — but only if it
+        # was ours to release (see the claim above).
+        if claimed_reservation:
+            with _reservation_lock:
+                _reserved_output_paths.discard(reserved_base)
 
 
 def build_metadata_json(book_info, title_override=None):
@@ -641,6 +651,26 @@ class BookProcessor:
         # a bare bool because the writer is the waiting thread and the readers are
         # worker threads.
         self._timed_out = Event()
+        # The general form of the same problem, covering every failure and not just
+        # the timeout. A run has exactly one outcome, so it may write exactly one
+        # ERROR row. When one chunk fails it reports and sets _completion_event;
+        # `run` wakes immediately and its TemporaryDirectory context deletes the
+        # book's temp dir while the other chunk tasks are still in flight (and more
+        # sit queued in the global task runner). Each of those then fails too — its
+        # ffmpeg can no longer read its input or write its output — and arrives at
+        # _fail_or_cancel with BOTH guards above unset: nobody cancelled, nothing
+        # timed out. Since the failure write is the only place retry_count is
+        # bumped, a single failed attempt would land the counter at 2+ and push the
+        # book past the `retry_count <= 1` auto-retry gate, while whichever late
+        # chunk reported last decided the error_message the user sees. The first
+        # report claims this latch; every later one logs and returns.
+        #
+        # Its own lock, not self._lock: a chunk reports its failure while already
+        # holding self._lock (see _encode_and_track_chunk), and Lock is not
+        # reentrant. A lock rather than an Event because this claim is a real
+        # test-and-set raced between worker threads, not a one-writer flag.
+        self._failure_reported = False
+        self._failure_report_lock = Lock()
 
     def _cancelled(self):
         """
@@ -1614,7 +1644,23 @@ class BookProcessor:
         Callers must not route cancellations here — see `_fail_or_cancel` and the
         (None, None) prepare-path check: a user-cancelled download leaves the
         book's status untouched, so it must not consume the automatic retry.
+
+        Because the bump lives here, so does the once-per-run latch: the first
+        failure of a run claims the report and writes it, and every later one
+        (the late chunk echoes described on `self._failure_reported`, or a
+        teardown error surfacing in `run`'s except block after a step already
+        reported) is logged and dropped. Dropping keeps the FIRST message, which
+        is the one that names the actual cause.
         """
+        with self._failure_report_lock:
+            if self._failure_reported:
+                log.info(
+                    f"PROCESSOR ({self.asin}): A failure was already reported for this run "
+                    f"({error_message}); not recording it again."
+                )
+                return
+            self._failure_reported = True
+
         log.error(f"PROCESSOR ({self.asin}):   -> ERROR: {error_message}")
         with get_db_connection() as con:
             con.execute(

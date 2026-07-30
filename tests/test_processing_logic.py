@@ -1843,6 +1843,82 @@ class TestTimeoutFailureHandling:
         fail.assert_not_called()
 
 
+class TestOnceOnlyFailureReport:
+    """v0.23.0 B1: one failed run writes exactly ONE ERROR row, whatever fails.
+
+    The timeout guard above only covers timeouts. An ordinary chunk failure has
+    the same late-echo shape without one: the first failing chunk reports and
+    sets the completion event, `run` wakes and deletes the temp dir, and every
+    chunk still in flight or queued then fails too — with no cancel and no
+    timeout, so neither of the earlier guards applies. Each echo used to bump
+    retry_count again (past the `retry_count <= 1` auto-retry gate, so the one
+    promised automatic retry never happened for this whole failure class),
+    overwrite error_message, and emit another "Failed!" progress event."""
+
+    def _report(self, *messages):
+        """Runs the REAL _update_db_on_failure (the latch lives inside it) with
+        the DB and the SSE emitter mocked, and returns both so the caller can
+        count writes and progress events."""
+        processor = BookProcessor(asin="B0OURS", job_id=7)
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        with (
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "_yield_progress") as progress,
+        ):
+            for message in messages:
+                processor._fail_or_cancel(message)
+        return con, progress
+
+    def test_first_failure_is_recorded(self):
+        con, progress = self._report("A chapter chunk failed to encode.")
+        assert con.execute.call_count == 1
+        sql, params = con.execute.call_args.args
+        assert "retry_count = COALESCE(retry_count, 0) + 1" in sql
+        assert params == ("A chapter chunk failed to encode.", "B0OURS")
+        progress.assert_called_once()
+        assert progress.call_args.args[1] == "Failed!"
+
+    def test_later_chunk_failures_are_not_recorded_again(self):
+        # The echo: the remaining chunks die against the deleted temp dir and
+        # report one after another. Only the first write may survive, and the
+        # message must stay the one that named the original cause.
+        con, progress = self._report(
+            "A chapter chunk failed to encode.",
+            "A chapter chunk failed to encode.",
+            "Final merge of chapter chunks failed.",
+        )
+        assert con.execute.call_count == 1
+        assert con.execute.call_args.args[1] == ("A chapter chunk failed to encode.", "B0OURS")
+        progress.assert_called_once()
+
+    def test_direct_failure_write_after_a_step_failure_is_suppressed(self):
+        # `run`'s except block calls _update_db_on_failure directly, so the latch
+        # has to live in that method rather than in _fail_or_cancel: a temp-dir
+        # teardown error arriving after a chunk already reported must not add a
+        # second bump or replace the real cause.
+        processor = BookProcessor(asin="B0OURS", job_id=7)
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        with (
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "_yield_progress") as progress,
+        ):
+            processor._fail_or_cancel("A chapter chunk failed to encode.")
+            processor._update_db_on_failure("A critical error occurred: teardown blew up")
+        assert con.execute.call_count == 1
+        assert con.execute.call_args.args[1] == ("A chapter chunk failed to encode.", "B0OURS")
+        progress.assert_called_once()
+
+    def test_the_latch_is_per_run_not_global(self):
+        # A fresh BookProcessor is built per attempt, so the next attempt at the
+        # same book still gets to record its own failure (and its own bump).
+        con_a, _ = self._report("A chapter chunk failed to encode.")
+        con_b, _ = self._report("A chapter chunk failed to encode.")
+        assert con_a.execute.call_count == 1
+        assert con_b.execute.call_count == 1
+
+
 class TestBuildMetadataJson:
     """Phase 2: the curated metadata.json sidecar shaping (pure function)."""
 

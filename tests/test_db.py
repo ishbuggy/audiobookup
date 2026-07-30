@@ -151,10 +151,13 @@ class TestRetryCounterGate:
     def test_second_failure_spends_the_retry(self, retry_counter_db):
         # The automatic retry does NOT reset the counter (only a manual job or a
         # success does), so its failure lands at 2 and the book drops out for good.
-        processor = processing_logic.BookProcessor(asin="B009", job_id=1)
+        # A processor per attempt, because that is what really happens
+        # (run_book_processing_logic builds a fresh BookProcessor per call) and
+        # because the failure write is latched to one report per run: two failures
+        # only count twice when they belong to two attempts.
         with mock.patch.object(processing_logic, "_yield_progress"):
-            processor._update_db_on_failure("first failure")
-            processor._update_db_on_failure("second failure")
+            processing_logic.BookProcessor(asin="B009", job_id=1)._update_db_on_failure("first failure")
+            processing_logic.BookProcessor(asin="B009", job_id=2)._update_db_on_failure("second failure")
 
         assert _read_row("B009")["retry_count"] == 2
         assert "B009" not in _asins(db_module._get_books_by_status(["ERROR"]))
@@ -172,14 +175,16 @@ class TestRetryCounterGate:
         con.commit()
         con.close()
 
-        processor = processing_logic.BookProcessor(asin="B012", job_id=1)
+        # One processor per attempt, as the two jobs would really build them.
         with mock.patch.object(processing_logic, "_yield_progress"):
-            processor._update_db_on_failure("the manual attempt failed too")
+            processing_logic.BookProcessor(asin="B012", job_id=1)._update_db_on_failure("the manual attempt failed too")
         assert _read_row("B012")["retry_count"] == 1
         assert "B012" in _asins(db_module._get_books_by_status(["ERROR"]))
 
         with mock.patch.object(processing_logic, "_yield_progress"):
-            processor._update_db_on_failure("and so did the automatic retry")
+            processing_logic.BookProcessor(asin="B012", job_id=2)._update_db_on_failure(
+                "and so did the automatic retry"
+            )
         assert _read_row("B012")["retry_count"] == 2
         assert "B012" not in _asins(db_module._get_books_by_status(["ERROR"]))
 
