@@ -388,7 +388,26 @@ def adopt_upload(staging_path, original_filename, settings):
     # than defaulting to .m4b, so the on-disk name reflects the actual content and
     # matches what scan-in-place would record for the same file.
     ext = os.path.splitext(staging_path)[1].lower() or ".m4b"
-    base_path = build_base_output_path(settings, key, author, title, "N/A", "N/A", ext=ext)
+    # Pass exactly the values adopt_file will write to the row below, so the placed
+    # path and the stored metadata agree. Without this a "{year}"/"{series}" template
+    # renders those segments empty at import time but filled on the first metadata
+    # edit, and apply_custom_to_filenames then moves the freshly imported book. Only
+    # the date is recoverable from the tags; series/series_sequence/language are the
+    # row's "N/A"/NULL placeholders and render as dropped segments.
+    release_date = meta["release_date"] or "N/A"
+    base_path = build_base_output_path(
+        settings,
+        key,
+        author,
+        title,
+        "N/A",
+        "N/A",
+        ext=ext,
+        series="N/A",
+        series_sequence=None,
+        release_date=release_date,
+        language="N/A",
+    )
     # Collision-safe: never overwrite an existing file. A SINGLE key suffix is not
     # enough — the ASIN-suffixed name is exactly where this key's own prior
     # duplicate download already lives, so a bare "_<key>" could land straight on a

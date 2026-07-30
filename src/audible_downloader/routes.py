@@ -528,7 +528,9 @@ def get_cpu_cores():
         cpus = max(1, cpus)
 
         # The recommended concurrency is one less than the core count, but never less than 1.
-        recommended_concurrency = max(1, cpus - 1)
+        # It is also capped at 16 to match the maximum the settings input accepts — a big
+        # host would otherwise have Auto-detect fill the box with an out-of-range value.
+        recommended_concurrency = min(16, max(1, cpus - 1))
 
         log.info(f"CPU detection: Found {cpus} available cores. Recommending concurrency of {recommended_concurrency}.")
 

@@ -18,6 +18,7 @@ from datetime import datetime
 from threading import Event, Lock
 
 from . import TEMP_DIR
+from .chapter_transforms import strip_unabridged
 
 # Import the task-oriented functions and the global announcer
 from .chunked_conversion_logic import (
@@ -349,7 +350,7 @@ def rename_book_to_match_metadata(asin):
         return None
 
 
-def build_metadata_json(book_info):
+def build_metadata_json(book_info, title_override=None):
     """
     Curated, JSON-serializable subset of Audible's API `item` for the optional
     metadata.json sidecar. Pure (no I/O) so it's unit-testable without a
@@ -358,7 +359,10 @@ def build_metadata_json(book_info):
 
     The `description` cleanup mirrors the FFMETADATA writer in
     chunked_conversion_logic.prepare_book_assets so the sidecar text matches the
-    embedded tag.
+    embedded tag. `title_override`, when given, does the same for the title: the
+    caller resolves the effective title (custom title / "(Unabridged)" cleanup)
+    exactly as that writer does and passes the result in. None means "no
+    override" — the API title is used verbatim.
     """
     book_info = book_info or {}
 
@@ -390,7 +394,7 @@ def build_metadata_json(book_info):
 
     return {
         "asin": book_info.get("asin"),
-        "title": book_info.get("title"),
+        "title": book_info.get("title") if title_override is None else title_override,
         "subtitle": book_info.get("subtitle"),
         "authors": authors,
         "narrators": narrators,
@@ -464,6 +468,10 @@ class BookProcessor:
         # Set True when a same-author+title collision forced an ASIN suffix onto
         # our filename; persisted to the DB on success so the UI can flag it.
         self.is_duplicate = False
+        # The user's custom title for this book, read once during PREPARE. The
+        # sidecar writers need it to match the embedded tags, which always
+        # prefer it over the Audible title.
+        self.custom_title = None
         self.context = {}
         self.total_chunks = 0
         self.completed_chunks = 0
@@ -661,6 +669,10 @@ class BookProcessor:
 
             if not book_details:
                 raise ValueError(f"Could not find ASIN {self.asin} in the database.")
+
+            # Carried to finalize time for the sidecar titles, which follow the
+            # embedded tags rather than the filename rules below.
+            self.custom_title = book_details["custom_title"]
 
             # The custom title/author drive the filename only when the user has
             # opted in; otherwise names come from the native Audible values.
@@ -885,6 +897,19 @@ class BookProcessor:
         conv = load_settings().get("conversion", {})
         base = os.path.splitext(self.final_output_path)[0]
 
+        # The title the two title-bearing sidecars carry, resolved exactly as the
+        # FFMETADATA tag writer in chunked_conversion_logic.prepare_book_assets
+        # resolves it, so a book's sidecars can never disagree with its embedded
+        # tags: a user's custom_title wins outright and is never transformed, and
+        # only the Audible-derived title gets the "(Unabridged)" cleanup.
+        raw_title = (context.get("book_info") or {}).get("title")
+        if self.custom_title:
+            sidecar_title = self.custom_title
+        elif conv.get("chapters", {}).get("strip_unabridged", False):
+            sidecar_title = strip_unabridged(raw_title)
+        else:
+            sidecar_title = raw_title
+
         # 1. Cover image alongside the audiobook, keeping the cover's real ext.
         if conv.get("save_cover_alongside", False):
             cover_file = context.get("cover_file")
@@ -903,7 +928,12 @@ class BookProcessor:
                 json_target = base + ".metadata.json"
                 try:
                     with open(json_target, "w", encoding="utf-8") as f:
-                        json.dump(build_metadata_json(book_info), f, indent=2, ensure_ascii=False)
+                        json.dump(
+                            build_metadata_json(book_info, title_override=sidecar_title),
+                            f,
+                            indent=2,
+                            ensure_ascii=False,
+                        )
                     log.info(f"PROCESSOR ({self.asin}): Saved metadata JSON to {json_target}")
                 except OSError as e:
                     log.warning(f"PROCESSOR ({self.asin}): Could not save metadata JSON: {e}")
@@ -917,7 +947,7 @@ class BookProcessor:
                     ", ".join(a.get("name", "") for a in book_info.get("authors", []) if a.get("name"))
                     or "Unknown Author"
                 )
-                title = book_info.get("title") or "Unknown Title"
+                title = sidecar_title or "Unknown Title"
                 cue_target = base + ".cue"
                 try:
                     cue_text = generate_cue_sheet(

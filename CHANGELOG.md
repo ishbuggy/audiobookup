@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Companion files now match the book's actual title:** The optional `.metadata.json` and `.cue` companion files now use the same title as the tags embedded in the audiobook itself — so with the "(Unabridged)" title cleanup enabled they get the cleaned-up title, and a title you've customized yourself is used as-is (and never altered by the cleanup). Previously they always used the raw Audible title.
+- **Uploaded books honor the `{year}` naming placeholder:** Audiobooks added through the manual upload feature are now filed using the release date read from the file's own tags, so a naming template with `{year}` in it no longer drops that part of the path.
+- **Auto-detect respects the processing-cores limit:** On machines with many CPU cores, the Auto-detect button for Total Processing Cores no longer suggests a value above the setting's 1–16 range.
+
 ### Documentation
 - **New documentation in `docs/`:** The README has been split into a full set of user guides — an overview of how AudioBookup works, a Docker Compose installation guide, a first-time setup walkthrough, a day-to-day usage guide, a complete settings reference covering every option (including the Advanced Mode ones), and a troubleshooting guide — all illustrated with up-to-date screenshots of the app. The README is now a short landing page pointing into them.
 - **Documentation corrections:** The first-time login flow is now described accurately (sign in with the default credentials first, then set your own password), and the local password-reset procedure has been fixed so it actually works as written.

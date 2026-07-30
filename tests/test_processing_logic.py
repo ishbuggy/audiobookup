@@ -1305,6 +1305,18 @@ class TestBuildMetadataJson:
         text = json.dumps(build_metadata_json(self.FULL_BOOK_INFO))
         assert "Dracula" in text
 
+    def test_title_override_replaces_the_api_title(self):
+        # The caller resolves the effective title (custom title / "(Unabridged)"
+        # cleanup) so the sidecar matches the embedded tags; every other field
+        # still comes straight from the API item.
+        result = build_metadata_json(self.FULL_BOOK_INFO, title_override="Dracula (Stripped)")
+        assert result["title"] == "Dracula (Stripped)"
+        assert result["subtitle"] == "The Original Classic"
+
+    def test_title_override_omitted_keeps_the_api_title(self):
+        assert build_metadata_json(self.FULL_BOOK_INFO)["title"] == "Dracula"
+        assert build_metadata_json(self.FULL_BOOK_INFO, title_override=None)["title"] == "Dracula"
+
 
 class TestGenerateCueSheet:
     """Phase 2: the .cue sidecar renderer (pure function)."""
@@ -1453,6 +1465,57 @@ class TestPlaceSidecarFiles:
         out = tmp_path / "out"
         assert not (out / "Dracula.jpg").exists()
         assert (out / "Dracula.cue").exists()
+
+    def _title_settings(self, chapters=None):
+        """Both title-bearing sidecars on, with an optional chapters block."""
+        settings = self._settings(save_metadata_json=True, create_cue_sheet=True)
+        if chapters is not None:
+            settings["conversion"]["chapters"] = chapters
+        return settings
+
+    def _write_titled_sidecars(self, tmp_path, settings, custom_title=None):
+        """Run the two title-bearing sidecars and return (json title, cue text)."""
+        context = {
+            "book_info": {"title": "Dracula (Unabridged)", "authors": [{"name": "Bram Stoker"}]},
+            "chapters": [{"title": "One", "start_offset_ms": 0}],
+        }
+        processor = self._processor(tmp_path, context)
+        processor.custom_title = custom_title
+        with mock.patch.object(processing_logic, "load_settings", return_value=settings):
+            processor._place_sidecar_files()
+        out = tmp_path / "out"
+        saved = json.loads((out / "Dracula.metadata.json").read_text(encoding="utf-8"))
+        return saved["title"], (out / "Dracula.cue").read_text(encoding="utf-8")
+
+    def test_strip_unabridged_on_strips_both_sidecar_titles(self, tmp_path):
+        # The bug: the FFMETADATA tags were stripped but the sidecars were not,
+        # so the file said "Dracula" and the sidecars next to it said
+        # "Dracula (Unabridged)".
+        json_title, cue = self._write_titled_sidecars(tmp_path, self._title_settings({"strip_unabridged": True}))
+        assert json_title == "Dracula"
+        assert 'TITLE "Dracula"' in cue
+
+    def test_strip_unabridged_off_leaves_both_sidecar_titles_alone(self, tmp_path):
+        json_title, cue = self._write_titled_sidecars(tmp_path, self._title_settings({"strip_unabridged": False}))
+        assert json_title == "Dracula (Unabridged)"
+        assert 'TITLE "Dracula (Unabridged)"' in cue
+
+    def test_missing_chapters_block_defaults_to_off(self, tmp_path):
+        # Old settings.json files have no conversion.chapters block at all.
+        json_title, cue = self._write_titled_sidecars(tmp_path, self._title_settings())
+        assert json_title == "Dracula (Unabridged)"
+        assert 'TITLE "Dracula (Unabridged)"' in cue
+
+    def test_custom_title_is_never_stripped(self, tmp_path):
+        # A user's explicit title wins outright and is never transformed, even
+        # when it carries "(Unabridged)" itself and the setting is on.
+        json_title, cue = self._write_titled_sidecars(
+            tmp_path,
+            self._title_settings({"strip_unabridged": True}),
+            custom_title="My Dracula (Unabridged)",
+        )
+        assert json_title == "My Dracula (Unabridged)"
+        assert 'TITLE "My Dracula (Unabridged)"' in cue
 
 
 class TestParseTimestampDate:

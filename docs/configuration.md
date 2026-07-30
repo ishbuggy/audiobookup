@@ -26,7 +26,7 @@ Screenshots for each section below are placeholders for now and will be filled i
 
 **Total Processing Cores**
 Sets the global ceiling on how many CPU-intensive tasks (audio encoding, decryption) can run at once across the whole app. A good starting point is your system's total CPU core count minus one, leaving a core free for the OS and the web UI. Click **Auto-detect** to have the app measure your system's hardware and fill in a suggested value for you.
-Range: 1–16 in the UI (Auto-detect may suggest a higher value on machines with many cores). Default: `2`.
+Range: 1–16. Default: `2`.
 `settings.json: job.download.total_processing_cores — default 2`
 
 <details>
@@ -138,7 +138,7 @@ Choices: High / Standard / Fast. Default: `High`.
 > **Automatic, not a setting:** if a re-encoded book arrives from Audible as one single chapter longer than 30 minutes, AudioBookup splits it into evenly spaced 15-minute "Part N" chapters so playback navigation still works. This always happens for such books (an "Original" lossless remux is never touched) and has no toggle here — mentioned so the extra chapters don't come as a surprise.
 
 **Strip "(Unabridged)"**
-Removes the "(Unabridged)" marker that Audible appends to many titles, from both the title and album tags. Purely cosmetic — has no effect on the audio itself. A title you've customized yourself (via Edit Metadata) is never altered.
+Removes the "(Unabridged)" marker that Audible appends to many titles, from the title and album tags and from the titles in the optional `.metadata.json` and `.cue` companion files. Purely cosmetic — has no effect on the audio itself. A title you've customized yourself (via Edit Metadata) is never altered.
 Default: `Off`.
 `settings.json: conversion.chapters.strip_unabridged — default false`
 

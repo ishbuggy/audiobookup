@@ -463,6 +463,37 @@ class TestAdoptUpload:
         assert staging.exists()  # left unmoved for the endpoint to remove
         assert _rows(db) == []  # no DB row created
 
+    def test_year_segment_comes_from_the_probed_release_date(self, db, tmp_path):
+        # Backlog #7 regression: adopt_upload must hand the naming engine the same
+        # values it stores on the DB row. With only the positional arguments, a
+        # "{year}" template rendered an empty segment at import time but a filled
+        # one on the next metadata edit — so apply_custom_to_filenames would move
+        # the freshly imported book the first time it was edited.
+        from audible_downloader import processing_logic
+
+        real_build = processing_logic.build_base_output_path
+        settings = {"naming": {"template": "{author}/{year}/{author} - {title}"}}
+
+        def build_under_tmp(*args, **kwargs):
+            # build_base_output_path hard-codes the /data root; re-root its result at
+            # tmp_path so the real template rendering is exercised without the test
+            # writing to the host filesystem.
+            return str(tmp_path / "lib") + real_build(*args, **kwargs)[len("/data") :]
+
+        staging = tmp_path / "stage.m4b"
+        staging.write_bytes(b"x")
+        m_meta, m_cover = _patch_meta(title="Great Book", author="Jane Doe", release_date="2011-05-04")
+        with (
+            m_meta,
+            m_cover,
+            mock.patch("audible_downloader.processing_logic.build_base_output_path", side_effect=build_under_tmp),
+        ):
+            result = import_logic.adopt_upload(str(staging), "orig.m4b", settings)
+
+        assert result["filepath"] == str(tmp_path / "lib" / "Jane Doe" / "2011" / "Jane Doe - Great Book.m4b")
+        # ...and the placed path agrees with the date actually written to the row.
+        assert _rows(db)[0]["release_date"] == "2011-05-04"
+
     def test_upload_preserves_m4a_extension(self, db, tmp_path):
         # L8: an uploaded .m4a keeps its real container extension instead of being
         # stored as .m4b — adopt_upload passes the staged file's ext through to
@@ -472,7 +503,7 @@ class TestAdoptUpload:
         target = str(tmp_path / "lib" / "Book.m4a")
         captured = {}
 
-        def fake_build(settings, key, author, title, narrator, publisher, ext=".m4b"):
+        def fake_build(settings, key, author, title, narrator, publisher, ext=".m4b", **tags):
             captured["ext"] = ext
             return target
 

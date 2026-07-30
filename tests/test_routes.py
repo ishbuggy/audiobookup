@@ -713,3 +713,50 @@ class TestSettingsImportLegacyPayload:
         settings = client.get("/api/settings").get_json()
         assert settings["conversion"]["output_format"] == "mp3"
         assert settings["conversion"]["no_reencode"] is False
+
+
+@pytest.fixture
+def fake_core_count(monkeypatch):
+    """Makes GET /api/get_cpu_cores see an arbitrary host core count.
+
+    The route checks the cgroup quota files first and only falls back to
+    os.cpu_count(), so the fixture hides the cgroup paths (real ones exist on a
+    Linux test host) while leaving every other os.path.exists() call alone —
+    @login_required uses it to check the setup flag file."""
+    real_exists = os.path.exists
+
+    def _pretend(cores):
+        monkeypatch.setattr(
+            os.path,
+            "exists",
+            lambda path: False if str(path).startswith("/sys/fs/cgroup") else real_exists(path),
+        )
+        monkeypatch.setattr(os, "cpu_count", lambda: cores)
+
+    return _pretend
+
+
+class TestCpuCoreRecommendation:
+    """Backlog #12 regression: the auto-detect button writes this endpoint's
+    recommendation straight into a number input the UI caps at 16, and nothing
+    clamps it on save — so the suggestion itself must stay inside that range."""
+
+    def test_many_core_host_is_capped_at_the_ui_maximum(self, client, completed_setup, fake_core_count):
+        _login_session(client)
+        fake_core_count(24)
+        response = client.get("/api/get_cpu_cores")
+        assert response.status_code == 200
+        data = response.get_json()
+        # The true core count is still reported for display; only the
+        # recommendation the input receives is clamped.
+        assert data["total_cores"] == 24
+        assert data["recommended_concurrency"] == 16
+
+    def test_low_core_host_still_recommends_one_less(self, client, completed_setup, fake_core_count):
+        _login_session(client)
+        fake_core_count(2)
+        response = client.get("/api/get_cpu_cores")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["total_cores"] == 2
+        assert data["recommended_concurrency"] == 1
