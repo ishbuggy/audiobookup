@@ -2,8 +2,10 @@
 
 import json
 import os
+import sqlite3
+import time
 from datetime import datetime
-from threading import Event
+from threading import Barrier, Event, Lock, Thread
 from unittest import mock
 
 import pytest
@@ -1773,7 +1775,12 @@ class TestCompletionTimeout:
 
 class TestTimeoutFailureHandling:
     """v0.23.0 M1 (second half): what an expired completion wait does — exactly one
-    deterministic failure write, and NO subprocess kill.
+    failure write, and NO subprocess kill.
+
+    The cases below drive the sequential ordering, where the timeout handler is
+    genuinely first and so its message is the one that survives. A step failing in
+    the instant before the flag goes up wins the claim instead and keeps its own
+    (equally true) message; only the COUNT is guaranteed.
 
     The kill was built and then pulled before shipping: the process registry is
     keyed by job rather than by book, so terminating the job would also SIGTERM a
@@ -1816,7 +1823,8 @@ class TestTimeoutFailureHandling:
             processor._fail_or_cancel("A chapter chunk failed to encode.")
             processor._fail_or_cancel("MP3 encode failed.")
 
-        # Exactly one failure write, and it is the deterministic timeout message.
+        # Exactly one failure write, and with the timeout landing first here, it
+        # is the timeout message that survives.
         assert len(reported) == 1
         assert "Processing timed out." in reported[0]
 
@@ -1917,6 +1925,112 @@ class TestOnceOnlyFailureReport:
         con_b, _ = self._report("A chapter chunk failed to encode.")
         assert con_a.execute.call_count == 1
         assert con_b.execute.call_count == 1
+
+    def test_a_raised_write_releases_the_latch(self):
+        # The claim is only provisional until the write lands. If the UPDATE
+        # raises ("database is locked" against a busy SQLite file), a permanently
+        # claimed latch would mean NO ERROR row for the whole run: status stays
+        # NEW, retry_count stays 0, and every later reporter — including `run`'s
+        # own except handler after the completion timeout — is silently dropped,
+        # so every future scheduled run re-attempts the book forever.
+        processor = BookProcessor(asin="B0OURS", job_id=7)
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.side_effect = [sqlite3.OperationalError("database is locked"), None, None]
+        with (
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "_yield_progress") as progress,
+        ):
+            with pytest.raises(sqlite3.OperationalError):
+                processor._update_db_on_failure("A chapter chunk failed to encode.")
+            # The next reporter gets its turn and records the failure.
+            processor._update_db_on_failure("A critical error occurred: timed out")
+            # ...and having succeeded, it re-claims the latch for good.
+            processor._update_db_on_failure("MP3 encode failed.")
+
+        assert con.execute.call_count == 2
+        assert con.execute.call_args.args[1] == ("A critical error occurred: timed out", "B0OURS")
+        progress.assert_called_once()
+
+    def test_concurrent_reporters_still_produce_exactly_one_write(self):
+        # The property the lock exists for, and the one the release-on-error path
+        # must not weaken: several chunk workers failing at the same instant claim
+        # the report between them exactly once. The barrier lines the threads up
+        # on the claim and the write itself is slowed, so the losers are still
+        # inside _update_db_on_failure while the winner writes.
+        processor = BookProcessor(asin="B0OURS", job_id=7)
+        writes = []
+        writes_lock = Lock()
+        lined_up = Barrier(4)
+
+        def slow_connection():
+            con = mock.MagicMock()
+            con.__enter__.return_value = con
+
+            def execute(_sql, params):
+                time.sleep(0.05)
+                with writes_lock:
+                    writes.append(params)
+
+            con.execute.side_effect = execute
+            return con
+
+        def report():
+            lined_up.wait()
+            processor._fail_or_cancel("A chapter chunk failed to encode.")
+
+        with (
+            mock.patch.object(processing_logic, "get_db_connection", side_effect=slow_connection),
+            mock.patch.object(processing_logic, "_yield_progress"),
+        ):
+            threads = [Thread(target=report) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        assert writes == [("A chapter chunk failed to encode.", "B0OURS")]
+
+
+class TestPostTimeoutMp3Finalize:
+    """v0.23.0 W2: an MP3 encode that finishes AFTER `run` timed out must not
+    finalize as a success.
+
+    The chunked and remux paths are covered incidentally — their inputs live in
+    the temp dir `run` has already deleted, so they simply fail — but the MP3
+    encoder promotes its ".part" onto the FINAL path in /data, which outlives the
+    temp dir. Without the guard the late success flips the book back to
+    DOWNLOADED, resets retry_count, and runs the stale-file cleanup, deleting the
+    user's previous copy on behalf of a run that already recorded ERROR."""
+
+    def _encode(self, tmp_path, timed_out):
+        processor = BookProcessor(asin="B0OURS", job_id=7)
+        processor.final_output_path = str(tmp_path / "Author - Title.mp3")
+        with open(processor.final_output_path, "w", encoding="utf-8") as handle:
+            handle.write("finished encode")
+        if timed_out:
+            processor._timed_out.set()
+        with (
+            mock.patch.object(processing_logic, "encode_book_mp3", return_value=True),
+            mock.patch.object(processor, "_finalize_success") as finalize,
+            mock.patch.object(processor, "_cleanup_stale_files") as cleanup,
+        ):
+            processor._encode_mp3_and_finalize()
+        return processor, finalize, cleanup
+
+    def test_a_post_timeout_encode_does_not_finalize(self, tmp_path):
+        processor, finalize, cleanup = self._encode(tmp_path, timed_out=True)
+        finalize.assert_not_called()
+        cleanup.assert_not_called()
+        # The orphaned output is discarded, so a later deep sync can't adopt it
+        # as a DOWNLOADED book the DB says failed.
+        assert not os.path.exists(processor.final_output_path)
+
+    def test_a_normal_encode_still_finalizes(self, tmp_path):
+        processor, finalize, _cleanup = self._encode(tmp_path, timed_out=False)
+        finalize.assert_called_once()
+        assert finalize.call_args.kwargs == {"record_eta": False}
+        assert os.path.exists(processor.final_output_path)
 
 
 class TestBuildMetadataJson:

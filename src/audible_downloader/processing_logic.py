@@ -889,9 +889,12 @@ class BookProcessor:
                     # the kill to this book's own processes needs per-book process
                     # tracking, deferred to backlog #19.
                     #
-                    # Claim the failure report before raising, so a late step
-                    # failure from that still-running encode doesn't also write an
-                    # ERROR row (see _fail_or_cancel and self._timed_out).
+                    # Flag the timeout before raising, so a late step failure from
+                    # that still-running encode doesn't also write an ERROR row
+                    # (see _fail_or_cancel and self._timed_out). A step that
+                    # failed just BEFORE this flag went up may already have
+                    # claimed the report — that is fine, it names the real cause
+                    # and the write still happens exactly once.
                     self._timed_out.set()
                     raise RuntimeError("Processing timed out.")
         except Exception as e:
@@ -1573,6 +1576,21 @@ class BookProcessor:
 
         if not success:
             self._fail_or_cancel("MP3 encode failed.")
+        elif self._timed_out.is_set():
+            # The symmetric guard to _fail_or_cancel's: `run` already gave up on
+            # this encode, wrote the ERROR row and walked away, so a success
+            # arriving now belongs to a run that has declared itself failed.
+            # Finalizing anyway would flip the book back to DOWNLOADED, reset
+            # retry_count, and — the destructive part — run _cleanup_stale_files
+            # against the previous file. The chunked and remux paths are covered
+            # for free (their inputs die with the temp dir, so they just fail),
+            # but the MP3 encoder writes beside the FINAL path in /data, which
+            # outlives the temp dir. Discard the orphan we just wrote.
+            log.warning(
+                f"TASK-MP3 ({self.asin}): Encode finished after the completion timeout was already "
+                f"reported; discarding the output instead of finalizing."
+            )
+            self._discard_timed_out_output()
         else:
             # Single-threaded LAME rates aren't comparable to the parallel
             # chunked-AAC encode, so keep them out of the shared ETA model
@@ -1582,6 +1600,25 @@ class BookProcessor:
         # This is the final step, so we signal the main `run` method to unblock.
         self._completion_event.set()
         log.info(f"TASK-MP3 ({self.asin}): Finalization complete.")
+
+    def _discard_timed_out_output(self):
+        """
+        Best-effort removal of an output produced after the run already timed out.
+
+        The MP3 encoder promotes its ".part" onto the final path before returning
+        success, so by the time the guard above sees `_timed_out` the file is
+        already sitting in /data — unreferenced by the DB (the row says ERROR)
+        but perfectly readable, so a later deep sync would adopt it. Failing to
+        delete it is not worth failing anything over: the run is already recorded
+        as failed.
+        """
+        if not self.final_output_path or not os.path.exists(self.final_output_path):
+            return
+        try:
+            os.remove(self.final_output_path)
+            log.info(f"PROCESSOR ({self.asin}): Removed post-timeout output file {self.final_output_path}.")
+        except OSError as e:
+            log.warning(f"PROCESSOR ({self.asin}): Could not remove post-timeout output file: {e}")
 
     def _fail_or_cancel(self, error_message):
         """
@@ -1600,10 +1637,13 @@ class BookProcessor:
         the failure and walked away, leaving this book's tasks running. Whenever one
         of those abandoned steps eventually fails, the report arriving here is an
         echo of a failure that is already recorded. Writing it again would bump
-        retry_count a second time (or once per in-flight chunk) and overwrite the
-        deterministic "Processing timed out." with whichever step happened to report
-        last. The prepare path needs no equivalent guard: it already reads its own
-        -15 as cancellation and writes nothing.
+        retry_count a second time (or once per in-flight chunk) and overwrite
+        "Processing timed out." with whichever step happened to report last. (A
+        step that fails just before the timeout handler raises the flag wins the
+        race instead and keeps its own message — see the latch in
+        _update_db_on_failure; either way exactly one write survives.) The prepare
+        path needs no equivalent guard: it already reads its own -15 as
+        cancellation and writes nothing.
         """
         if self.stop_event is not None and self.stop_event.is_set():
             log.info(f"PROCESSOR ({self.asin}): Step cancelled; leaving book status unchanged.")
@@ -1645,12 +1685,21 @@ class BookProcessor:
         (None, None) prepare-path check: a user-cancelled download leaves the
         book's status untouched, so it must not consume the automatic retry.
 
-        Because the bump lives here, so does the once-per-run latch: the first
-        failure of a run claims the report and writes it, and every later one
+        Because the bump lives here, so does the once-per-run latch: the FIRST
+        reporter of a run claims the report and writes it, and every later one
         (the late chunk echoes described on `self._failure_reported`, or a
         teardown error surfacing in `run`'s except block after a step already
-        reported) is logged and dropped. Dropping keeps the FIRST message, which
-        is the one that names the actual cause.
+        reported) is logged and dropped. The guarantee is exactly one failure
+        write per run, first reporter wins — not a particular message: a chunk
+        failing microseconds before the timeout handler sets `_timed_out` can
+        claim the latch first, in which case the surviving message names the
+        chunk's real cause instead of "Processing timed out." Either way the
+        count — the part the retry gate depends on — is one.
+
+        The claim is taken under the lock but the write happens outside it, and a
+        write that RAISES releases the claim again (see the except below): a
+        claim whose write never landed would otherwise silence the whole rest of
+        the run.
         """
         with self._failure_report_lock:
             if self._failure_reported:
@@ -1659,15 +1708,31 @@ class BookProcessor:
                     f"({error_message}); not recording it again."
                 )
                 return
+            # Claimed here so two threads racing produce exactly one write, but
+            # only PROVISIONALLY: it is released again if the write below raises.
             self._failure_reported = True
 
         log.error(f"PROCESSOR ({self.asin}):   -> ERROR: {error_message}")
-        with get_db_connection() as con:
-            con.execute(
-                "UPDATE audiobooks SET status = 'ERROR', error_message = ?, "
-                "retry_count = COALESCE(retry_count, 0) + 1 WHERE asin = ?",
-                (error_message, self.asin),
-            )
+        try:
+            with get_db_connection() as con:
+                con.execute(
+                    "UPDATE audiobooks SET status = 'ERROR', error_message = ?, "
+                    "retry_count = COALESCE(retry_count, 0) + 1 WHERE asin = ?",
+                    (error_message, self.asin),
+                )
+        except Exception:
+            # A raised write ("database is locked" being the realistic one) must
+            # not consume the run's one report. Holding a claim with no row
+            # behind it is the worst of both worlds: no ERROR status, no
+            # retry_count bump, and every later reporter suppressed — including
+            # `run`'s own except handler after the completion timeout — leaving
+            # the book NEW at retry_count 0, which every future scheduled run
+            # picks up again. Release the claim so the next reporter gets a turn,
+            # then re-raise: what the caller sees on a failed write is exactly
+            # what it saw before the latch existed.
+            with self._failure_report_lock:
+                self._failure_reported = False
+            raise
         _yield_progress(self.asin, "Failed!", 100, self.job_id)
 
 
