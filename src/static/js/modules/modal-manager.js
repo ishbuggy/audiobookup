@@ -37,6 +37,7 @@ const processSelectedBtn = document.getElementById("process-selected-btn");
 const selectionCountSpan = document.getElementById("selection-count");
 const libraryGrid = document.getElementById("library-grid");
 const fetchSummaryBtn = document.getElementById("fetch-full-summary-btn");
+const downloadAnnotationsBtn = document.getElementById("download-annotations-btn");
 const bulkRenameModal = document.getElementById("bulk-rename-modal");
 
 // --- Book Detail Modal Logic ---
@@ -157,6 +158,17 @@ async function handleBookClick(event) {
             fetchSummaryBtn.dataset.asin = asin;
         } else {
             fetchSummaryBtn.style.display = "none";
+        }
+
+        // Annotations Button: the dump is written next to the audiobook, so it is
+        // only offered for a book that actually has a file on disk. (The route
+        // re-checks this — the button is a convenience, not the guard.)
+        const annotationsBtn = document.getElementById("download-annotations-btn");
+        if (book.status === "DOWNLOADED") {
+            annotationsBtn.style.display = "inline-block";
+            annotationsBtn.dataset.asin = asin;
+        } else {
+            annotationsBtn.style.display = "none";
         }
 
         // --- Context-Aware Download Button Logic ---
@@ -299,6 +311,43 @@ async function handleFetchFullSummary(event) {
         btn.classList.remove("loading");
         btn.disabled = false;
         btn.textContent = "Get Full Summary";
+    }
+}
+
+// Fetch this book's annotations (clips, notes, bookmarks) on demand and save
+// them beside the audiobook. Modeled on handleFetchFullSummary above, but the
+// outcome is reported with a toast: nothing in the modal changes, and "the book
+// has no annotations" is a perfectly normal answer that must not read as an
+// error. The button label carries an icon, so it is restored via innerHTML.
+const ANNOTATIONS_BTN_LABEL = '<i class="fas fa-bookmark"></i> Download Annotations';
+
+async function handleDownloadAnnotations(event) {
+    const btn = event.currentTarget;
+    const asin = btn.dataset.asin;
+    if (!asin) return;
+    btn.classList.add("loading");
+    btn.disabled = true;
+    btn.textContent = "Fetching...";
+    try {
+        const response = await fetch(`/api/book/${asin}/annotations`, { method: "POST" });
+        // A non-JSON body (proxy error page, connection reset) must not throw
+        // past the error toast below, so the parse failure degrades to {}.
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.success) {
+            throw new Error(data.error || `Server responded with status: ${response.status}`);
+        }
+        if (data.annotations) {
+            window.showToast("Annotations saved next to the audiobook.", "success");
+        } else {
+            window.showToast("No clips or bookmarks found for this book.", "info");
+        }
+    } catch (error) {
+        console.error("Failed to download annotations:", error);
+        window.showToast(error.message || "Could not save annotations.", "error");
+    } finally {
+        btn.classList.remove("loading");
+        btn.disabled = false;
+        btn.innerHTML = ANNOTATIONS_BTN_LABEL;
     }
 }
 
@@ -931,6 +980,7 @@ document.addEventListener("DOMContentLoaded", () => {
     detailModalCloseBtn.onclick = closeDetailModal;
     libraryGrid.addEventListener("click", handleBookClick);
     fetchSummaryBtn.addEventListener("click", handleFetchFullSummary);
+    downloadAnnotationsBtn.addEventListener("click", handleDownloadAnnotations);
 
     // Metadata editor (Phase 3.1). Listeners are bound once; the handlers read
     // the active book from `currentDetailBook`.

@@ -35,6 +35,7 @@ from audible_downloader import (
     LOG_FILE,
     MAX_LOG_LINES,
     SETUP_FLAG_FILE,
+    TEMP_DIR,
     announcer,
     app,
     settings_changed_event,
@@ -864,6 +865,99 @@ def fetch_full_summary(asin):
     except sqlite3.Error as e:
         log.error(f"Database error updating full summary for {asin}: {e}", exc_info=True)
         return jsonify(error="Failed to update database."), 500
+
+
+# How long the on-demand annotations fetch may take before the request gives up.
+# One short audible-cli call against the annotations endpoint; two minutes is
+# generous, and the cap exists so a hung CLI can't pin a request thread forever.
+_ANNOTATIONS_TIMEOUT_SEC = 120
+
+
+@app.route("/api/book/<string:asin>/annotations", methods=["POST"])
+@login_required
+def download_book_annotations(asin):
+    """
+    Fetch a downloaded book's annotations (the listener's own clips, notes and
+    bookmarks) on demand and write them next to its audio file as
+    "<base>.annotations.json" — the same sidecar the download-time
+    `conversion.save_annotations` toggle produces, for books that were already
+    converted before the toggle was turned on.
+
+    Synchronous by design: a single short audible-cli call, no job type and no
+    job_manager involvement, so it never contends with a running SYNC/DOWNLOAD.
+    Like the summary fetch above it runs unregistered with process_registry —
+    there is no job id to register under, and the call is request-scoped — but
+    unlike it, HOME is pointed at /database so audible-cli finds its auth, and
+    the call is capped with a timeout.
+
+    Responses: {success: true, annotations: true} when a dump was written,
+    {success: true, annotations: false} when the title simply has none (a normal
+    outcome, not an error), and an `error` message otherwise.
+    """
+    from audible_downloader.chunked_conversion_logic import annotations_command, find_annotations_file
+
+    con = get_db_connection()
+    try:
+        row = con.execute("SELECT status, filepath FROM audiobooks WHERE asin = ?", (asin,)).fetchone()
+    except sqlite3.Error as e:
+        log.error(f"Database error reading book {asin} for annotations: {e}", exc_info=True)
+        return jsonify(error="Failed to read the database."), 500
+    finally:
+        con.close()
+
+    if row is None:
+        return jsonify(error="Book not found."), 404
+
+    # The sidecar is placed beside the audiobook, so an on-disk file is the real
+    # requirement — a NEW/MISSING book has nowhere to put it. Checking the file
+    # rather than only the status also catches a DOWNLOADED row whose file was
+    # moved or deleted outside the app.
+    filepath = dict(row).get("filepath")
+    if not filepath:
+        return jsonify(error="This book has not been downloaded yet."), 400
+    if not os.path.exists(filepath):
+        return jsonify(error="The book's audio file is missing from disk."), 400
+
+    env = os.environ.copy()
+    env["HOME"] = DATABASE_DIR
+
+    # audible-cli names the dump after the book title and refuses to overwrite,
+    # so it lands in a scratch directory of our own that is removed either way.
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    work_dir = tempfile.mkdtemp(prefix=f"{asin}_annotations_", dir=TEMP_DIR)
+    try:
+        result = subprocess.run(
+            annotations_command(asin, work_dir),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=_ANNOTATIONS_TIMEOUT_SEC,
+        )
+        source = find_annotations_file(work_dir)
+        if source is None:
+            # audible-cli exits 0 and writes nothing for a title with no
+            # annotations, so the file's presence — not the exit code — decides
+            # between "none to save" and a real failure.
+            if result.returncode != 0:
+                log.warning(f"Annotations fetch for {asin} exited {result.returncode}.")
+                return jsonify(error="Failed to fetch annotations from Audible."), 502
+            log.info(f"No annotations found for {asin}.")
+            return jsonify(success=True, annotations=False)
+
+        target = os.path.splitext(filepath)[0] + ".annotations.json"
+        shutil.move(source, target)
+        log.info(f"Saved annotations for {asin} to {target}")
+        return jsonify(success=True, annotations=True, path=target)
+    except subprocess.TimeoutExpired:
+        log.error(f"Annotations fetch for {asin} timed out after {_ANNOTATIONS_TIMEOUT_SEC}s.")
+        return jsonify(error="Timed out fetching annotations from Audible."), 504
+    except OSError as e:
+        log.error(f"Could not save annotations for {asin}: {e}", exc_info=True)
+        return jsonify(error="Failed to save the annotations file."), 500
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 @app.route("/api/book/<string:asin>/update", methods=["POST"])

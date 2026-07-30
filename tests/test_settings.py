@@ -186,6 +186,8 @@ class TestNewNestedKeysRoundTrip:
         assert conv["save_metadata_json"] is False
         assert conv["create_cue_sheet"] is False
         assert conv["retain_aax"] is False
+        # An old settings.json predating the annotations sidecar must default off.
+        assert conv["save_annotations"] is False
 
     def test_new_naming_keys_have_defaults(self, settings_file):
         settings_file.write_text(json.dumps({"username": "bob"}))

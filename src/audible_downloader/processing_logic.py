@@ -67,10 +67,21 @@ _COMPLETION_TIMEOUT_FLOOR_SEC = 7200
 _MP3_TIMEOUT_RUNTIME_MULTIPLE = 3
 
 # Every file that can end up sharing a finished audiobook's base name: the
-# companion PDF, cover image, cue sheet, metadata JSON, and a retained raw
-# master (+ its voucher). Anything that follows the audiobook — a rename moving
-# it, a timestamp stamp — walks this list so the two can't drift apart.
-_SIDECAR_SUFFIXES = (".pdf", ".jpg", ".png", ".cue", ".metadata.json", ".aax", ".aaxc", ".voucher")
+# companion PDF, cover image, cue sheet, metadata JSON, the annotations dump,
+# and a retained raw master (+ its voucher). Anything that follows the
+# audiobook — a rename moving it, a timestamp stamp — walks this list so the two
+# can't drift apart.
+_SIDECAR_SUFFIXES = (
+    ".pdf",
+    ".jpg",
+    ".png",
+    ".cue",
+    ".metadata.json",
+    ".annotations.json",
+    ".aax",
+    ".aaxc",
+    ".voucher",
+)
 
 # Every audio extension a tracked book's file can carry. Two books at the same
 # base under DIFFERENT audio extensions share one set of sidecars, so any of
@@ -1215,6 +1226,20 @@ class BookProcessor:
                     log.info(f"PROCESSOR ({self.asin}): Retained voucher to {voucher_target}")
                 except OSError as e:
                     log.warning(f"PROCESSOR ({self.asin}): Could not retain voucher: {e}")
+
+        # 5. Raw annotations JSON (the listener's own clips, notes and bookmarks)
+        #    fetched during download. Most titles have none, in which case prepare
+        #    leaves the context key None and there is simply nothing to place —
+        #    the setting being on is not a promise that a sidecar appears.
+        if conv.get("save_annotations", False):
+            annotations_file = context.get("annotations_file")
+            if annotations_file and os.path.exists(annotations_file):
+                annotations_target = base + ".annotations.json"
+                try:
+                    shutil.copy2(annotations_file, annotations_target)
+                    log.info(f"PROCESSOR ({self.asin}): Saved annotations to {annotations_target}")
+                except OSError as e:
+                    log.warning(f"PROCESSOR ({self.asin}): Could not save annotations: {e}")
 
     def _apply_file_timestamps(self):
         """

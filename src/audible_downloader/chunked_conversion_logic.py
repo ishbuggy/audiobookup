@@ -153,6 +153,85 @@ def _run_registered(cmd, job_id, *, check=False, text=True, encoding=None, error
     return result
 
 
+def annotations_command(asin, out_dir):
+    """
+    The audible-cli invocation that dumps a title's own annotations (clips,
+    notes, bookmarks) as raw Audible JSON into `out_dir`. Shared with the
+    on-demand route in routes.py so the two can never drift apart. Callers must
+    still supply an env with HOME=DATABASE_DIR, as with every audible-cli call.
+    """
+    return ["audible", "download", "-a", asin, "--annotation", "-o", out_dir]
+
+
+def find_annotations_file(directory):
+    """
+    The annotations dump inside `directory`, or None when there isn't one.
+
+    audible-cli names the file after the book's title, not its ASIN
+    ("Project_Hail_Mary-annotations.json"), so it can only be found by suffix.
+    Sorted for determinism in the (not expected) case of more than one match.
+    """
+    try:
+        matches = sorted(
+            entry.path
+            for entry in os.scandir(directory)
+            if entry.is_file() and entry.name.endswith("-annotations.json")
+        )
+    except OSError:
+        return None
+    return matches[0] if matches else None
+
+
+def _fetch_annotations(asin, job_id, temp_dir, env):
+    """
+    Best-effort fetch of a title's annotations during download. Returns
+    (annotations_file, cancelled) — the absolute path to the dump (or None), and
+    whether the call was SIGTERMed, i.e. the job was cancelled.
+
+    The dump MUST land in a subdirectory of the book's temp dir, never the temp
+    root: the file detection in prepare_book_assets takes the FIRST .json it
+    finds there as the chapter file, so a second .json beside it could win that
+    race and break every chapter in the book.
+
+    audible-cli exits 0 either way — a title with annotations writes
+    "<Title>-annotations.json", a title without writes nothing and just prints
+    "No annotations found for <title>." — so the file's presence is the only
+    reliable signal and its absence is normal, not a failure. Every other
+    failure mode is logged and swallowed: annotations are a bonus sidecar and
+    must never turn a good conversion into an error. A SIGTERM (-15) is the one
+    exception, reported back so the caller can bail like every other cancel.
+    """
+    annotations_dir = os.path.join(temp_dir, "annotations")
+    try:
+        os.makedirs(annotations_dir, exist_ok=True)
+        result = _run_registered(
+            annotations_command(asin, annotations_dir),
+            job_id,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
+        if result.returncode == -15:
+            return None, True
+
+        # Globbed regardless of the exit code: when a download strategy failed
+        # and retried, an earlier attempt may already have written the file, and
+        # a second (now-failing) call must not throw away what is on disk.
+        annotations_file = find_annotations_file(annotations_dir)
+        if annotations_file:
+            log.info(f"PREPARE ({asin}): Fetched annotations dump {os.path.basename(annotations_file)}")
+        elif result.returncode != 0:
+            log.warning(
+                f"PREPARE ({asin}): Annotations fetch exited {result.returncode}; continuing without annotations."
+            )
+        else:
+            log.info(f"PREPARE ({asin}): No annotations (clips/notes/bookmarks) found for this title.")
+        return annotations_file, False
+    except Exception as e:
+        log.warning(f"PREPARE ({asin}): Annotations fetch failed: {e}. Continuing without annotations.")
+        return None, False
+
+
 def _yield_progress(asin, status_text, progress, job_id=None):
     """
     A helper function to format and announce progress updates via the global announcer.
@@ -219,6 +298,11 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
     # below and threaded into the returned context for the sidecar placement.
     retain_aax = settings.get("conversion", {}).get("retain_aax", False)
 
+    # Save the listener's annotations (clips, notes, bookmarks) as a raw JSON
+    # sidecar. Read once here; the fetch happens right after the audio download
+    # below and the result is threaded into the returned context.
+    save_annotations = settings.get("conversion", {}).get("save_annotations", False)
+
     # Variables to hold state across the retry loops
     audio_file = None
     cover_file = None
@@ -237,6 +321,10 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
     # retry loop so they're always defined at the return statement in Phase 2.
     retained_raw_audio_file = None
     retained_voucher_file = None
+    # The annotations dump, when the setting is on and the title actually has
+    # annotations (both are optional). Same precedent as the two above: defined
+    # before the retry loop so it always has a value at the return statement.
+    annotations_file = None
 
     # Strategy Definition: (Flag, Name)
     download_strategies = [("--aaxc", "AAXC (Fast)"), ("--aax-fallback", "AAX (Reliable)")]
@@ -326,6 +414,18 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
                 )
 
             log.info(f"PREPARE ({asin}): Download finished.")
+
+            # --- 1b. Optional: Annotations (clips / notes / bookmarks) ---
+            # A separate audible-cli call, so it runs only once the audio is
+            # safely down. _fetch_annotations swallows its own failures (the
+            # sidecar is a bonus, never worth failing a book over) and writes
+            # into a SUBDIRECTORY so the chapter-JSON detection below is
+            # untouched; only a cancel comes back for us to act on.
+            if save_annotations:
+                annotations_file, annotations_cancelled = _fetch_annotations(asin, job_id, temp_dir, env)
+                if annotations_cancelled:
+                    log.info(f"PREPARE ({asin}): Cancelled during annotations fetch.")
+                    return None, None
 
             # --- 2. Get Metadata & Detect Files ---
             _yield_progress(asin, "Preparing metadata...", 25, job_id)
@@ -844,6 +944,10 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             # next to the finished book by BookProcessor._place_sidecar_files.
             "raw_audio_file": retained_raw_audio_file,
             "voucher_file": retained_voucher_file,
+            # Populated only when save_annotations is on AND the title has
+            # annotations (None otherwise); copied next to the finished book by
+            # BookProcessor._place_sidecar_files.
+            "annotations_file": annotations_file,
         }, None
 
     except Exception as e:

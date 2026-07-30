@@ -690,6 +690,31 @@
                                 <span class="slider"></span>
                             </label>
                         </div>
+
+                        <div class="form-group advanced-setting">
+                            <label for="save-annotations">
+                                Save Annotations
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Write your clips, notes and bookmarks to an
+                                    <code>.annotations.json</code> sidecar. Books you never annotated produce no file.
+                                </small>
+                            </label>
+                            <label class="switch">
+                                <input
+                                    type="checkbox"
+                                    id="save-annotations"
+                                    class="setting-input"
+                                    data-path="conversion.save_annotations"
+                                    {%
+                                    if
+                                    settings.conversion.save_annotations
+                                    %}checked{%
+                                    endif
+                                    %}
+                                />
+                                <span class="slider"></span>
+                            </label>
+                        </div>
                     </div>
                 </div>
                 <!-- END: SIDECAR FILES ACCORDION -->

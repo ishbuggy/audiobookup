@@ -2003,6 +2003,7 @@ class TestPlaceSidecarFiles:
             "save_metadata_json": False,
             "create_cue_sheet": False,
             "retain_aax": False,
+            "save_annotations": False,
         }
         base.update(conv)
         return {"conversion": base}
@@ -2076,6 +2077,34 @@ class TestPlaceSidecarFiles:
         assert not (out / "Dracula.jpg").exists()
         assert (out / "Dracula.cue").exists()
 
+    def test_annotations_are_placed_when_present(self, tmp_path):
+        # Phase 6: the raw annotations dump prepare fetched is copied to
+        # "<base>.annotations.json" — content passed through verbatim.
+        dump = tmp_path / "Dracula-annotations.json"
+        dump.write_text('{"payload": {"records": []}}', encoding="utf-8")
+        processor = self._processor(tmp_path, {"annotations_file": str(dump)})
+        with mock.patch.object(processing_logic, "load_settings", return_value=self._settings(save_annotations=True)):
+            processor._place_sidecar_files()
+        placed = tmp_path / "out" / "Dracula.annotations.json"
+        assert placed.exists()
+        assert placed.read_text(encoding="utf-8") == '{"payload": {"records": []}}'
+
+    def test_annotations_skipped_when_context_has_none(self, tmp_path):
+        # The common case: the setting is on but the title has no annotations, so
+        # prepare left the key None. Nothing is written and nothing raises.
+        processor = self._processor(tmp_path, {"annotations_file": None})
+        with mock.patch.object(processing_logic, "load_settings", return_value=self._settings(save_annotations=True)):
+            processor._place_sidecar_files()
+        assert list((tmp_path / "out").iterdir()) == []
+
+    def test_annotations_skipped_when_setting_off(self, tmp_path):
+        dump = tmp_path / "Dracula-annotations.json"
+        dump.write_text("{}", encoding="utf-8")
+        processor = self._processor(tmp_path, {"annotations_file": str(dump)})
+        with mock.patch.object(processing_logic, "load_settings", return_value=self._settings()):
+            processor._place_sidecar_files()
+        assert list((tmp_path / "out").iterdir()) == []
+
     def _title_settings(self, chapters=None):
         """Both title-bearing sidecars on, with an optional chapters block."""
         settings = self._settings(save_metadata_json=True, create_cue_sheet=True)
@@ -2126,6 +2155,30 @@ class TestPlaceSidecarFiles:
         )
         assert json_title == "My Dracula (Unabridged)"
         assert 'TITLE "My Dracula (Unabridged)"' in cue
+
+
+class TestSidecarSuffixRegistry:
+    """Every sidecar suffix must be in _SIDECAR_SUFFIXES, because that one list is
+    what the rename, the timestamp sweep and the stale-file cleanup all walk — a
+    sidecar missing from it gets orphaned when its audiobook moves."""
+
+    def test_annotations_suffix_is_registered(self):
+        assert ".annotations.json" in processing_logic._SIDECAR_SUFFIXES
+
+    def test_annotations_sidecar_is_found_next_to_a_book(self, tmp_path):
+        # End-to-end through the discovery helper the movers use, which is what
+        # actually decides whether the file follows its audiobook.
+        base = tmp_path / "Dracula"
+        (tmp_path / "Dracula.m4b").write_bytes(b"audio")
+        (tmp_path / "Dracula.annotations.json").write_text("{}", encoding="utf-8")
+        assert processing_logic._existing_sidecar_suffixes(str(base)) == [".annotations.json"]
+
+    def test_metadata_and_annotations_are_distinguished(self, tmp_path):
+        # Both end in ".json" and share the same base; both must be reported.
+        base = tmp_path / "Dracula"
+        (tmp_path / "Dracula.metadata.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "Dracula.annotations.json").write_text("{}", encoding="utf-8")
+        assert processing_logic._existing_sidecar_suffixes(str(base)) == [".annotations.json", ".metadata.json"]
 
 
 class TestParseTimestampDate:

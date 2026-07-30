@@ -74,6 +74,11 @@ DEFAULT_SETTINGS = {
         "save_metadata_json": False,
         "create_cue_sheet": False,
         "retain_aax": False,
+        # Save the listener's own annotations (clips, notes, bookmarks) as a raw
+        # Audible JSON sidecar next to the book. Fetched with a separate
+        # audible-cli call during download; titles with no annotations simply
+        # produce no sidecar, which is the common case and not an error.
+        "save_annotations": False,
         # Timestamp stamped onto the finished file (and its sidecars) at finalize
         # time (Phase 9 consumer). Enum: "none" | "release_date" | "purchase_date".
         # "none" is today's behavior — the file keeps its real creation mtime.

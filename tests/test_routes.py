@@ -871,3 +871,147 @@ class TestStartDownloadJobParams:
         )
         assert response.status_code == 200
         assert captured_start[0]["job_params"] == {}
+
+
+class TestDownloadBookAnnotations:
+    """v0.23.0 Phase 6: POST /api/book/<asin>/annotations saves a downloaded
+    book's clips/notes/bookmarks beside its audio file. Synchronous, and the
+    "this title has no annotations" answer is a success, not an error."""
+
+    @pytest.fixture
+    def annotated_db(self, tmp_path, monkeypatch):
+        """A temp library.db whose one DOWNLOADED book has a real file on disk."""
+        from audible_downloader import db as db_module
+
+        book_file = tmp_path / "library" / "Dracula.m4b"
+        book_file.parent.mkdir()
+        book_file.write_bytes(b"audio")
+
+        db_path = tmp_path / "library.db"
+        con = sqlite3.connect(db_path)
+        con.execute("CREATE TABLE audiobooks (asin TEXT PRIMARY KEY, title TEXT, status TEXT, filepath TEXT)")
+        con.execute(
+            "INSERT INTO audiobooks (asin, title, status, filepath) VALUES (?, ?, ?, ?)",
+            ("B001", "Dracula", "DOWNLOADED", str(book_file)),
+        )
+        # A book that was never downloaded: no path to place a sidecar beside.
+        con.execute(
+            "INSERT INTO audiobooks (asin, title, status, filepath) VALUES (?, ?, ?, ?)",
+            ("B002", "Not Yet", "NEW", None),
+        )
+        # A DOWNLOADED row whose file has since disappeared from disk.
+        con.execute(
+            "INSERT INTO audiobooks (asin, title, status, filepath) VALUES (?, ?, ?, ?)",
+            ("B003", "Ghost", "DOWNLOADED", str(tmp_path / "library" / "Ghost.m4b")),
+        )
+        con.commit()
+        con.close()
+        monkeypatch.setattr(db_module, "DB_FILE", str(db_path))
+        return book_file
+
+    def _fake_run(self, *, writes_file, returncode=0):
+        """Stand in for the audible-cli call, optionally writing the dump that a
+        title with annotations produces (named after the title, not the ASIN)."""
+        import subprocess as sp
+
+        def runner(cmd, **kwargs):
+            out_dir = cmd[cmd.index("-o") + 1]
+            if writes_file:
+                with open(os.path.join(out_dir, "Dracula-annotations.json"), "w", encoding="utf-8") as f:
+                    f.write('{"payload": {"records": [{"type": "audible.clip"}]}}')
+            return sp.CompletedProcess(cmd, returncode, "", "")
+
+        return runner
+
+    def test_requires_login(self, client, completed_setup, annotated_db):
+        response = client.post("/api/book/B001/annotations")
+        assert response.status_code == 302
+        assert response.headers["Location"].startswith("/login")
+
+    def test_cross_origin_is_blocked(self, client, completed_setup, annotated_db):
+        _login_session(client)
+        response = client.post("/api/book/B001/annotations", headers={"Origin": "https://evil.example"})
+        assert response.status_code == 403
+
+    def test_dump_is_moved_next_to_the_audiobook(self, client, completed_setup, annotated_db):
+        from audible_downloader import DATABASE_DIR
+
+        _login_session(client)
+        with mock.patch(
+            "audible_downloader.routes.subprocess.run", side_effect=self._fake_run(writes_file=True)
+        ) as run:
+            response = client.post("/api/book/B001/annotations")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["success"] is True
+        assert data["annotations"] is True
+
+        sidecar = annotated_db.with_name("Dracula.annotations.json")
+        assert sidecar.exists()
+        assert "audible.clip" in sidecar.read_text(encoding="utf-8")
+
+        # The call is the annotations dump, into a scratch dir of our own, with
+        # HOME pointed at /database so audible-cli finds its auth, and capped.
+        cmd, kwargs = run.call_args[0][0], run.call_args[1]
+        assert cmd[:5] == ["audible", "download", "-a", "B001", "--annotation"]
+        assert kwargs["env"]["HOME"] == DATABASE_DIR
+        assert kwargs["timeout"] > 0
+        assert cmd[cmd.index("-o") + 1] != str(annotated_db.parent)
+
+    def test_no_annotations_is_a_success_not_an_error(self, client, completed_setup, annotated_db):
+        # audible-cli exits 0 and writes nothing for a title with no annotations.
+        _login_session(client)
+        with mock.patch("audible_downloader.routes.subprocess.run", side_effect=self._fake_run(writes_file=False)):
+            response = client.post("/api/book/B001/annotations")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["success"] is True
+        assert data["annotations"] is False
+        assert not annotated_db.with_name("Dracula.annotations.json").exists()
+
+    def test_cli_failure_reports_an_error(self, client, completed_setup, annotated_db):
+        _login_session(client)
+        with mock.patch(
+            "audible_downloader.routes.subprocess.run", side_effect=self._fake_run(writes_file=False, returncode=1)
+        ):
+            response = client.post("/api/book/B001/annotations")
+        assert response.status_code == 502
+        assert "error" in response.get_json()
+
+    def test_timeout_reports_an_error(self, client, completed_setup, annotated_db):
+        import subprocess as sp
+
+        _login_session(client)
+        with mock.patch("audible_downloader.routes.subprocess.run", side_effect=sp.TimeoutExpired(["audible"], 120)):
+            response = client.post("/api/book/B001/annotations")
+        assert response.status_code == 504
+        assert "error" in response.get_json()
+
+    def test_scratch_directory_is_cleaned_up(self, client, completed_setup, annotated_db):
+        from audible_downloader import TEMP_DIR
+
+        _login_session(client)
+        with mock.patch("audible_downloader.routes.subprocess.run", side_effect=self._fake_run(writes_file=True)):
+            client.post("/api/book/B001/annotations")
+        leftovers = [name for name in os.listdir(TEMP_DIR) if name.startswith("B001_annotations_")]
+        assert leftovers == []
+
+    def test_never_downloaded_book_is_rejected(self, client, completed_setup, annotated_db):
+        _login_session(client)
+        with mock.patch("audible_downloader.routes.subprocess.run") as run:
+            response = client.post("/api/book/B002/annotations")
+        assert response.status_code == 400
+        assert "error" in response.get_json()
+        run.assert_not_called()  # no Audible call for a book with nowhere to save
+
+    def test_missing_file_on_disk_is_rejected(self, client, completed_setup, annotated_db):
+        _login_session(client)
+        with mock.patch("audible_downloader.routes.subprocess.run") as run:
+            response = client.post("/api/book/B003/annotations")
+        assert response.status_code == 400
+        run.assert_not_called()
+
+    def test_unknown_book_returns_404(self, client, completed_setup, annotated_db):
+        _login_session(client)
+        response = client.post("/api/book/NOPE/annotations")
+        assert response.status_code == 404
