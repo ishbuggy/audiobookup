@@ -894,7 +894,11 @@ def download_book_annotations(asin):
     {success: true, annotations: false} when the title simply has none (a normal
     outcome, not an error), and an `error` message otherwise.
     """
-    from audible_downloader.chunked_conversion_logic import annotations_command, find_annotations_file
+    from audible_downloader.chunked_conversion_logic import (
+        _summarize_subprocess_error,
+        annotations_command,
+        find_annotations_file,
+    )
 
     con = get_db_connection()
     try:
@@ -923,25 +927,54 @@ def download_book_annotations(asin):
 
     # audible-cli names the dump after the book title and refuses to overwrite,
     # so it lands in a scratch directory of our own that is removed either way.
-    os.makedirs(TEMP_DIR, exist_ok=True)
-    work_dir = tempfile.mkdtemp(prefix=f"{asin}_annotations_", dir=TEMP_DIR)
+    # Guarded on its own (a full or read-only /config makes mkdtemp raise) so the
+    # failure keeps this route's JSON error contract instead of falling through
+    # to Flask's HTML 500 — and so the cleanup `finally` below is only ever
+    # entered with work_dir actually assigned.
     try:
-        result = subprocess.run(
-            annotations_command(asin, work_dir),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-            timeout=_ANNOTATIONS_TIMEOUT_SEC,
-        )
+        os.makedirs(TEMP_DIR, exist_ok=True)
+        work_dir = tempfile.mkdtemp(prefix=f"{asin}_annotations_", dir=TEMP_DIR)
+    except OSError as e:
+        log.error(f"Could not create a working directory for the {asin} annotations fetch: {e}", exc_info=True)
+        return jsonify(error="Failed to prepare a working directory for the annotations fetch."), 500
+
+    try:
+        try:
+            result = subprocess.run(
+                annotations_command(asin, work_dir),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                timeout=_ANNOTATIONS_TIMEOUT_SEC,
+            )
+        except FileNotFoundError as e:
+            # The `audible` binary itself is missing from PATH. FileNotFoundError
+            # is an OSError, so without its own clause this would be reported by
+            # the handler below as a failure to SAVE the file — pointing any
+            # debugging at the filesystem instead of at the missing CLI.
+            log.error(f"Could not run audible-cli for the {asin} annotations fetch: {e}")
+            return jsonify(error="The audible command-line tool is not available."), 500
+
         source = find_annotations_file(work_dir)
         if source is None:
             # audible-cli exits 0 and writes nothing for a title with no
             # annotations, so the file's presence — not the exit code — decides
             # between "none to save" and a real failure.
             if result.returncode != 0:
-                log.warning(f"Annotations fetch for {asin} exited {result.returncode}.")
+                # Summarize rather than dump: the raw streams are tqdm-heavy and
+                # app.log is user-downloadable. _summarize_subprocess_error picks
+                # the one useful line (audible-cli writes its user-facing errors
+                # to stdout, ffmpeg-style tools to stderr, so both are offered),
+                # which is what separates an expired auth from a network blip.
+                reason = _summarize_subprocess_error(
+                    subprocess.CalledProcessError(
+                        result.returncode, result.args, output=result.stdout, stderr=result.stderr
+                    ),
+                    "no error output",
+                )
+                log.warning(f"Annotations fetch for {asin} exited {result.returncode}: {reason}")
                 return jsonify(error="Failed to fetch annotations from Audible."), 502
             log.info(f"No annotations found for {asin}.")
             return jsonify(success=True, annotations=False)

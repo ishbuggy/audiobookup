@@ -163,12 +163,11 @@ async function handleBookClick(event) {
         // Annotations Button: the dump is written next to the audiobook, so it is
         // only offered for a book that actually has a file on disk. (The route
         // re-checks this — the button is a convenience, not the guard.)
-        const annotationsBtn = document.getElementById("download-annotations-btn");
         if (book.status === "DOWNLOADED") {
-            annotationsBtn.style.display = "inline-block";
-            annotationsBtn.dataset.asin = asin;
+            downloadAnnotationsBtn.style.display = "inline-block";
+            downloadAnnotationsBtn.dataset.asin = asin;
         } else {
-            annotationsBtn.style.display = "none";
+            downloadAnnotationsBtn.style.display = "none";
         }
 
         // --- Context-Aware Download Button Logic ---

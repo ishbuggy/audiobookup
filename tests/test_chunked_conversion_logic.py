@@ -1225,9 +1225,13 @@ class TestAnnotationsFetch:
 
     def _fetch(self, tmp_path, *, returncode=0, write_dump=False, exc=None):
         """Drive _fetch_annotations against a real temp dir with only the
-        subprocess helper faked, optionally writing the dump audible-cli would."""
+        subprocess helper faked, optionally writing the dump audible-cli would.
+        Returns ((annotations_file, cancelled), run_mock, captured_kwargs)."""
+
+        captured = []
 
         def fake_run(cmd, job_id, **kwargs):
+            captured.append(kwargs)
             if exc is not None:
                 raise exc
             out_dir = cmd[cmd.index("-o") + 1]
@@ -1238,12 +1242,16 @@ class TestAnnotationsFetch:
 
         with mock.patch.object(ccl, "_run_registered", side_effect=fake_run) as run:
             result = ccl._fetch_annotations("B0X", 1, str(tmp_path), {"HOME": "/database"})
-        return result, run
+        return result, run, captured
 
     def test_dump_lands_in_a_subdirectory_never_the_temp_root(self, tmp_path):
-        (annotations_file, cancelled), run = self._fetch(tmp_path, write_dump=True)
+        (annotations_file, cancelled), run, captured = self._fetch(tmp_path, write_dump=True)
         assert cancelled is False
         assert annotations_file == str(tmp_path / "annotations" / "Dracula-annotations.json")
+        # The auth env must reach the subprocess: audible-cli only finds its
+        # credentials under HOME=/database, and because this fetch swallows its
+        # own failures, dropping `env=env` would fail silently forever.
+        assert captured[0]["env"] == {"HOME": "/database"}
         # The critical invariant: nothing new in the temp root, so the chapter
         # JSON detection there cannot pick up the annotations dump instead.
         assert list(tmp_path.glob("*.json")) == []
@@ -1263,9 +1271,20 @@ class TestAnnotationsFetch:
         # A retried download strategy re-runs the fetch; audible-cli may refuse to
         # overwrite the file an earlier attempt already wrote, and that non-zero
         # exit must not throw away what is sitting on disk.
-        (annotations_file, cancelled), _run = self._fetch(tmp_path, returncode=1, write_dump=True)
+        (annotations_file, cancelled), _run, _kwargs = self._fetch(tmp_path, returncode=1, write_dump=True)
         assert cancelled is False
         assert annotations_file.endswith("/annotations/Dracula-annotations.json")
+
+    def test_existing_dump_survives_an_exception(self, tmp_path):
+        # Same rule one layer out: the retry's call may not even get as far as an
+        # exit code (makedirs/Popen raising OSError). The swallowed exception
+        # must still hand back the dump the first attempt left behind.
+        annotations_dir = tmp_path / "annotations"
+        annotations_dir.mkdir()
+        (annotations_dir / "Dracula-annotations.json").write_text("{}", encoding="utf-8")
+        (annotations_file, cancelled), _run, _kwargs = self._fetch(tmp_path, exc=OSError("boom"))
+        assert cancelled is False
+        assert annotations_file == str(annotations_dir / "Dracula-annotations.json")
 
     def test_unexpected_exception_is_swallowed(self, tmp_path):
         assert self._fetch(tmp_path, exc=OSError("boom"))[0] == (None, False)
@@ -1285,7 +1304,9 @@ class TestAnnotationsFetch:
         with (
             mock.patch.object(ccl, "load_settings", return_value={"conversion": {"save_annotations": True}}),
             mock.patch.object(ccl.subprocess, "Popen", return_value=download_proc) as popen,
-            mock.patch.object(ccl, "_run_registered", return_value=subprocess.CompletedProcess(["audible"], -15)),
+            mock.patch.object(
+                ccl, "_run_registered", return_value=subprocess.CompletedProcess(["audible"], -15)
+            ) as run,
             mock.patch.object(ccl.os, "makedirs"),
             mock.patch.object(ccl.process_registry, "register"),
             mock.patch.object(ccl.process_registry, "unregister"),
@@ -1296,6 +1317,10 @@ class TestAnnotationsFetch:
         assert result == (None, None)
         # Only the download ran; no fallback strategy was started after the cancel.
         assert popen.call_count == 1
+        # End-to-end companion to the helper-level check: prepare's env (with
+        # HOME pointed at /database for audible-cli's auth) is what reaches the
+        # fetch, not a bare inherited environment.
+        assert run.call_args.kwargs["env"]["HOME"] == ccl.DATABASE_DIR
 
     def test_prepare_skips_the_fetch_when_the_setting_is_off(self):
         # Default install (and every old settings.json, which has no such key):

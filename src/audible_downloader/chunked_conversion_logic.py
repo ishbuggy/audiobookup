@@ -228,8 +228,18 @@ def _fetch_annotations(asin, job_id, temp_dir, env):
             log.info(f"PREPARE ({asin}): No annotations (clips/notes/bookmarks) found for this title.")
         return annotations_file, False
     except Exception as e:
-        log.warning(f"PREPARE ({asin}): Annotations fetch failed: {e}. Continuing without annotations.")
-        return None, False
+        # Same invariant as the returncode path above, and for the same reason: a
+        # dump an earlier download attempt already wrote is still valid, so an
+        # exception on a later attempt (makedirs/Popen hitting ENOSPC or ENOMEM,
+        # say) must report what is on disk rather than discard it.
+        annotations_file = find_annotations_file(annotations_dir)
+        if annotations_file:
+            log.warning(
+                f"PREPARE ({asin}): Annotations fetch failed: {e}. Keeping the dump an earlier attempt already wrote."
+            )
+        else:
+            log.warning(f"PREPARE ({asin}): Annotations fetch failed: {e}. Continuing without annotations.")
+        return annotations_file, False
 
 
 def _yield_progress(asin, status_text, progress, job_id=None):
@@ -422,6 +432,10 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             # into a SUBDIRECTORY so the chapter-JSON detection below is
             # untouched; only a cancel comes back for us to act on.
             if save_annotations:
+                # Announce the step like every other boundary here: a title with
+                # many clips takes a few seconds, and without this the panel
+                # holds "Downloading... 100%" and reads as a stall.
+                _yield_progress(asin, "Fetching annotations...", 25, job_id)
                 annotations_file, annotations_cancelled = _fetch_annotations(asin, job_id, temp_dir, env)
                 if annotations_cancelled:
                     log.info(f"PREPARE ({asin}): Cancelled during annotations fetch.")
