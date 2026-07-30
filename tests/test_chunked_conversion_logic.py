@@ -3,6 +3,7 @@
 import io
 import json
 import subprocess
+import threading
 from unittest import mock
 
 import pytest
@@ -649,6 +650,49 @@ class TestBrandingTrimPipeline:
         cmd = _capture_chunk_command(chunk_info, context)
         assert float(cmd[cmd.index("-ss") + 1]) == pytest.approx(2_702.043)
 
+    def test_marker_inside_the_outro_is_dropped_from_the_output(self):
+        # v0.23.0 regression: a marker sitting inside the brand outro used to
+        # survive the trim, so the chapter before it ran past the trim boundary
+        # (its chunk encode read outro audio) and the marker itself reached the
+        # FFMETADATA list with a start beyond the end of the output.
+        settings = {"conversion": {"output_format": "m4b", "chapters": {"strip_audible_branding": True}}}
+        chapters = [
+            {"title": "One", "start_offset_ms": 0, "length_ms": 600_000},
+            {"title": "Two", "start_offset_ms": 600_000, "length_ms": 2_997_000},
+            {"title": "Outro Marker", "start_offset_ms": 3_597_000, "length_ms": 3_000},
+        ]
+        context, error, written = self._run_prepare(settings, intro_ms=2_043, outro_ms=5_061, chapters=chapters)
+
+        assert error is None
+        effective_total_ms = 3_600_000 - 2_043 - 5_061
+        out = context["chapters"]
+        assert [c["title"] for c in out] == ["One", "Two"]
+        # The chapter that preceded the dropped marker now ends exactly at the
+        # trim boundary instead of running into the outro.
+        assert out[-1]["start_offset_ms"] + out[-1]["length_ms"] == effective_total_ms
+        assert f"END={effective_total_ms}\n" in self._chapter_txt(written)
+        assert "Outro Marker" not in self._chapter_txt(written)
+
+    def test_chapter_metadata_overrunning_the_master_is_capped(self):
+        # The same normalization with the trim OFF: a start past the master's real
+        # duration must not stretch the preceding chapter's chunk beyond the end
+        # of the audio. The overrunning entry itself sanitizes to zero length and
+        # is dropped.
+        settings = {"conversion": {"output_format": "m4b"}}
+        chapters = [
+            {"title": "One", "start_offset_ms": 0, "length_ms": 600_000},
+            {"title": "Two", "start_offset_ms": 600_000, "length_ms": 600_000},
+            {"title": "Three", "start_offset_ms": 1_200_000, "length_ms": 2_500_000},
+            {"title": "Overrun", "start_offset_ms": 3_700_000, "length_ms": 60_000},
+        ]
+        context, error, _ = self._run_prepare(settings, chapters=chapters)
+
+        assert error is None
+        out = context["chapters"]
+        assert [c["title"] for c in out] == ["One", "Two", "Three"]
+        assert out[-1]["length_ms"] == 2_400_000
+        assert out[-1]["start_offset_ms"] + out[-1]["length_ms"] == 3_600_000
+
     def test_flac_fallback_master_trims_identically(self):
         # The trim math is master-agnostic: a title whose AAC-copy decrypt fell
         # back to FLAC takes the same re-encode path and the same timeline.
@@ -908,6 +952,68 @@ class TestEncodeBookMp3PartialContainment:
         ):
             assert ccl.encode_book_mp3("B0X", 1, "/tmp/x", self.FINAL, self.CONTEXT) is False
         remove.assert_called_once_with(self.PART)
+
+
+class TestEncodeBookMp3CancelRace:
+    """v0.23.0 regression: process_registry's cancel is a one-shot snapshot, so a
+    cancel that killed the source probe is spent by the time the encoder spawns —
+    the fresh ffmpeg would escape it and encode the whole book for a cancelled
+    job. A -15 probe exit and the job's stop event both stop the spawn."""
+
+    FINAL = "/data/out.mp3"
+    CONTEXT = {
+        "audio_file": "/tmp/x/master_intermediate.m4b",
+        "chapter_file": "/tmp/x/chapters.txt",
+        "cover_file": None,
+        "total_duration_sec": 3_600.0,
+    }
+
+    def _run(self, probe_returncode, stop_event=None):
+        """Drive encode_book_mp3 with a real _probe_source_audio_params over a
+        mocked ffprobe result, returning (result, the Popen mock)."""
+        proc = mock.MagicMock()
+        proc.stdout.readline.return_value = ""
+        proc.stderr.read.return_value = ""
+        proc.wait.return_value = 0
+        probe_res = subprocess.CompletedProcess(["ffprobe"], probe_returncode, "", "")
+        with (
+            mock.patch.object(ccl, "load_settings", return_value={}),
+            mock.patch.object(ccl, "_run_registered", return_value=probe_res),
+            mock.patch.object(ccl.subprocess, "Popen", return_value=proc) as popen,
+            mock.patch.object(ccl.process_registry, "register"),
+            mock.patch.object(ccl.process_registry, "unregister"),
+            mock.patch.object(ccl, "_yield_progress"),
+            mock.patch.object(ccl.os, "replace"),
+            mock.patch.object(ccl.os, "remove"),
+        ):
+            result = ccl.encode_book_mp3("B0X", 1, "/tmp/x", self.FINAL, self.CONTEXT, stop_event=stop_event)
+        return result, popen
+
+    def test_probe_killed_by_cancel_never_spawns_the_encoder(self):
+        result, popen = self._run(-15)
+        assert result is False
+        popen.assert_not_called()
+
+    def test_stop_event_already_set_never_spawns_the_encoder(self):
+        stop_event = threading.Event()
+        stop_event.set()
+        result, popen = self._run(0, stop_event=stop_event)
+        assert result is False
+        popen.assert_not_called()
+
+    def test_clear_stop_event_encodes_as_usual(self):
+        result, popen = self._run(0, stop_event=threading.Event())
+        assert result is True
+        popen.assert_called_once()
+
+    def test_ordinary_probe_failure_still_encodes_with_fallback_flags(self):
+        # A probe that simply couldn't read the master is benign: build_mp3_flags
+        # falls back to its defaults and the encode proceeds.
+        result, popen = self._run(1)
+        assert result is True
+        cmd = popen.call_args.args[0]
+        assert "-q:a" in cmd
+        assert "-ar" not in cmd
 
 
 class TestBuildMp3Flags:

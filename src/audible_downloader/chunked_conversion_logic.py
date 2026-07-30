@@ -662,7 +662,11 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
                 current_start = chapters_list[i].get("start_offset_ms", 0)
                 if i < len(chapters_list) - 1:
                     next_start = chapters_list[i + 1].get("start_offset_ms", 0)
-                    new_length = next_start - current_start
+                    # Every chapter ends at the end of the OUTPUT at the latest.
+                    # A next start beyond it (chapter metadata that overruns the
+                    # master's real duration) would otherwise give this chapter a
+                    # chunk encode that reads past the end of the retained audio.
+                    new_length = min(next_start, effective_total_ms) - current_start
                 else:
                     # The final chapter runs to the end of the OUTPUT, which is
                     # where the branding trim (when active) shortens it by the
@@ -1124,6 +1128,16 @@ def build_mp3_flags(mp3_settings, source_bitrate_bps, source_sample_rate):
     return flags
 
 
+class _ProbeCancelled(Exception):
+    """Raised when the MP3 path's source probe was SIGTERMed by a job cancel.
+
+    A cancelled probe and a failed probe both come back with no values, but they
+    mean opposite things to the caller: a failure is benign (encode anyway with
+    fallback flags), while a cancellation must stop the encode from starting at
+    all. Kept module-private — `encode_book_mp3` is the only caller.
+    """
+
+
 def _probe_source_audio_params(master_file, job_id):
     """
     Read the master audio stream's bit_rate and sample_rate via one ffprobe.
@@ -1131,6 +1145,9 @@ def _probe_source_audio_params(master_file, job_id):
     absent (e.g. a FLAC master often reports no stream bit_rate) or the probe
     fails. Registered with process_registry so a cancel can reach it; a None
     result is acceptable — build_mp3_flags falls back per its spec.
+
+    Raises `_ProbeCancelled` when the probe exited on SIGTERM (-15), which is the
+    job being cancelled rather than an unreadable master.
     """
     probe_cmd = [
         "ffprobe",
@@ -1145,6 +1162,8 @@ def _probe_source_audio_params(master_file, job_id):
         master_file,
     ]
     res = _run_registered(probe_cmd, job_id, encoding="utf-8", errors="replace")
+    if res.returncode == -15:
+        raise _ProbeCancelled()
     if res.returncode != 0:
         return None, None
 
@@ -1164,7 +1183,7 @@ def _probe_source_audio_params(master_file, job_id):
     return _parse_int(values.get("bit_rate")), _parse_int(values.get("sample_rate"))
 
 
-def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context):
+def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context, stop_event=None):
     """
     Single-pass MP3 (LAME) encode of the whole book: one ffmpeg run muxes the
     decrypted master's audio, the FFMETADATA chapters/tags, and (when present)
@@ -1183,6 +1202,14 @@ def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context):
     path for a later deep sync to adopt. Progress is driven by
     ffmpeg's `-progress pipe:1` stream, occupying the 30..90 band; the final
     verify/finalize takes it to 100.
+
+    `stop_event` is the job's cancellation flag (optional; a caller that doesn't
+    pass one behaves exactly as before). The registry's cancel is a one-shot
+    snapshot of the processes running at that instant, so a kill that landed on
+    the source probe above is already spent by the time the encoder spawns —
+    hence the recheck immediately before the spawn, plus the probe's own
+    cancellation signal. Both bail before ffmpeg starts, so no ".part" file
+    exists to clean up.
 
     Returns True on success, False on failure or cancellation.
     """
@@ -1206,7 +1233,11 @@ def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context):
     trim_outro_ms = context.get("trim_outro_ms", 0)
     trim_active = bool(total_duration_sec and (trim_intro_ms or trim_outro_ms))
 
-    source_bitrate_bps, source_sample_rate = _probe_source_audio_params(master, job_id)
+    try:
+        source_bitrate_bps, source_sample_rate = _probe_source_audio_params(master, job_id)
+    except _ProbeCancelled:
+        log.info(f"MP3 ({asin}): Cancelled during the source probe; not starting the encoder.")
+        return False
     quality_flags = build_mp3_flags(mp3_settings, source_bitrate_bps, source_sample_rate)
 
     # Input order: 0 = audio master, 1 = FFMETADATA, 2 = cover (when present).
@@ -1257,6 +1288,14 @@ def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context):
             log.debug(f"MP3 ({asin}): Could not remove partial encode '{part_path}': {e}")
 
     try:
+        # Last check before a multi-hour encode commits: a cancel that arrived
+        # while this book's assets were still being probed has already had its
+        # one shot at the process registry, so nothing would reach this ffmpeg.
+        # Mirrors the between-tasks _cancelled() checks on the chunked path.
+        if stop_event is not None and stop_event.is_set():
+            log.info(f"MP3 ({asin}): Cancelled before the encoder started.")
+            return False
+
         log.debug(f"MP3 ({asin}): Command: {' '.join(command)}")
         process = subprocess.Popen(
             command,

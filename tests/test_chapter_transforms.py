@@ -205,18 +205,53 @@ class TestApplyBrandingTrim:
         apply_branding_trim(chapters, 2_000, 0, self.TOTAL)
         assert chapters[0]["start_offset_ms"] == 10_000
 
+    def test_marker_inside_the_outro_is_dropped(self):
+        # v0.23.0 regression: a marker whose span lies wholly inside the brand
+        # outro. Keeping it made the preceding chapter run past the trim boundary
+        # (its chunk encode read outro audio) and emitted a chapter start beyond
+        # the end of the output.
+        chapters = [
+            _ch("One", 0, 600_000),
+            _ch("Two", 600_000, 1_195_000),
+            _ch("Outro Marker", 1_795_000, 5_000),
+        ]
+        out, effective = apply_branding_trim(chapters, 0, 10_000, self.TOTAL)
+        assert [c["title"] for c in out] == ["One", "Two"]
+        assert effective == 1_790_000
+
+    def test_marker_before_the_boundary_survives(self):
+        # One millisecond on the retained side of the same boundary is real audio.
+        chapters = [_ch("One", 0, 600_000), _ch("Two", 1_789_999, 10_001)]
+        out, effective = apply_branding_trim(chapters, 0, 10_000, self.TOTAL)
+        assert [c["title"] for c in out] == ["One", "Two"]
+        assert out[-1]["start_offset_ms"] == 1_789_999
+        assert effective == 1_790_000
+
+    def test_marker_shifted_into_the_outro_by_the_intro_is_kept(self):
+        # The intro shift moves starts DOWN, so a marker that would be inside the
+        # outro measured on the master can land back inside the retained audio.
+        chapters = [_ch("One", 0, 600_000), _ch("Two", 1_792_000, 8_000)]
+        out, _ = apply_branding_trim(chapters, 5_000, 5_000, self.TOTAL)
+        assert [c["start_offset_ms"] for c in out] == [0, 1_787_000]
+
+    def test_drop_does_not_mutate_input(self):
+        chapters = [_ch("One", 0, 600_000), _ch("Outro Marker", 1_795_000, 5_000)]
+        apply_branding_trim(chapters, 0, 10_000, self.TOTAL)
+        assert [c["title"] for c in chapters] == ["One", "Outro Marker"]
+        assert chapters[1]["start_offset_ms"] == 1_795_000
+
 
 def _sanitize_lengths(chapters, effective_total_ms):
     """Mirror of prepare_book_assets' sanitize loop: recompute every length from
-    the next chapter's start (the last one from the effective total), clamped at
-    zero. Kept here so the drop tests exercise the same inputs the pipeline
-    actually feeds drop_zero_length_chapters."""
+    the next chapter's start (the last one from the effective total), capped at
+    the effective total and clamped at zero. Kept here so the drop tests exercise
+    the same inputs the pipeline actually feeds drop_zero_length_chapters."""
     out = [dict(ch) for ch in chapters]
     out.sort(key=lambda x: x.get("start_offset_ms", 0))
     for i, ch in enumerate(out):
         current_start = ch.get("start_offset_ms", 0)
         if i < len(out) - 1:
-            new_length = out[i + 1].get("start_offset_ms", 0) - current_start
+            new_length = min(out[i + 1].get("start_offset_ms", 0), effective_total_ms) - current_start
         else:
             new_length = effective_total_ms - current_start
         ch["length_ms"] = max(0, new_length)

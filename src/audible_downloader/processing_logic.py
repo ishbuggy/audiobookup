@@ -1351,7 +1351,12 @@ class BookProcessor:
         log.info(f"TASK-MP3 ({self.asin}): Starting.")
         conversion_start_time = time.time()
 
-        success = encode_book_mp3(self.asin, self.job_id, self.temp_dir, self.final_output_path, self.context)
+        # The stop event goes along so the encode can recheck it right before the
+        # long ffmpeg run: a cancel landing during the probe that precedes the
+        # spawn is otherwise spent before there is a process to kill.
+        success = encode_book_mp3(
+            self.asin, self.job_id, self.temp_dir, self.final_output_path, self.context, stop_event=self.stop_event
+        )
 
         if not success:
             self._fail_or_cancel("MP3 encode failed.")

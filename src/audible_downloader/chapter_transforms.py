@@ -124,24 +124,36 @@ def apply_branding_trim(chapters, intro_ms, outro_ms, total_duration_ms):
       that begins *inside* the intro (Audible sometimes starts chapter 1 at 0)
       lands at the top of the trimmed file rather than going negative;
     - `effective_total_ms = total_duration_ms - intro_ms - outro_ms` is the length
-      of the trimmed output.
+      of the trimmed output;
+    - a chapter whose shifted start lands at or past `effective_total_ms` begins
+      *inside* the outro, so its whole span is being cut. It is dropped: keeping
+      it would leave the PRECEDING chapter running to a start that no longer
+      exists (its chunk encode would read outro audio) and would emit a chapter
+      marker starting beyond the end of the output.
 
     Returns `(chapters, effective_total_ms)`. The returned chapters are shallow
     copies (inputs are never mutated) and `length_ms` is left as-is: the caller's
     sanitize step recomputes every length from the starts and the effective total,
-    which is what shortens the FINAL chapter by the outro.
+    capping each end at that total, which is what shortens the FINAL chapter by
+    the outro.
 
     Callers that seek into the untrimmed master afterwards (the per-chapter AAC
     encode, the single-pass MP3 encode) must add `intro_ms` back to the seek —
     these offsets are output-timeline, not source-timeline.
     """
+    effective_total_ms = total_duration_ms - intro_ms - outro_ms
+
     shifted = []
     for ch in chapters:
         new_ch = dict(ch)
-        new_ch["start_offset_ms"] = max(0, new_ch.get("start_offset_ms", 0) - intro_ms)
+        new_start = max(0, new_ch.get("start_offset_ms", 0) - intro_ms)
+        # Markers inside the retained audio only; see the outro note above.
+        if new_start >= effective_total_ms:
+            continue
+        new_ch["start_offset_ms"] = new_start
         shifted.append(new_ch)
 
-    return shifted, total_duration_ms - intro_ms - outro_ms
+    return shifted, effective_total_ms
 
 
 def drop_zero_length_chapters(chapters):
