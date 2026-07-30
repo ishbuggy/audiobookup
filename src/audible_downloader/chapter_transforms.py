@@ -171,9 +171,11 @@ def drop_zero_length_chapters(chapters):
     zero-length chapter in first position fails the whole book with
     "Stream map '0:a' matches no streams".
 
-    Returns a new list (the caller's dicts are never mutated).
+    Returns a new list of shallow copies, matching every other transform in this
+    module — the caller's dicts are neither mutated nor shared onward, so a later
+    step editing a kept chapter can't reach back into the input list.
     """
-    return [ch for ch in chapters if ch.get("length_ms", 0) > 0]
+    return [dict(ch) for ch in chapters if ch.get("length_ms", 0) > 0]
 
 
 def strip_unabridged(text):

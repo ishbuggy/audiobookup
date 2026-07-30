@@ -281,6 +281,17 @@ class TestDropZeroLengthChapters:
         drop_zero_length_chapters(chapters)
         assert chapters == [_ch("One", 0, 0)]
 
+    def test_kept_chapters_are_shallow_copies(self):
+        # ND3/ND4: every other transform here hands back copies, so this one did
+        # too little — it returned the caller's own dicts. A later step editing a
+        # kept chapter would then reach back into the input list.
+        chapters = [_ch("One", 0, 600_000)]
+        kept = drop_zero_length_chapters(chapters)
+        assert kept == chapters  # same content...
+        assert kept[0] is not chapters[0]  # ...different objects
+        kept[0]["title"] = "Edited"
+        assert chapters[0]["title"] == "One"
+
     def test_flattened_parent_sharing_first_childs_start_leaves_no_zero(self):
         # The primary vector: a part whose first child begins at the part's own
         # offset. Flatten emits both, sanitize gives the parent length 0.

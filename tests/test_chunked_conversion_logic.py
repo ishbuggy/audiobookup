@@ -935,6 +935,52 @@ class TestEncodeBookMp3PartialContainment:
         ):
             assert ccl.encode_book_mp3("B0X", 1, "/tmp/x", self.FINAL, self.CONTEXT) is False
 
+    def test_unexpected_exception_still_removes_the_part_file(self):
+        # v0.23.0 ND2: only OSError is handled here. Anything else — a closed
+        # progress pipe raising ValueError mid-read, say — propagates to the
+        # caller as before, but must not orphan the ".part" file in /data.
+        proc = mock.MagicMock()
+        proc.stdout.readline.side_effect = ValueError("I/O operation on closed file")
+        proc.stderr.read.return_value = ""
+        with (
+            mock.patch.object(ccl, "load_settings", return_value={}),
+            mock.patch.object(ccl, "_probe_source_audio_params", return_value=(None, None)),
+            mock.patch.object(ccl.subprocess, "Popen", return_value=proc),
+            mock.patch.object(ccl.process_registry, "register"),
+            mock.patch.object(ccl.process_registry, "unregister") as unregister,
+            mock.patch.object(ccl, "_yield_progress"),
+            mock.patch.object(ccl.os, "replace") as replace,
+            mock.patch.object(ccl.os, "remove") as remove,
+        ):
+            with pytest.raises(ValueError):
+                ccl.encode_book_mp3("B0X", 1, "/tmp/x", self.FINAL, self.CONTEXT)
+        replace.assert_not_called()
+        remove.assert_called_once_with(self.PART)
+        # The cleanup shares the finally with the registry unregister; neither
+        # may be skipped by the escaping exception.
+        unregister.assert_called_once()
+
+    def test_bail_before_the_encoder_starts_touches_no_files(self):
+        # The stop-event bail happens before ffmpeg spawns, so no ".part" of this
+        # run's making exists — the cleanup guard must not reach for one.
+        stop_event = threading.Event()
+        stop_event.set()
+        with (
+            mock.patch.object(ccl, "load_settings", return_value={}),
+            mock.patch.object(ccl, "_probe_source_audio_params", return_value=(None, None)),
+            mock.patch.object(ccl.subprocess, "Popen") as popen,
+            mock.patch.object(ccl.process_registry, "register"),
+            mock.patch.object(ccl.process_registry, "unregister"),
+            mock.patch.object(ccl, "_yield_progress"),
+            mock.patch.object(ccl.os, "replace") as replace,
+            mock.patch.object(ccl.os, "remove") as remove,
+        ):
+            result = ccl.encode_book_mp3("B0X", 1, "/tmp/x", self.FINAL, self.CONTEXT, stop_event=stop_event)
+        assert result is False
+        popen.assert_not_called()
+        replace.assert_not_called()
+        remove.assert_not_called()
+
     def test_failed_promotion_reports_failure_and_cleans_up(self):
         proc = mock.MagicMock()
         proc.stdout.readline.return_value = ""
@@ -1126,6 +1172,22 @@ class TestBuildMp3Flags:
         # field), so a typed "-1" would otherwise emit "-ar -1" and fail every
         # encode. Zero and negative both mean "no cap".
         assert "-ar" not in build_mp3_flags({"target": "quality", "max_sample_rate": bad_cap}, None, 48000)
+
+    @pytest.mark.parametrize("junk_cap", [True, False, "44100", None, float("nan"), float("inf")])
+    def test_sample_rate_gate_rejects_non_integer_caps(self, junk_cap):
+        # v0.23.0 ND1: a hand-edited settings.json can carry any JSON value here.
+        # `bool` is an `int` subclass, so a bare `true` would otherwise be
+        # formatted straight onto the command line as "-ar True" and fail every
+        # encode; json.load() also accepts NaN/Infinity. None of these is a rate.
+        assert "-ar" not in build_mp3_flags({"target": "quality", "max_sample_rate": junk_cap}, None, 48000)
+
+    @pytest.mark.parametrize(("float_cap", "emitted"), [(44100.0, "44100"), (44100.9, "44100")])
+    def test_sample_rate_gate_truncates_float_caps(self, float_cap, emitted):
+        # A float is a plausible way to hand-write a rate, but "-ar 44100.0" is
+        # not something ffmpeg parses — truncate to whole Hz instead of dropping
+        # the cap the user clearly asked for.
+        flags = build_mp3_flags({"target": "quality", "max_sample_rate": float_cap}, None, 48000)
+        assert flags[flags.index("-ar") + 1] == emitted
 
     def test_null_bitrate_falls_back_to_the_default(self):
         # A hand-edited settings.json can carry an explicit null, which would

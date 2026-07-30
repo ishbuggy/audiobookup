@@ -210,6 +210,17 @@ class TestNamingPlaceholderExpansion:
         path = _resolve_output_path(template="{author}/{series}", book_row=row)
         assert path == "/data/Bram Stoker/Bram Stoker - Dracula.m4b"
 
+    def test_fallback_names_the_file_when_author_and_title_both_sanitize_away(self):
+        # M10: " . " is truthy, so it never takes the "Unknown ..." branch, but it
+        # sanitizes to nothing — the fallback used to produce a file called " - ".
+        path = build_base_output_path({"naming": {"template": "{author}/{title}"}}, "B0OURS", " . ", " .. ", None, None)
+        assert path == "/data/Unknown Author - Unknown Title.m4b"
+
+    def test_fallback_names_the_file_when_only_the_author_sanitizes_away(self):
+        # The one-sided case, for the same reason: "- Dracula" is not a name.
+        path = build_base_output_path({"naming": {"template": "{author}"}}, "B0OURS", "...", "Dracula", None, None)
+        assert path == "/data/Unknown Author - Dracula.m4b"
+
     @pytest.mark.parametrize(
         ("release_date", "expected"),
         [
@@ -641,6 +652,125 @@ class TestRenameToMatchMetadata:
         for suffix in (".png", ".aax", ".aaxc"):
             assert (old_base + suffix, new_base + suffix) not in moved
 
+    def _run_on_disk(self, tmp_path, *, sidecars=(), target_name="New.m4b"):
+        """Drive the rename against REAL files under tmp_path (only the DB and the
+        naming engine are faked), so the sidecar sweep has a real directory to
+        match against. Returns (result, new_dir, old_dir, executed queries)."""
+        old_dir = tmp_path / "old"
+        old_dir.mkdir()
+        new_dir = tmp_path / "new"
+        current = old_dir / "Old.m4b"
+        current.write_bytes(b"audio")
+        for name in sidecars:
+            (old_dir / name).write_bytes(b"sidecar")
+
+        target = str(new_dir / target_name)
+        row = self._row(filepath=str(current))
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        executed = []
+
+        def execute(query, params=None):
+            executed.append((query, params))
+            cursor = mock.MagicMock()
+            cursor.fetchone.return_value = None if "WHERE filepath" in query else row
+            return cursor
+
+        con.execute.side_effect = execute
+
+        with (
+            mock.patch.object(
+                processing_logic, "load_settings", return_value={"naming": {"apply_custom_to_filenames": True}}
+            ),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "build_base_output_path", return_value=target),
+            mock.patch.object(processing_logic, "_cleanup_empty_dirs"),
+        ):
+            result = processing_logic.rename_book_to_match_metadata("B0OURS")
+        return result, new_dir, old_dir, executed
+
+    def test_moves_sidecars_whose_extension_is_uppercase(self, tmp_path):
+        # M12: files on disk carry whatever case they were created with — the cover
+        # keeps Audible's own extension, and a hand-placed ".PDF" is common enough.
+        # The lowercase-only match orphaned them at the old base.
+        result, new_dir, old_dir, _executed = self._run_on_disk(
+            tmp_path, sidecars=("Old.JPG", "Old.PDF", "Old.cue", "Old.Metadata.JSON")
+        )
+        assert result == str(new_dir / "New.m4b")
+        # Each sidecar moved, keeping its own spelling.
+        for name in ("New.JPG", "New.PDF", "New.cue", "New.Metadata.JSON"):
+            assert (new_dir / name).exists()
+        assert sorted(p.name for p in old_dir.iterdir()) == []
+
+    def test_unrelated_neighbours_are_left_alone(self, tmp_path):
+        # The guard on the case-insensitive match: only an exact sidecar suffix
+        # counts, so a differently-named book in the same folder is never swept up.
+        result, new_dir, old_dir, _executed = self._run_on_disk(
+            tmp_path, sidecars=("Old 2.jpg", "Older.m4b", "Old.txt")
+        )
+        assert result == str(new_dir / "New.m4b")
+        assert sorted(p.name for p in old_dir.iterdir()) == ["Old 2.jpg", "Old.txt", "Older.m4b"]
+        assert sorted(p.name for p in new_dir.iterdir()) == ["New.m4b"]
+
+    """v0.23.0 M11: the ASIN-suffix collision branch has to record the duplicate
+    flag, the same way the download path's _finalize_success does — otherwise a
+    book renamed onto a taken name is silently suffixed with nothing in the UI."""
+
+    def _rename_update(self, **kwargs):
+        """The parameters of the rename's filepath UPDATE."""
+        row = kwargs.pop("row", None) or self._row()
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        executed = []
+
+        target = kwargs.pop("target", "/data/New/New.m4b")
+        target_owner = kwargs.pop("target_owner", None)
+        also_present = kwargs.pop("also_present", ())
+
+        def execute(query, params=None):
+            executed.append((query, params))
+            cursor = mock.MagicMock()
+            if "WHERE filepath" in query:
+                cursor.fetchone.return_value = {"asin": target_owner} if target_owner else None
+            else:
+                cursor.fetchone.return_value = row
+            return cursor
+
+        con.execute.side_effect = execute
+        present = {row["filepath"], *also_present}
+
+        with (
+            mock.patch.object(
+                processing_logic, "load_settings", return_value={"naming": {"apply_custom_to_filenames": True}}
+            ),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "build_base_output_path", return_value=target),
+            mock.patch("os.path.exists", side_effect=lambda p: p in present),
+            mock.patch("os.makedirs"),
+            mock.patch.object(processing_logic.shutil, "move"),
+            mock.patch.object(processing_logic, "_cleanup_empty_dirs"),
+        ):
+            processing_logic.rename_book_to_match_metadata("B0OURS")
+
+        updates = [params for query, params in executed if query.startswith("UPDATE audiobooks SET filepath")]
+        assert len(updates) == 1
+        return updates[0]
+
+    def test_collision_records_the_duplicate_flag(self):
+        params = self._rename_update(also_present=("/data/New/New.m4b",), target_owner="B0OTHER")
+        assert params == ("/data/New/New_B0OURS.m4b", 1, "B0OURS")
+
+    def test_in_flight_collision_records_the_duplicate_flag(self):
+        processing_logic._reserved_output_paths.add("/data/New/New")
+        params = self._rename_update()
+        assert params == ("/data/New/New_B0OURS.m4b", 1, "B0OURS")
+
+    def test_clean_rename_clears_a_stale_duplicate_flag(self):
+        # Written explicitly (not only on collision), mirroring _finalize_success:
+        # a book that no longer needs the suffix must stop being flagged.
+        params = self._rename_update()
+        assert params == ("/data/New/New.m4b", 0, "B0OURS")
+
     """H5 regression: an existing file at the target path must only be
     overwritten when it verifiably belongs to the same book."""
 
@@ -977,6 +1107,50 @@ class TestOutputFormatPathSelection:
         assert len(submitted) == 1
         assert submitted[0].func == processor._remux_and_finalize
         assert prepare.call_args.kwargs.get("lossless") is True
+
+
+class TestNoUsableChapters:
+    """v0.23.0 ND3: an empty chapter list at spawn time has two causes — the title
+    genuinely shipped none, or it had them and the zero-length cleanup in prepare
+    dropped every one. The old message asserted the first, which is a misleading
+    thing to show a user whose book DID have chapters."""
+
+    def _run(self):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.download_complete_event = Event()
+
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = BOOK_ROW
+
+        context = {"audio_file": "/tmp/x/master_intermediate.m4b", "chapters": []}
+        with (
+            mock.patch.object(
+                processing_logic, "load_settings", return_value={"naming": {}, "conversion": {"output_format": "m4b"}}
+            ),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "prepare_book_assets", return_value=(context, None)),
+            mock.patch.object(processing_logic, "build_base_output_path", return_value="/data/A/T/T.m4b"),
+            mock.patch("os.path.exists", return_value=False),
+            mock.patch("os.makedirs"),
+            mock.patch.object(processing_logic, "_yield_progress"),
+            mock.patch.object(processing_logic.task_runner, "submit_task") as submit,
+            mock.patch.object(processor, "_update_db_on_failure") as fail,
+        ):
+            processor._prepare_and_spawn_encode_tasks()
+        return processor, fail, submit
+
+    def test_error_message_names_both_causes(self):
+        processor, fail, submit = self._run()
+        message = fail.call_args.args[0]
+        assert "no usable chapters" in message
+        # Not the old claim that the book simply had no chapter information...
+        assert message != "Book has no chapter information."
+        # ...and the cleanup is named as the other possibility.
+        assert "cleanup" in message
+        # No encode work was queued, and the wait is released.
+        submit.assert_not_called()
+        assert processor._completion_event.is_set()
 
 
 class TestRemuxFinalize:
@@ -1448,6 +1622,104 @@ class TestProbeDurationRegistration:
         unregister.assert_called_once_with(7, proc)
 
 
+class TestCompletionTimeout:
+    """v0.23.0 M1: `run` waits on one timeout for the whole book, and MP3 output
+    must not be judged by the chunked-AAC estimator it never feeds. The watch case
+    is an arm64 SBC converting a very long book, where the borrowed model expires
+    while the encode is still healthy."""
+
+    # 30 hours of audio: long enough that the two models diverge sharply.
+    LONG_RUNTIME_MIN = 1800
+    # What the estimator says about a 30h book with no history (10 sec/min).
+    LONG_ESTIMATE_SEC = 18_000
+
+    def _timeout(self, *, output_format="m4b", runtime_min=LONG_RUNTIME_MIN, has_row=True, estimate=LONG_ESTIMATE_SEC):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = {"runtime_min": runtime_min} if has_row else None
+        with (
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "load_settings", return_value={}),
+            mock.patch.object(processing_logic, "resolve_output_format", return_value=output_format),
+            mock.patch.object(processing_logic, "estimate_conversion_time", return_value=estimate) as estimator,
+        ):
+            return processor._completion_timeout(), estimator
+
+    def test_mp3_scales_off_the_source_duration(self):
+        timeout, estimator = self._timeout(output_format="mp3")
+        assert timeout == self.LONG_RUNTIME_MIN * 60 * 3
+        # The AAC model is not consulted at all on this path.
+        estimator.assert_not_called()
+
+    def test_mp3_budget_exceeds_the_books_own_runtime(self):
+        # The regression itself: 4x the AAC estimate is 20h for a 30h book, so a
+        # single-pass LAME encode slower than ~0.7x real time was killed mid-run.
+        runtime_sec = self.LONG_RUNTIME_MIN * 60
+        old_model_timeout = 4 * self.LONG_ESTIMATE_SEC
+        assert old_model_timeout < runtime_sec  # what made this a bug
+        timeout, _estimator = self._timeout(output_format="mp3")
+        assert timeout > runtime_sec
+
+    def test_m4b_still_uses_the_eta_model(self):
+        timeout, estimator = self._timeout(output_format="m4b")
+        assert timeout == 4 * self.LONG_ESTIMATE_SEC
+        estimator.assert_called_once_with(self.LONG_RUNTIME_MIN)
+
+    def test_original_still_uses_the_eta_model(self):
+        timeout, estimator = self._timeout(output_format="original")
+        assert timeout == 4 * self.LONG_ESTIMATE_SEC
+        estimator.assert_called_once_with(self.LONG_RUNTIME_MIN)
+
+    @pytest.mark.parametrize("output_format", ["mp3", "m4b"])
+    def test_short_books_get_the_two_hour_floor(self, output_format):
+        timeout, _estimator = self._timeout(output_format=output_format, runtime_min=10, estimate=100)
+        assert timeout == 7200
+
+    @pytest.mark.parametrize("runtime_min", [None, 0])
+    def test_unknown_runtime_falls_back_to_the_floor(self, runtime_min):
+        timeout, estimator = self._timeout(output_format="mp3", runtime_min=runtime_min)
+        assert timeout == 7200
+        estimator.assert_not_called()
+
+    def test_missing_book_row_falls_back_to_the_floor(self):
+        timeout, _estimator = self._timeout(has_row=False)
+        assert timeout == 7200
+
+
+class TestTimeoutKillsSubprocesses:
+    """v0.23.0 M1 (second half): when the wait does expire, the temp dir is torn
+    down on the way out — an ffmpeg still running against it would burn CPU and
+    hold the unlinked files' disk space with nothing to deliver."""
+
+    def test_timeout_terminates_the_jobs_processes_and_marks_error(self, tmp_path):
+        processor = BookProcessor(asin="B0OURS", job_id=7)
+        with (
+            mock.patch.object(processing_logic, "TEMP_DIR", str(tmp_path)),
+            mock.patch.object(processor, "_completion_timeout", return_value=0),
+            mock.patch.object(processing_logic.task_runner, "submit_task"),
+            mock.patch.object(processing_logic.process_registry, "kill_job_processes") as kill,
+            mock.patch.object(processor, "_update_db_on_failure") as fail,
+        ):
+            processor.run()
+        kill.assert_called_once_with(7)
+        assert "timed out" in fail.call_args.args[0]
+
+    def test_normal_completion_kills_nothing(self, tmp_path):
+        processor = BookProcessor(asin="B0OURS", job_id=7)
+        processor._completion_event.set()
+        with (
+            mock.patch.object(processing_logic, "TEMP_DIR", str(tmp_path)),
+            mock.patch.object(processor, "_completion_timeout", return_value=0),
+            mock.patch.object(processing_logic.task_runner, "submit_task"),
+            mock.patch.object(processing_logic.process_registry, "kill_job_processes") as kill,
+            mock.patch.object(processor, "_update_db_on_failure") as fail,
+        ):
+            processor.run()
+        kill.assert_not_called()
+        fail.assert_not_called()
+
+
 class TestBuildMetadataJson:
     """Phase 2: the curated metadata.json sidecar shaping (pure function)."""
 
@@ -1795,6 +2067,29 @@ class TestApplyFileTimestamps:
         assert not (out / "Dracula.jpg").exists()
         assert not (out / "Dracula.voucher").exists()
 
+    def test_uppercase_sidecar_extensions_are_stamped_too(self, tmp_path):
+        # M12: the cover keeps whatever extension Audible handed us, so a ".JPG"
+        # sidecar exists in real libraries — and the lowercase-only match left it
+        # carrying the download time while the audiobook carried the release date.
+        processor = self._processor(tmp_path, {"release_date": "2019-06-27"})
+        out = tmp_path / "out"
+        (out / "Dracula.JPG").write_bytes(b"cover")
+        (out / "Dracula.pdf").write_bytes(b"pdf")
+        self._run(processor, "release_date")
+        expected = datetime(2019, 6, 27).timestamp()
+        assert (out / "Dracula.JPG").stat().st_mtime == expected
+        assert (out / "Dracula.pdf").stat().st_mtime == expected
+
+    def test_unrelated_neighbours_are_not_stamped(self, tmp_path):
+        # The guard: only exact sidecar suffixes on this book's base are touched.
+        processor = self._processor(tmp_path, {"release_date": "2019-06-27"})
+        out = tmp_path / "out"
+        neighbour = out / "Dracula 2.jpg"
+        neighbour.write_bytes(b"other")
+        before = neighbour.stat().st_mtime
+        self._run(processor, "release_date")
+        assert neighbour.stat().st_mtime == before
+
     def test_purchase_date_source(self, tmp_path):
         processor = self._processor(
             tmp_path, {"release_date": "2019-06-27", "purchase_date": "2023-04-05T06:07:08.000Z"}
@@ -1894,10 +2189,19 @@ class TestCleanupStaleFiles:
         tracked += [{"asin": asin, "filepath": path} for asin, path in other_books]
         con.execute.return_value.fetchall.return_value = tracked
 
+        def listdir(directory):
+            """The `present` set, seen as a directory listing — the sidecar sweep
+            scans the folder so it can match extensions case-insensitively."""
+            names = [os.path.basename(p) for p in present if os.path.dirname(p) == directory]
+            if not names:
+                raise OSError("no such directory")
+            return names
+
         with (
             mock.patch.object(processing_logic, "load_settings", return_value=settings),
             mock.patch.object(processing_logic, "get_db_connection", return_value=con),
             mock.patch("os.path.exists", side_effect=lambda p: p in present),
+            mock.patch("os.listdir", side_effect=listdir),
             mock.patch("os.remove", side_effect=remove_error) as remove,
             mock.patch.object(processing_logic, "_cleanup_empty_dirs") as cleanup_dirs,
         ):
@@ -1969,6 +2273,33 @@ class TestCleanupStaleFiles:
             other_books=(("B0OTHER", "/data/Author/Other/Other.m4b"),),
         )
         assert removed == {self.OLD, old_base + ".jpg", old_base + ".cue"}
+
+    def test_uppercase_stale_sidecars_are_swept(self):
+        # M12: a leftover ".JPG" at the abandoned base is exactly as stale as a
+        # ".jpg" one, and the lowercase-only match left it behind forever.
+        old_base = "/data/Author/Old Title/Old Title"
+        removed, _cleanup_dirs = self._run(
+            self.OLD,
+            param=True,
+            present={self.OLD, old_base + ".JPG", old_base + ".Metadata.JSON", old_base + ".cue"},
+        )
+        assert removed == {self.OLD, old_base + ".JPG", old_base + ".Metadata.JSON", old_base + ".cue"}
+
+    def test_unrelated_neighbours_at_the_old_base_are_kept(self):
+        # The guard on the directory scan: only exact sidecar suffixes on the old
+        # base go, so another book living in the same folder is untouched.
+        old_base = "/data/Author/Old Title/Old Title"
+        removed, _cleanup_dirs = self._run(
+            self.OLD,
+            param=True,
+            present={
+                self.OLD,
+                old_base + ".cue",
+                "/data/Author/Old Title/Old Title 2.jpg",
+                "/data/Author/Old Title/Other.m4b",
+            },
+        )
+        assert removed == {self.OLD, old_base + ".cue"}
 
     def test_symlinked_alias_of_the_new_path_is_never_deleted(self, tmp_path):
         # W4 regression: /data/Author as a symlink to another mount is a plausible

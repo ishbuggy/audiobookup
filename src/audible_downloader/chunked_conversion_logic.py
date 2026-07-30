@@ -1090,10 +1090,12 @@ def build_mp3_flags(mp3_settings, source_bitrate_bps, source_sample_rate):
          produce "-b:a 0k".
       2. `-compression_level` from encoder_quality (LAME effort; 0 = best).
       3. `-ac 1` when downsample_mono.
-      4. `-ar N` ONLY when the source sample rate exceeds a POSITIVE numeric
+      4. `-ar N` ONLY when the source sample rate exceeds a POSITIVE whole-number
          max_sample_rate (never upsample a source that's already at/below the
-         cap, and never pass a cleared/negative/junk field through to ffmpeg,
-         which would fail the encode with "-ar 0"/"-ar -1").
+         cap). Any other cap — cleared/zero/negative, a bool, a string, or other
+         junk from a hand-edited settings.json — omits the flag entirely rather
+         than handing ffmpeg a value it would reject ("-ar 0", "-ar -1",
+         "-ar True"); an unknown source sample rate omits it too.
     """
     mp3 = mp3_settings or {}
     flags = []
@@ -1126,12 +1128,25 @@ def build_mp3_flags(mp3_settings, source_bitrate_bps, source_sample_rate):
     if mp3.get("downsample_mono", False):
         flags += ["-ac", "1"]
 
-    # The cap must be POSITIVE to be emitted: the UI's min/max attributes are
-    # decorative (the page reads the field with a bare Number()), so a typed "-1"
-    # reaches here and "-ar -1" would fail every encode. A zero or negative cap
-    # is treated as "no cap", exactly like a missing source sample rate.
+    # The cap must be a POSITIVE WHOLE number to be emitted: the UI's min/max
+    # attributes are decorative (the page reads the field with a bare Number()),
+    # so a typed "-1" reaches here and "-ar -1" would fail every encode. A zero or
+    # negative cap is treated as "no cap", exactly like a missing source sample
+    # rate. Two more shapes survive a hand-edited settings.json: `bool` is an
+    # `int` subclass, so a bare `true` would be formatted as "-ar True", and a
+    # float would be formatted as "-ar 44100.0" — ffmpeg rejects both. A bool is
+    # not a rate at all so it means "no cap"; a float is a plausible way to write
+    # a rate, so it's truncated to whole Hz instead of being thrown away.
     max_sample_rate = mp3.get("max_sample_rate", 44100)
-    if source_sample_rate and isinstance(max_sample_rate, (int, float)) and 0 < max_sample_rate < source_sample_rate:
+    if isinstance(max_sample_rate, bool) or not isinstance(max_sample_rate, (int, float)):
+        max_sample_rate = None
+    elif isinstance(max_sample_rate, float):
+        try:
+            max_sample_rate = int(max_sample_rate)
+        except (OverflowError, ValueError):
+            # json.load() accepts Infinity/NaN; neither is a sample rate.
+            max_sample_rate = None
+    if source_sample_rate and max_sample_rate is not None and 0 < max_sample_rate < source_sample_rate:
         flags += ["-ar", str(max_sample_rate)]
 
     return flags
@@ -1208,7 +1223,9 @@ def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context, stop_eve
     -15 -> cancelled/False, stderr summarized on failure). ffmpeg writes to a
     sibling ".part" file that is renamed into place only after a clean exit, so a
     failed or cancelled encode can never leave a truncated book at the library
-    path for a later deep sync to adopt. Progress is driven by
+    path for a later deep sync to adopt; the ".part" file itself is discarded in
+    the `finally`, so an exception escaping this function can't orphan it either.
+    Progress is driven by
     ffmpeg's `-progress pipe:1` stream, occupying the 30..90 band; the final
     verify/finalize takes it to 100.
 
@@ -1288,6 +1305,12 @@ def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context, stop_eve
 
     process = None
     stderr_chunks = []
+    # Flipped only once the finished encode has been renamed into place. Every
+    # other way out of the try below — an ffmpeg failure, a cancellation, or an
+    # exception type this function does not handle (which still propagates) —
+    # leaves it False, and the single cleanup point in `finally` discards the
+    # partial. Nothing else is watching /data for orphaned ".part" files.
+    promoted = False
 
     def _discard_partial():
         """Best-effort cleanup of the ".part" file after a failed/cancelled run."""
@@ -1347,7 +1370,6 @@ def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context, stop_eve
         if returncode != 0:
             if returncode == -15:
                 log.info(f"MP3 ({asin}): Encode cancelled.")
-                _discard_partial()
                 return False
             stderr_text = "".join(stderr_chunks)
             reason = _summarize_subprocess_error(
@@ -1355,7 +1377,6 @@ def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context, stop_eve
                 "MP3 encode failed.",
             )
             log.error(f"MP3 ({asin}): Encode failed: {reason}")
-            _discard_partial()
             return False
 
         # Promote the finished encode into the library in one atomic rename, so
@@ -1364,19 +1385,28 @@ def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context, stop_eve
             os.replace(part_path, final_output_path)
         except OSError as e:
             log.error(f"MP3 ({asin}): Could not move the finished encode into place: {e}")
-            _discard_partial()
             return False
+        promoted = True
 
         log.info(f"MP3 ({asin}): Successfully encoded MP3 at {final_output_path}")
         return True
 
     except OSError as e:
         log.error(f"MP3 ({asin}): Could not run ffmpeg for MP3 encode: {e}")
-        _discard_partial()
         return False
     finally:
         if process:
             process_registry.unregister(job_id, process)
+        # The one cleanup point for the ".part" file, covering the failure and
+        # cancellation returns above AND any exception this function doesn't
+        # handle (an unreadable progress stream, a broken pipe mid-drain): those
+        # still propagate to the caller, but no longer leave a truncated MP3
+        # sitting in /data, where — unlike a moov-less .m4b — it stays fully
+        # probe-readable and a later deep sync would adopt it as DOWNLOADED.
+        # Only ffmpeg creates that file, so a bail before the spawn (a set stop
+        # event, a Popen that never started) has nothing to clean up.
+        if process and not promoted:
+            _discard_partial()
 
 
 def _embed_cover_art(asin, job_id, output_path, cover_file):

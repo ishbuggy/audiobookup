@@ -56,6 +56,16 @@ _reservation_lock = Lock()
 # empty/stub output — the "ghost book" that reported success but isn't on disk.
 _MIN_OUTPUT_BYTES = 64 * 1024
 
+# Floor for the "don't wait forever" completion timeout: short books and books
+# with no known runtime get two hours regardless of any model below.
+_COMPLETION_TIMEOUT_FLOOR_SEC = 7200
+
+# The MP3 path's completion budget, as a multiple of the book's own runtime.
+# Three times real time comfortably covers the download, the decrypt and a
+# single-pass LAME encode even on slow hardware; see _completion_timeout for
+# why that path cannot use the AAC estimator's rate.
+_MP3_TIMEOUT_RUNTIME_MULTIPLE = 3
+
 # Every file that can end up sharing a finished audiobook's base name: the
 # companion PDF, cover image, cue sheet, metadata JSON, and a retained raw
 # master (+ its voucher). Anything that follows the audiobook — a rename moving
@@ -78,6 +88,43 @@ def _sibling_audio_paths(base, ext):
     all of them, so an unusual container still gets the full check.
     """
     return [f"{base}{other}" for other in _AUDIO_EXTENSIONS if other.lower() != ext.lower()]
+
+
+def _existing_sidecar_suffixes(base):
+    """
+    Every sidecar suffix that actually exists on disk for the extension-stripped
+    `base`, each in the spelling the file itself uses (so a caller can move or
+    delete it verbatim). Sorted, so logs and moves are deterministic.
+
+    _SIDECAR_SUFFIXES is lowercase but the files are not always: the cover keeps
+    whatever extension Audible handed us (".JPG" happens), and a user can drop a
+    hand-made "Book.PDF" beside a book. Matching only the lowercase spelling left
+    those behind — a rename moved the audiobook and orphaned its cover.
+
+    Two passes, deliberately: the exact lowercase names are probed directly, which
+    keeps the common case a handful of stats, and then the containing directory is
+    listed to catch any other casing. A listing that fails (the directory is gone,
+    or unreadable) just leaves the direct probes standing.
+    """
+    found = {suffix for suffix in _SIDECAR_SUFFIXES if os.path.exists(f"{base}{suffix}")}
+
+    directory = os.path.dirname(base)
+    prefix = os.path.basename(base)
+    try:
+        entries = os.listdir(directory or ".")
+    except OSError:
+        entries = []
+    for entry in entries:
+        # The base name itself is matched exactly (it comes from our own tracked
+        # path); only the suffix is case-insensitive. The exact-suffix membership
+        # test is what keeps "Title 2.jpg" from being read as Title's sidecar.
+        if not entry.startswith(prefix):
+            continue
+        suffix = entry[len(prefix) :]
+        if suffix.lower() in _SIDECAR_SUFFIXES:
+            found.add(suffix)
+
+    return sorted(found)
 
 
 def _probe_duration_seconds(filepath, job_id=None):
@@ -265,7 +312,11 @@ def build_base_output_path(
 
     filename = re.sub(r"\s+", " ", filename).strip(" .-_,")
     if not filename:
-        filename = f"{author_val} - {title_val}"
+        # The fallback's own halves can be empty too: a value of " . " or "..." is
+        # truthy (so it never took the "Unknown ..." branch above) but sanitizes
+        # away to nothing, which used to leave the file literally named " - ".
+        # Re-apply the same fallbacks the tags use so the name always says something.
+        filename = f"{author_val or 'Unknown Author'} - {title_val or 'Unknown Title'}"
 
     relative_path = os.path.join(*cleaned_dirs, filename) if cleaned_dirs else filename
     return os.path.join("/data", f"{relative_path}{ext}")
@@ -376,17 +427,25 @@ def rename_book_to_match_metadata(asin):
         # Move every sidecar sharing the old base name alongside the audiobook,
         # so a rename keeps the companion PDF, cover, cue sheet, metadata JSON,
         # and any retained raw master (+voucher) matched to the new file name.
+        # Each sidecar keeps its own extension spelling (an uppercase ".JPG" stays
+        # uppercase); only the base name changes.
         old_base = os.path.splitext(current_path)[0]
         new_base = os.path.splitext(target)[0]
-        for suffix in _SIDECAR_SUFFIXES:
+        for suffix in _existing_sidecar_suffixes(old_base):
             old_sidecar = f"{old_base}{suffix}"
-            if os.path.exists(old_sidecar):
-                try:
-                    shutil.move(old_sidecar, f"{new_base}{suffix}")
-                except OSError as e:
-                    log.warning(f"RENAME ({asin}): Could not move sidecar '{old_sidecar}': {e}")
+            try:
+                shutil.move(old_sidecar, f"{new_base}{suffix}")
+            except OSError as e:
+                log.warning(f"RENAME ({asin}): Could not move sidecar '{old_sidecar}': {e}")
         with get_db_connection() as con:
-            con.execute("UPDATE audiobooks SET filepath = ? WHERE asin = ?", (target, asin))
+            # is_duplicate is written explicitly, exactly as the download path's
+            # _finalize_success writes it: `collision` is the live answer to "did
+            # this name need the ASIN suffix", so a rename onto a taken name flags
+            # the book and a rename onto a free one clears a stale flag.
+            con.execute(
+                "UPDATE audiobooks SET filepath = ?, is_duplicate = ? WHERE asin = ?",
+                (target, int(collision), asin),
+            )
             con.commit()
         log.info(f"RENAME ({asin}): Moved file to '{target}'.")
         _cleanup_empty_dirs(os.path.dirname(current_path))
@@ -682,6 +741,41 @@ class BookProcessor:
         )
         return True
 
+    def _completion_timeout(self):
+        """
+        How long `run` waits for this book's final task before giving up. Purely
+        a "don't wait forever" backstop, so both branches are deliberately
+        generous: killing a healthy conversion is far worse than waiting too long
+        on a wedged one.
+
+        Two models, because the two encode paths are not comparable:
+
+        - The chunked AAC re-encode is the ONLY path that feeds the conversion
+          estimator (the remux and MP3 paths both finalize with record_eta=False),
+          so for that path the historical rate is a real measurement of this
+          machine and 4x it is a fair ceiling. Unchanged.
+        - MP3 output therefore gets a budget derived from work it never does — a
+          parallelized AAC chunk encode. On slow hardware (arm64 SBCs) a
+          single-threaded LAME pass over a very long book runs well past that
+          ceiling, and the wait would abort an encode that is progressing fine.
+          Scale off the book's own runtime instead, which is the one quantity
+          that actually bounds a single-pass encode.
+
+        A missing or zero runtime leaves nothing to scale, so both paths fall back
+        to the floor.
+        """
+        with get_db_connection() as con:
+            runtime_row = con.execute("SELECT runtime_min FROM audiobooks WHERE asin = ?", (self.asin,)).fetchone()
+        runtime_min = runtime_row["runtime_min"] if runtime_row else None
+        if not runtime_min or runtime_min <= 0:
+            return _COMPLETION_TIMEOUT_FLOOR_SEC
+
+        if resolve_output_format(load_settings()) == "mp3":
+            budget = int(runtime_min * 60 * _MP3_TIMEOUT_RUNTIME_MULTIPLE)
+        else:
+            budget = 4 * estimate_conversion_time(runtime_min)
+        return max(_COMPLETION_TIMEOUT_FLOOR_SEC, budget)
+
     def run(self):
         """Starts the processing for this book and waits for it to complete."""
         try:
@@ -699,19 +793,23 @@ class BookProcessor:
                 task_runner.submit_task(prepare_task)
 
                 # Block and wait for the final MERGE task to signal completion.
-                # The timeout only exists to prevent waiting forever: at least
-                # 2 hours, scaled up (4x the historical ETA) so very long books
-                # on slow hardware don't get killed mid-conversion.
-                timeout = 7200
-                with get_db_connection() as con:
-                    runtime_row = con.execute(
-                        "SELECT runtime_min FROM audiobooks WHERE asin = ?", (self.asin,)
-                    ).fetchone()
-                if runtime_row:
-                    timeout = max(timeout, 4 * estimate_conversion_time(runtime_row["runtime_min"]))
-
-                completed = self._completion_event.wait(timeout=timeout)
+                # The timeout only exists to prevent waiting forever; see
+                # _completion_timeout for how long it is and why that differs
+                # per output format.
+                completed = self._completion_event.wait(timeout=self._completion_timeout())
                 if not completed:
+                    # Nothing is coming, and the temp dir this book's tasks are
+                    # working in is about to be deleted by the context manager
+                    # above. Stop the subprocesses first: an ffmpeg left running
+                    # would keep burning CPU (and holding the unlinked temp files'
+                    # disk space) for hours with nothing to deliver.
+                    #
+                    # The registry is keyed by job, not by book, so in a bulk job
+                    # this can also cut short the NEXT book's in-flight download.
+                    # That is the better trade: it fails cleanly and is retried,
+                    # whereas an orphaned encode is invisible and unkillable from
+                    # the UI.
+                    process_registry.kill_job_processes(self.job_id)
                     raise RuntimeError("Processing timed out.")
         except Exception as e:
             log.error(f"PROCESSOR ({self.asin}): A critical error occurred in the processor run: {e}", exc_info=True)
@@ -868,8 +966,18 @@ class BookProcessor:
         _yield_progress(self.asin, f"Preparing to process {self.total_chunks} chunk(s)", 30, self.job_id)
 
         if self.total_chunks == 0:
-            log.warning(f"TASK-PREPARE ({self.asin}): Book has no chapter information. Cannot process.")
-            self._update_db_on_failure("Book has no chapter information.")
+            # Two different causes land here and the old message ("Book has no
+            # chapter information.") only described the first: the title really
+            # arrived without chapters, OR it had them and the zero-length cleanup
+            # in prepare_book_assets dropped every one (chapters sharing a start
+            # offset, or early starts the branding trim clamped to 0). Prepare
+            # reports the count it dropped to app.log but hands back only the final
+            # list, so name both causes rather than assert the wrong one.
+            log.warning(f"TASK-PREPARE ({self.asin}): No usable chapters after chapter processing. Cannot process.")
+            self._update_db_on_failure(
+                "Book has no usable chapters: the title reported none, or every chapter was empty "
+                "and dropped during chapter cleanup (see the log for which)."
+            )
             self._completion_event.set()
             return
 
@@ -1080,9 +1188,11 @@ class BookProcessor:
             return
 
         # Both atime and mtime, so the pair stays consistent for tools that sort
-        # on either. Sidecars only exist when their setting produced them.
+        # on either. Sidecars only exist when their setting produced them, and are
+        # matched however they are spelled on disk (an Audible cover saved as
+        # ".JPG" must be stamped like a ".jpg" one).
         base = os.path.splitext(self.final_output_path)[0]
-        targets = [self.final_output_path] + [f"{base}{suffix}" for suffix in _SIDECAR_SUFFIXES]
+        targets = [self.final_output_path] + [f"{base}{suffix}" for suffix in _existing_sidecar_suffixes(base)]
         for path in targets:
             if not os.path.exists(path):
                 continue
@@ -1249,10 +1359,10 @@ class BookProcessor:
                     f"the base is still in use by another book."
                 )
             else:
-                for suffix in _SIDECAR_SUFFIXES:
+                # Matched however they are spelled on disk, same as the rename and
+                # timestamp sweeps — a leftover ".JPG" is as stale as a ".jpg".
+                for suffix in _existing_sidecar_suffixes(old_base):
                     stale_sidecar = f"{old_base}{suffix}"
-                    if not os.path.exists(stale_sidecar):
-                        continue
                     try:
                         os.remove(stale_sidecar)
                         log.info(f"PROCESSOR ({self.asin}): Removed stale sidecar: {stale_sidecar}")
