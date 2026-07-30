@@ -1,6 +1,7 @@
 # tests/test_processing_logic.py
 
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -18,6 +19,7 @@ from audible_downloader.processing_logic import (
     build_base_output_path,
     build_metadata_json,
     generate_cue_sheet,
+    render_chapter_filename,
 )
 
 
@@ -325,6 +327,168 @@ class TestFolderFileTemplateSplit:
             book_row=BOOK_ROW,  # series == "N/A" -> filename segment empty
         )
         assert path == "/data/Bram Stoker/Bram Stoker - Dracula.m4b"
+
+
+def _render_chapter(
+    template="{title} - {ch} - {ch_title}",
+    part_number=1,
+    part_total=1,
+    chapter_title="Chapter One",
+    **overrides,
+):
+    """
+    Call render_chapter_filename with the same book BOOK_ROW describes, so a test
+    only has to name the part of the input it cares about. Book tags are passed
+    by keyword, matching how a caller with a DB row in hand would do it.
+    `part_number` is 1-based, like the renderer's own parameter (and unlike the
+    zero-based `part_index` column db.replace_book_files writes).
+    """
+    book = {
+        "asin": "B0OURS",
+        "author": "Bram Stoker",
+        "title": "Dracula",
+        "narrator": "Simon Vance",
+        "publisher": "Audible Studios",
+    }
+    book.update(overrides)
+    return render_chapter_filename(template, part_number, part_total, chapter_title, **book)
+
+
+class TestRenderChapterFilename:
+    """v0.24.0 Phase 1 (D4): the pure per-part filename renderer. It returns a
+    bare filename — no directory, no extension — that a later phase pairs with
+    the directory and extension from build_base_output_path."""
+
+    def test_default_template(self):
+        assert _render_chapter() == "Dracula - 1 - Chapter One"
+
+    def test_returns_a_bare_name_with_no_directory_or_extension(self):
+        name = _render_chapter(template="{author}/{title} - {ch}")
+        # Only the final segment survives: a template carrying folder levels must
+        # not inject directories into what is one filename segment.
+        assert name == "Dracula - 1"
+        assert "/" not in name
+        assert not name.endswith(".m4b")
+
+    @pytest.mark.parametrize(
+        ("part_number", "part_total", "expected_ch"),
+        [
+            (1, 1, "1"),  # single part -> width 1
+            (1, 9, "1"),  # 9 parts -> still width 1
+            (9, 9, "9"),
+            (1, 10, "01"),  # 10 parts -> width 2
+            (10, 10, "10"),  # the boundary case: part 10 of 10 is "10", not "010"
+            (1, 150, "001"),  # 150 parts -> width 3
+            (99, 150, "099"),
+            (150, 150, "150"),
+        ],
+    )
+    def test_ch_is_zero_padded_to_the_width_of_the_part_count(self, part_number, part_total, expected_ch):
+        name = _render_chapter(template="{ch}", part_number=part_number, part_total=part_total)
+        assert name == expected_ch
+
+    def test_ch_total_is_not_padded(self):
+        name = _render_chapter(template="{ch} of {ch_total}", part_number=7, part_total=120)
+        assert name == "007 of 120"
+
+    def test_missing_ch_placeholder_is_appended(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            name = _render_chapter(template="{title} - {ch_title}", part_number=2, part_total=12)
+        assert name == "Dracula - Chapter One - 02"
+        assert "{ch}" in caplog.text
+
+    def test_missing_ch_placeholder_logs_a_warning(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            _render_chapter(template="{title}")
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "B0OURS" in warnings[0].getMessage()
+
+    def test_present_ch_placeholder_logs_nothing(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            _render_chapter()
+        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+    def test_chapter_title_is_sanitized_like_a_book_title(self):
+        # Same rules as the book path: forbidden characters become '_', and the
+        # drop-segment cleanup strips the trailing '_' left by the '?'.
+        name = _render_chapter(template="{ch} - {ch_title}", chapter_title="AC/DC: Live?")
+        assert name == "1 - AC_DC_ Live"
+
+    def test_chapter_title_cannot_create_directories(self):
+        name = _render_chapter(template="{ch_title} - {ch}", chapter_title="Part 1/2")
+        assert name == "Part 1_2 - 1"
+
+    def test_empty_chapter_title_leaves_no_dangling_separator(self):
+        assert _render_chapter(chapter_title=None) == "Dracula - 1"
+        assert _render_chapter(chapter_title="") == "Dracula - 1"
+
+    def test_book_placeholders_render_alongside_chapter_ones(self):
+        name = _render_chapter(
+            template="{author} - {series} {series_part} ({year}, {language}, {asin}) - {ch} - {ch_title}",
+            part_number=3,
+            part_total=40,
+            series="Dune",
+            series_sequence="1",
+            release_date="2019-06-04",
+            language="English",
+        )
+        assert name == "Bram Stoker - Dune 1 (2019, English, B0OURS) - 03 - Chapter One"
+
+    def test_book_placeholder_fallbacks_match_the_book_path(self):
+        # The "Unknown ..." fallbacks and the empty-on-missing optional tags are
+        # the same map build_base_output_path renders from.
+        name = _render_chapter(
+            template="{author} - {narrator} - {publisher}{series} - {ch}",
+            author=None,
+            narrator=None,
+            publisher=None,
+            series="N/A",
+        )
+        assert name == "Unknown Author - Unknown Narrator - Unknown Publisher - 1"
+
+    def test_subtitle_truncation_is_honoured_when_requested(self):
+        assert _render_chapter(title="Dracula: The Un-Dead", truncate_subtitle=True) == "Dracula - 1 - Chapter One"
+        assert (
+            _render_chapter(title="Dracula: The Un-Dead", truncate_subtitle=False)
+            == "Dracula_ The Un-Dead - 1 - Chapter One"
+        )
+
+    def test_ch_in_a_directory_segment_does_not_satisfy_the_guard(self, caplog):
+        # WF1 regression. Only the last '/'-separated segment becomes the
+        # filename, so a {ch} sitting in a folder level is thrown away. Checking
+        # the guard against the whole template let "{ch}/{title}" through and
+        # rendered the identical name for every part of the book.
+        with caplog.at_level(logging.WARNING):
+            names = [_render_chapter(template="{ch}/{title}", part_number=n, part_total=12) for n in range(1, 13)]
+
+        assert names == [f"Dracula - {n:02d}" for n in range(1, 13)]
+        assert len(set(names)) == 12
+        assert "{ch}" in caplog.text
+        # The warning quotes the template the user configured, not the stripped
+        # segment they would not recognise.
+        assert "{ch}/{title}" in caplog.text
+
+    def test_guard_looks_past_every_directory_level(self):
+        # Deeper nesting is the same defect: {ch} in any segment but the last is
+        # discarded, so the guard has to append its own.
+        name = _render_chapter(template="{author}/{ch}/{ch_title}", part_number=4, part_total=10)
+        assert name == "Chapter One - 04"
+
+    def test_directory_only_template_still_renders_a_numbered_name(self):
+        # "{ch}/{series}" with no series: the filename segment is empty AND has
+        # no {ch}, so the guard supplies the number and the part is still named.
+        name = _render_chapter(template="{ch}/{series}", part_number=4, part_total=10, series="N/A")
+        assert name == "04"
+
+    def test_is_pure_no_settings_or_filesystem_access(self):
+        # Guards the "later phases call this, it reads nothing" contract.
+        with (
+            mock.patch.object(processing_logic, "load_settings", side_effect=AssertionError("settings read")),
+            mock.patch.object(processing_logic, "get_db_connection", side_effect=AssertionError("db access")),
+            mock.patch("os.path.exists", side_effect=AssertionError("filesystem access")),
+        ):
+            assert _render_chapter() == "Dracula - 1 - Chapter One"
 
 
 class TestSubtitleTruncation:

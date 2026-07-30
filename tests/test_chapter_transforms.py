@@ -10,6 +10,7 @@ from audible_downloader.chapter_transforms import (
     drop_zero_length_chapters,
     flatten_chapter_tree,
     merge_credit_chapters,
+    merge_short_chapters,
     render_chapter_title,
     strip_unabridged,
 )
@@ -149,6 +150,110 @@ class TestMergeCreditChapters:
         merge_credit_chapters(chapters)
         assert [c["title"] for c in chapters] == ["Opening Credits", "Chapter 1"]
         assert chapters[1]["start_offset_ms"] == 500
+
+
+class TestMergeShortChapters:
+    """v0.24.0 groundwork: per-chapter splitting turns every chapter into its own
+    file, so sub-minimum chapters (announcement markers, stingers) must fold
+    FORWARD into the following chapter or the output is a pile of fragments.
+    Pure transform — nothing wires it into the pipeline yet."""
+
+    MIN_MS = 3_000
+
+    def test_short_first_chapter_folds_into_the_following_one(self):
+        chapters = [_ch("A", 0, 1_000), _ch("B", 1_000, 600_000)]
+        out = merge_short_chapters(chapters, self.MIN_MS)
+        assert [c["title"] for c in out] == ["A B"]
+        # The survivor starts where the short one began and carries both spans.
+        assert out[0]["start_offset_ms"] == 0
+        assert out[0]["length_ms"] == 601_000
+
+    def test_short_middle_chapter_folds_forward_not_backward(self):
+        chapters = [_ch("A", 0, 600_000), _ch("B", 600_000, 1_000), _ch("C", 601_000, 600_000)]
+        out = merge_short_chapters(chapters, self.MIN_MS)
+        assert [c["title"] for c in out] == ["A", "B C"]
+        # A is untouched; the merged chapter absorbed B's span from the front.
+        assert out[0]["length_ms"] == 600_000
+        assert out[1]["start_offset_ms"] == 600_000
+        assert out[1]["length_ms"] == 601_000
+
+    def test_consecutive_shorts_collapse_into_one_following_chapter(self):
+        chapters = [
+            _ch("A", 0, 500),
+            _ch("B", 500, 500),
+            _ch("C", 1_000, 500),
+            _ch("D", 1_500, 600_000),
+        ]
+        out = merge_short_chapters(chapters, self.MIN_MS)
+        assert [c["title"] for c in out] == ["A B C D"]
+        assert out[0]["start_offset_ms"] == 0
+        assert out[0]["length_ms"] == 601_500
+
+    def test_merged_run_stops_once_it_reaches_the_minimum(self):
+        # A+B is already 4s, over the 3s floor, so the run stops there and C
+        # survives as its own chapter.
+        chapters = [_ch("A", 0, 2_000), _ch("B", 2_000, 2_000), _ch("C", 4_000, 600_000)]
+        out = merge_short_chapters(chapters, self.MIN_MS)
+        assert [c["title"] for c in out] == ["A B", "C"]
+        assert out[0]["length_ms"] == 4_000
+        assert out[1]["start_offset_ms"] == 4_000
+
+    def test_titles_concatenate_in_reading_order(self):
+        chapters = [_ch("One", 0, 500), _ch("Two", 500, 500), _ch("Three", 1_000, 600_000)]
+        out = merge_short_chapters(chapters, self.MIN_MS)
+        assert out[0]["title"] == "One Two Three"
+
+    def test_empty_titles_do_not_leave_stray_spaces(self):
+        chapters = [_ch("", 0, 500), _ch("Real", 500, 600_000)]
+        out = merge_short_chapters(chapters, self.MIN_MS)
+        assert out[0]["title"] == "Real"
+
+    def test_short_last_chapter_is_exempt(self):
+        # Nothing follows it, so it has nowhere to fold and stays as-is.
+        chapters = [_ch("A", 0, 600_000), _ch("B", 600_000, 1_000)]
+        out = merge_short_chapters(chapters, self.MIN_MS)
+        assert [c["title"] for c in out] == ["A", "B"]
+        assert out[1]["length_ms"] == 1_000
+
+    def test_single_short_chapter_book_is_untouched(self):
+        chapters = [_ch("Only", 0, 1_000)]
+        assert merge_short_chapters(chapters, self.MIN_MS) == chapters
+
+    def test_all_long_chapters_is_a_noop(self):
+        chapters = [_ch("A", 0, 600_000), _ch("B", 600_000, 600_000), _ch("C", 1_200_000, 600_000)]
+        assert merge_short_chapters(chapters, self.MIN_MS) == chapters
+
+    def test_exactly_the_minimum_is_long_enough(self):
+        chapters = [_ch("A", 0, 3_000), _ch("B", 3_000, 600_000)]
+        assert [c["title"] for c in merge_short_chapters(chapters, self.MIN_MS)] == ["A", "B"]
+
+    @pytest.mark.parametrize("min_ms", [0, -1, -5_000])
+    def test_zero_or_negative_minimum_disables_the_merge(self, min_ms):
+        chapters = [_ch("A", 0, 1), _ch("B", 1, 600_000)]
+        assert merge_short_chapters(chapters, min_ms) == chapters
+
+    def test_empty_list(self):
+        assert merge_short_chapters([], self.MIN_MS) == []
+
+    def test_preserves_other_keys_on_the_surviving_chapter(self):
+        chapters = [_ch("A", 0, 500), {"title": "B", "start_offset_ms": 500, "length_ms": 600_000, "extra": 7}]
+        out = merge_short_chapters(chapters, self.MIN_MS)
+        assert out[0]["extra"] == 7
+
+    def test_does_not_mutate_input(self):
+        chapters = [_ch("A", 0, 500), _ch("B", 500, 600_000)]
+        merge_short_chapters(chapters, self.MIN_MS)
+        assert [c["title"] for c in chapters] == ["A", "B"]
+        assert chapters[1]["start_offset_ms"] == 500
+        assert chapters[1]["length_ms"] == 600_000
+
+    def test_disabled_path_still_returns_copies(self):
+        # Same convention as every other transform here: the caller's dicts are
+        # never handed back, even on the pass-through path.
+        chapters = [_ch("A", 0, 500)]
+        out = merge_short_chapters(chapters, 0)
+        assert out == chapters
+        assert out[0] is not chapters[0]
 
 
 class TestApplyBrandingTrim:

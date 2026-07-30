@@ -9,6 +9,14 @@ import pytest
 from audible_downloader import db as db_module
 from audible_downloader import processing_logic
 
+# Copied verbatim from the idempotent migration block in bin/start.sh: schema
+# creation is owned by that script, so test fixtures must build the same table.
+BOOK_FILES_DDL = (
+    "CREATE TABLE IF NOT EXISTS book_files ("
+    "asin TEXT NOT NULL, part_index INTEGER NOT NULL, filepath TEXT NOT NULL, "
+    "PRIMARY KEY (asin, part_index))"
+)
+
 SEED_ROWS = [
     # (asin, title, author, status, retry_count)
     ("B001", "Alpha", "Author A", "NEW", 0),
@@ -280,6 +288,9 @@ def full_library_db(tmp_path, monkeypatch):
         "status TEXT, series TEXT, narrator TEXT, runtime_min INTEGER, release_date TEXT, "
         "date_added TEXT, source TEXT, is_duplicate INTEGER)"
     )
+    # Schema creation lives in bin/start.sh, so the fixture mirrors its
+    # `book_files` migration verbatim (v0.24.0 per-chapter splitting).
+    con.execute(BOOK_FILES_DDL)
     con.executemany(
         "INSERT INTO audiobooks (asin, title, author, status, is_duplicate) VALUES (?, ?, ?, ?, ?)",
         [
@@ -306,3 +317,199 @@ class TestGetAllBooksDuplicateFlag:
     def test_null_flag_defaults_to_zero(self, full_library_db):
         by_asin = {b["asin"]: b for b in db_module.get_all_books()}
         assert by_asin["B003"]["is_duplicate"] == 0
+
+
+class TestGetAllBooksFileCount:
+    """v0.24.0 Phase 1: the grid query also reports how many part files a book
+    owns, so a split book can be told from a single-file one. Books with no
+    `book_files` rows (every book today) must report 0, not NULL."""
+
+    def test_books_without_parts_report_zero(self, full_library_db):
+        by_asin = {b["asin"]: b for b in db_module.get_all_books()}
+        assert by_asin["B001"]["file_count"] == 0
+        assert by_asin["B002"]["file_count"] == 0
+        assert by_asin["B003"]["file_count"] == 0
+
+    def test_split_book_reports_its_part_count(self, full_library_db):
+        db_module.replace_book_files("B002", ["/data/one.m4b", "/data/two.m4b", "/data/three.m4b"])
+
+        by_asin = {b["asin"]: b for b in db_module.get_all_books()}
+        assert by_asin["B002"]["file_count"] == 3
+        # Only the split book is affected; its neighbours stay single-file.
+        assert by_asin["B001"]["file_count"] == 0
+        assert by_asin["B003"]["file_count"] == 0
+
+    def test_existing_row_shape_is_unchanged(self, full_library_db):
+        # file_count is purely additive: every key existing consumers read is
+        # still present, so routes and the frontend keep working untouched.
+        book = next(b for b in db_module.get_all_books() if b["asin"] == "B001")
+        for key in (
+            "author",
+            "title",
+            "custom_title",
+            "custom_author",
+            "status",
+            "asin",
+            "series",
+            "narrator",
+            "runtime_min",
+            "release_date",
+            "date_added",
+            "source",
+            "is_duplicate",
+            "native_title",
+            "native_author",
+            "cover_url",
+        ):
+            assert key in book
+        assert book["cover_url"] == "/covers/B001_thumb.jpg"
+
+
+@pytest.fixture
+def book_files_db(tmp_path, monkeypatch):
+    """A temp library.db holding only the `book_files` table, built from the
+    same DDL bin/start.sh runs."""
+    db_path = tmp_path / "library.db"
+    con = sqlite3.connect(db_path)
+    con.execute(BOOK_FILES_DDL)
+    con.commit()
+    con.close()
+    monkeypatch.setattr(db_module, "DB_FILE", str(db_path))
+    return db_path
+
+
+def _paths(rows):
+    return [row["filepath"] for row in rows]
+
+
+class TestBookFiles:
+    """v0.24.0 Phase 1: the part-file helpers a split book's rows go through.
+    They are inert here — nothing writes parts yet — but the row set they
+    maintain is what later phases treat as authoritative."""
+
+    def test_replace_then_get_round_trip(self, book_files_db):
+        db_module.replace_book_files("B001", ["/data/ch1.m4b", "/data/ch2.m4b"])
+
+        rows = db_module.get_book_files("B001")
+        assert _paths(rows) == ["/data/ch1.m4b", "/data/ch2.m4b"]
+        # part_index is the zero-based position in the list passed in.
+        assert [row["part_index"] for row in rows] == [0, 1]
+
+    def test_get_returns_empty_for_unsplit_book(self, book_files_db):
+        assert db_module.get_book_files("B999") == []
+
+    def test_rows_come_back_in_part_order(self, book_files_db):
+        # Insert deliberately out of order to prove the ORDER BY does the work
+        # rather than the natural row order happening to be right.
+        con = sqlite3.connect(book_files_db)
+        con.executemany(
+            "INSERT INTO book_files (asin, part_index, filepath) VALUES (?, ?, ?)",
+            [("B001", 2, "/data/ch3.m4b"), ("B001", 0, "/data/ch1.m4b"), ("B001", 1, "/data/ch2.m4b")],
+        )
+        con.commit()
+        con.close()
+
+        assert _paths(db_module.get_book_files("B001")) == ["/data/ch1.m4b", "/data/ch2.m4b", "/data/ch3.m4b"]
+
+    def test_replace_leaves_no_orphans_when_the_set_shrinks(self, book_files_db):
+        # The failure this guards against: a re-download producing fewer chapters
+        # leaving the tail of the previous run behind as phantom parts.
+        db_module.replace_book_files("B001", [f"/data/old{i}.m4b" for i in range(5)])
+        db_module.replace_book_files("B001", ["/data/new1.m4b", "/data/new2.m4b"])
+
+        rows = db_module.get_book_files("B001")
+        assert _paths(rows) == ["/data/new1.m4b", "/data/new2.m4b"]
+        assert [row["part_index"] for row in rows] == [0, 1]
+
+    def test_replace_with_empty_list_clears_the_book(self, book_files_db):
+        db_module.replace_book_files("B001", ["/data/ch1.m4b", "/data/ch2.m4b"])
+        db_module.replace_book_files("B001", [])
+        assert db_module.get_book_files("B001") == []
+
+    def test_replace_only_touches_the_given_asin(self, book_files_db):
+        db_module.replace_book_files("B001", ["/data/a1.m4b", "/data/a2.m4b"])
+        db_module.replace_book_files("B002", ["/data/b1.m4b"])
+
+        db_module.replace_book_files("B001", ["/data/a-new.m4b"])
+        assert _paths(db_module.get_book_files("B001")) == ["/data/a-new.m4b"]
+        assert _paths(db_module.get_book_files("B002")) == ["/data/b1.m4b"]
+
+    def test_replace_can_share_the_callers_transaction(self, book_files_db):
+        # The finalize path writes the audiobooks row and the part rows together;
+        # with a caller-owned connection nothing is visible until the commit.
+        con = db_module.get_db_connection()
+        try:
+            db_module.replace_book_files("B001", ["/data/ch1.m4b"], con=con)
+            # A separate connection still sees the pre-commit state.
+            assert db_module.get_book_files("B001") == []
+            con.commit()
+        finally:
+            con.close()
+
+        assert _paths(db_module.get_book_files("B001")) == ["/data/ch1.m4b"]
+
+    def test_shared_transaction_rolls_back_with_the_caller(self, book_files_db):
+        db_module.replace_book_files("B001", ["/data/original.m4b"])
+
+        con = db_module.get_db_connection()
+        try:
+            db_module.replace_book_files("B001", ["/data/replacement.m4b"], con=con)
+            con.rollback()
+        finally:
+            con.close()
+
+        # The caller abandoned its transaction, so the old part list survives.
+        assert _paths(db_module.get_book_files("B001")) == ["/data/original.m4b"]
+
+    def test_delete_removes_every_part(self, book_files_db):
+        db_module.replace_book_files("B001", ["/data/ch1.m4b", "/data/ch2.m4b"])
+        db_module.replace_book_files("B002", ["/data/other.m4b"])
+
+        db_module.delete_book_files("B001")
+        assert db_module.get_book_files("B001") == []
+        assert _paths(db_module.get_book_files("B002")) == ["/data/other.m4b"]
+
+    def test_delete_of_unsplit_book_is_a_no_op(self, book_files_db):
+        db_module.delete_book_files("B999")
+        assert db_module.get_book_files("B999") == []
+
+    def test_all_tracked_part_paths_spans_every_book(self, book_files_db):
+        db_module.replace_book_files("B001", ["/data/a1.m4b", "/data/a2.m4b"])
+        db_module.replace_book_files("B002", ["/data/b1.m4b"])
+
+        assert sorted(db_module.get_all_tracked_part_paths()) == ["/data/a1.m4b", "/data/a2.m4b", "/data/b1.m4b"]
+
+    def test_all_tracked_part_paths_is_empty_without_parts(self, book_files_db):
+        assert db_module.get_all_tracked_part_paths() == []
+
+    def test_missing_db_file_returns_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_module, "DB_FILE", str(tmp_path / "does-not-exist.db"))
+        assert db_module.get_book_files("B001") == []
+        assert db_module.get_all_tracked_part_paths() == []
+
+    def test_writers_do_not_create_a_stub_db_when_the_file_is_missing(self, tmp_path, monkeypatch):
+        # sqlite3.connect creates the file it is pointed at, so an unguarded
+        # writer would leave a 0-byte "database" behind that start.sh would then
+        # try to migrate on the next boot. Both writers must no-op instead.
+        db_path = tmp_path / "does-not-exist.db"
+        monkeypatch.setattr(db_module, "DB_FILE", str(db_path))
+
+        db_module.replace_book_files("B001", ["/data/ch1.m4b"])
+        db_module.delete_book_files("B001")
+
+        assert not db_path.exists()
+
+    def test_shared_connection_write_is_unaffected_by_the_missing_file_guard(self, book_files_db, monkeypatch):
+        # The guard only covers the connection this module opens itself; a
+        # borrowed connection is already bound to a real database, so pointing
+        # DB_FILE elsewhere must not stop the caller's write.
+        con = db_module.get_db_connection()
+        monkeypatch.setattr(db_module, "DB_FILE", str(book_files_db.parent / "gone.db"))
+        try:
+            db_module.replace_book_files("B001", ["/data/ch1.m4b"], con=con)
+            con.commit()
+        finally:
+            con.close()
+
+        monkeypatch.setattr(db_module, "DB_FILE", str(book_files_db))
+        assert _paths(db_module.get_book_files("B001")) == ["/data/ch1.m4b"]

@@ -228,6 +228,90 @@ def _parse_timestamp_date(value):
         return None
 
 
+def _build_naming_values(
+    asin,
+    author,
+    title,
+    narrator,
+    publisher,
+    series=None,
+    series_sequence=None,
+    release_date=None,
+    language=None,
+    truncate_subtitle=False,
+):
+    """
+    Build the placeholder -> value map for the *book-level* naming tags, with
+    every value already sanitized for use in a filename. This is the single
+    definition of what each tag means; both the book path (`build_base_output_path`)
+    and the per-part chapter filename (`render_chapter_filename`) render from it,
+    so the two can never drift apart.
+
+    The two missing-value rules are preserved exactly: the original five tags
+    ({author} {title} {narrator} {publisher} {asin}) fall back to "Unknown ...",
+    while the newer optional tags ({series} {series_part} {year} {language})
+    render as the empty string when the value is missing (None/""/"N/A").
+
+    `truncate_subtitle` is passed in rather than read from settings so this stays
+    a pure function; the caller decides whether the user asked for it.
+    """
+    # Trim a long subtitle before sanitization (which rewrites the ':' separator).
+    raw_title = title or "Unknown Title"
+    if truncate_subtitle:
+        raw_title = _strip_subtitle(raw_title)
+
+    # {year}: first four characters of release_date, but only when they are all
+    # digits (sync's "N/A" fallback and malformed dates render empty).
+    year = ""
+    if release_date:
+        candidate = str(release_date)[:4]
+        if len(candidate) == 4 and candidate.isdigit():
+            year = candidate
+
+    return {
+        "{author}": _sanitize_filename(author or "Unknown Author"),
+        "{title}": _sanitize_filename(raw_title),
+        "{narrator}": _sanitize_filename(narrator or "Unknown Narrator"),
+        "{publisher}": _sanitize_filename(publisher or "Unknown Publisher"),
+        "{asin}": _sanitize_filename(asin),
+        "{series}": _resolve_optional_tag(series),
+        "{series_part}": _resolve_optional_tag(series_sequence),
+        "{year}": year,
+        "{language}": _resolve_optional_tag(language),
+    }
+
+
+def _apply_naming_values(template, values):
+    """
+    Substitute a placeholder -> value map into a naming template. Plain literal
+    replacement, in map order.
+
+    The invariant that makes the map order safe *for placeholder names* is that
+    every key carries its closing brace, so no key is a prefix of another:
+    "{series}" cannot match inside "{series_part}", nor "{ch}" inside "{ch_title}".
+    Order is still load-bearing for *values*, though — a value substituted early
+    is part of the string later placeholders are searched in, so a book whose
+    title literally contained "{ch}" would have that text replaced by the part
+    number. That is preserved behaviour from the chained .replace() this came
+    from, not something to rely on.
+    """
+    rendered = template
+    for placeholder, value in values.items():
+        rendered = rendered.replace(placeholder, value)
+    return rendered
+
+
+def _clean_name_segment(segment):
+    """
+    Drop-segment cleanup for one path segment: collapse whitespace runs and strip
+    leading/trailing spaces, dots, hyphens, underscores and commas — so the
+    "Author - " left behind by a missing trailing tag becomes "Author". Returns
+    the empty string when nothing survives, which callers treat as "this segment
+    should be dropped" (directories) or "fall back to a generic name" (filenames).
+    """
+    return re.sub(r"\s+", " ", segment).strip(" .-_,")
+
+
 def build_base_output_path(
     settings,
     asin,
@@ -276,38 +360,28 @@ def build_base_output_path(
     if folder_template and file_template:
         template = f"{folder_template}/{file_template}"
 
-    # Trim a long subtitle before sanitization (which rewrites the ':' separator).
-    raw_title = title or "Unknown Title"
-    if naming.get("truncate_subtitle", False):
-        raw_title = _strip_subtitle(raw_title)
-
-    # Existing tags: always present, always sanitized, "Unknown ..." on missing.
-    author_val = _sanitize_filename(author or "Unknown Author")
-    title_val = _sanitize_filename(raw_title)
-
-    # {year}: first four characters of release_date, but only when they are all
-    # digits (sync's "N/A" fallback and malformed dates render empty).
-    year = ""
-    if release_date:
-        candidate = str(release_date)[:4]
-        if len(candidate) == 4 and candidate.isdigit():
-            year = candidate
-
-    relative_path = (
-        template.replace("{author}", author_val)
-        .replace("{title}", title_val)
-        .replace("{narrator}", _sanitize_filename(narrator or "Unknown Narrator"))
-        .replace("{publisher}", _sanitize_filename(publisher or "Unknown Publisher"))
-        .replace("{asin}", _sanitize_filename(asin))
-        .replace("{series}", _resolve_optional_tag(series))
-        .replace("{series_part}", _resolve_optional_tag(series_sequence))
-        .replace("{year}", year)
-        .replace("{language}", _resolve_optional_tag(language))
+    # Tag values (subtitle trimming, sanitization and the two missing-value
+    # rules) all live in _build_naming_values; author/title are pulled back out
+    # for the empty-filename fallback below.
+    values = _build_naming_values(
+        asin,
+        author,
+        title,
+        narrator,
+        publisher,
+        series=series,
+        series_sequence=series_sequence,
+        release_date=release_date,
+        language=language,
+        truncate_subtitle=naming.get("truncate_subtitle", False),
     )
+    author_val = values["{author}"]
+    title_val = values["{title}"]
+
+    relative_path = _apply_naming_values(template, values)
 
     # Drop-segment cleanup. Split on '/'; the last segment is the filename and the
-    # rest are directory levels. For each segment collapse whitespace runs and
-    # strip leading/trailing spaces, dots, hyphens, underscores, and commas — so
+    # rest are directory levels. Each segment goes through _clean_name_segment, so
     # "Author - " left by a missing trailing tag becomes "Author". Directory
     # segments that collapse to empty are dropped entirely (no "N/A" folders); if
     # the filename segment collapses to empty, fall back to "<author> - <title>".
@@ -317,11 +391,11 @@ def build_base_output_path(
 
     cleaned_dirs = []
     for seg in directories:
-        seg = re.sub(r"\s+", " ", seg).strip(" .-_,")
+        seg = _clean_name_segment(seg)
         if seg:
             cleaned_dirs.append(seg)
 
-    filename = re.sub(r"\s+", " ", filename).strip(" .-_,")
+    filename = _clean_name_segment(filename)
     if not filename:
         # The fallback's own halves can be empty too: a value of " . " or "..." is
         # truthy (so it never took the "Unknown ..." branch above) but sanitizes
@@ -333,11 +407,122 @@ def build_base_output_path(
         # "Unknown ..." branch above) yet the assembled "- - -" reduces to nothing
         # under this strip set, which would name the file "- - -.m4b". Only the
         # fully generic name is guaranteed to survive.
-        if not re.sub(r"\s+", " ", filename).strip(" .-_,"):
+        if not _clean_name_segment(filename):
             filename = "Unknown Author - Unknown Title"
 
     relative_path = os.path.join(*cleaned_dirs, filename) if cleaned_dirs else filename
     return os.path.join("/data", f"{relative_path}{ext}")
+
+
+def render_chapter_filename(
+    template,
+    part_number,
+    part_total,
+    chapter_title,
+    asin,
+    author,
+    title,
+    narrator,
+    publisher,
+    series=None,
+    series_sequence=None,
+    release_date=None,
+    language=None,
+    truncate_subtitle=False,
+):
+    """
+    Render ONE part's filename for a book split into per-chapter files.
+
+    Returns a bare filename **stem**: no directory, no extension. That is the
+    deliberate split of responsibilities with `build_base_output_path`, which
+    returns the full "/data/.../Name.m4b" path for the single-file output — a
+    caller that splits a book takes the directory and the extension from the base
+    path and asks this function only for the name in between, so both halves of
+    the name keep coming from one place.
+
+    `part_number` is **1-BASED**: part 1 of 12 renders "01", part 12 renders "12".
+    Note the deliberate contrast with `db.py`'s `replace_book_files`, whose
+    `part_index` column is ZERO-BASED — a caller holding one list of parts must
+    not feed the same loop variable to both.
+
+    Placeholders: every book-level tag the book naming template supports
+    ({author} {title} {narrator} {publisher} {asin} {series} {series_part} {year}
+    {language}, with the same missing-value rules), plus three part-level ones:
+      {ch}       the part's 1-based number, zero-padded to the width of the part
+                 count — 9 parts render "1".."9", 10 parts render "01".."10",
+                 150 parts render "001".."150".
+      {ch_total} the part count, never padded.
+      {ch_title} the chapter's own title, sanitized like any other tag.
+
+    {ch} is mandatory in spirit: without it every part of a book would render the
+    same name, so a template that omits it gets " - {ch}" appended (with a warning)
+    rather than producing a collision. The result is cleaned by the same
+    drop-segment pass the book filename uses, so illegal characters, missing tags
+    and dangling separators are handled identically — and a '/' can never escape
+    into a directory level, since only the final segment is kept.
+
+    Pure function: no settings, no filesystem, no database. The template and the
+    subtitle-trimming flag are passed in by the caller.
+    """
+    # Part numbering. A part count of 0/None would make the padding width
+    # nonsensical, so normalize to at least one part; part_number is rendered as
+    # given (1-based) so a caller that mis-numbers gets a visible wrong number
+    # rather than a silently reordered file.
+    total = max(int(part_total or 0), 1)
+    width = len(str(total))
+    index = int(part_number)
+
+    # This function returns ONE filename segment, not a path, so a template
+    # carrying folder levels loses everything before the last '/'. Do that strip
+    # here, up front, rather than after rendering: it is what makes the {ch}
+    # guard below honest. Checked against the whole template, "{ch}/{title}"
+    # would satisfy the guard and then have its {ch} thrown away with the
+    # directory level, rendering the identical name for every part of the book.
+    # Splitting the template is equivalent to splitting the rendered string
+    # because every substituted value has been through _sanitize_filename, which
+    # rewrites '/' to '_' — no value can introduce a separator of its own.
+    configured_template = template  # what the user set, for a legible warning
+    template = template.split("/")[-1]
+
+    if "{ch}" not in template:
+        log.warning(
+            f"NAMING ({asin}): Chapter filename template '{configured_template}' has no {{ch}} placeholder "
+            "in its filename segment; appending ' - {ch}' so part filenames stay unique and sortable."
+        )
+        template = f"{template} - {{ch}}"
+
+    values = _build_naming_values(
+        asin,
+        author,
+        title,
+        narrator,
+        publisher,
+        series=series,
+        series_sequence=series_sequence,
+        release_date=release_date,
+        language=language,
+        truncate_subtitle=truncate_subtitle,
+    )
+    values["{ch}"] = str(index).zfill(width)
+    values["{ch_total}"] = str(total)
+    values["{ch_title}"] = _sanitize_filename(chapter_title) if chapter_title else ""
+
+    # The template was reduced to its filename segment above, so what comes back
+    # is already one segment; the drop-segment cleanup then handles the same
+    # illegal characters and dangling separators the book filename does.
+    filename = _clean_name_segment(_apply_naming_values(template, values))
+
+    if not filename:
+        # Belt and braces. The guard above leaves a literal "{ch}" in every
+        # template, and {ch} always renders at least one digit, which survives
+        # _clean_name_segment — so this branch should be unreachable. It stays as
+        # the last line of defence: emitting a nameless part file would be far
+        # worse than an ugly one.
+        filename = _clean_name_segment(f"{values['{title}']} - {values['{ch}']}")
+        if not filename:
+            filename = f"Unknown Title - {values['{ch}']}"
+
+    return filename
 
 
 def _cleanup_empty_dirs(directory):

@@ -112,6 +112,56 @@ def merge_credit_chapters(chapters):
     return result
 
 
+def merge_short_chapters(chapters, min_ms):
+    """Fold chapters shorter than `min_ms` into the chapter that FOLLOWS them.
+
+    Written for per-chapter splitting (v0.24.0), where every chapter becomes its
+    own output file: without this, a book with two-second "Chapter Nineteen"
+    announcement markers produces a pile of unplayable fragments. Same
+    merge-forward semantics Libation uses.
+
+    Operates on a FLAT list and returns a new list of shallow copies (the
+    caller's dicts are never mutated):
+
+    - a chapter whose `length_ms` is below `min_ms` is removed and folded into
+      the following chapter, which then STARTS where the short one started and
+      carries the summed length;
+    - titles are joined with a single space in order ("Chapter 19" + "The Heist"
+      -> "Chapter 19 The Heist"); empty titles contribute nothing rather than a
+      stray space;
+    - the merged chapter is re-examined rather than skipped, so a RUN of short
+      chapters keeps folding forward until the accumulated span finally reaches
+      `min_ms` (or the run hits the end of the book);
+    - the LAST chapter is exempt — there is nothing after it to fold into, so a
+      short final chapter stays as it is;
+    - `min_ms <= 0` disables the feature and the list passes through untouched.
+
+    Takes MILLISECONDS. The user-facing setting is in seconds; converting it is
+    the caller's job, so this stays a pure function with no settings access.
+    """
+    result = [dict(ch) for ch in chapters]
+
+    if min_ms <= 0:
+        return result
+
+    i = 0
+    while i < len(result):
+        # `i + 1 < len(result)` is the last-chapter exemption: no follower, no merge.
+        if result[i].get("length_ms", 0) < min_ms and i + 1 < len(result):
+            short = result.pop(i)
+            following = result[i]
+            following["start_offset_ms"] = short.get("start_offset_ms", 0)
+            following["length_ms"] = following.get("length_ms", 0) + short.get("length_ms", 0)
+            titles = [t for t in (short.get("title", ""), following.get("title", "")) if t]
+            following["title"] = " ".join(titles)
+            # Do not advance: the merged chapter may still be under `min_ms`, in
+            # which case it folds forward again on the next pass.
+            continue
+        i += 1
+
+    return result
+
+
 def apply_branding_trim(chapters, intro_ms, outro_ms, total_duration_ms):
     """Shift a FLAT chapter list into the branding-trimmed OUTPUT timeline.
 

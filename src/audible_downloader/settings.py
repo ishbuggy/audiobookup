@@ -48,6 +48,11 @@ DEFAULT_SETTINGS = {
         # default so the single `template` above stays authoritative.
         "folder_template": "",
         "file_template": "",
+        # Names the individual files produced when per-chapter splitting is on
+        # (v0.24.0). Tags: {title} {ch} {ch_title} — the book title, the 1-based
+        # chapter number, and the chapter's own title. Unused while splitting is
+        # off, which is the default.
+        "chapter_file_template": "{title} - {ch} - {ch_title}",
     },
     "conversion": {
         # Primary output control (Phase 5 consumer). Enum: "original" | "m4b" |
@@ -128,6 +133,16 @@ DEFAULT_SETTINGS = {
             # Per-chapter title template: {ch} {ch_total} {ch_title} {title}.
             # The default reproduces today's output exactly.
             "chapter_title_template": "{ch_title}",
+            # Split the finished book into one output file PER CHAPTER instead of
+            # a single audiobook file (v0.24.0). Default off keeps today's
+            # single-file output; nothing reads this yet.
+            "split_by_chapter": False,
+            # Minimum length, IN SECONDS, of a per-chapter output file. A chapter
+            # shorter than this is merged forward into the chapter that follows
+            # it, so splitting can't emit a pile of two-second fragments. 0
+            # disables the merge entirely (every chapter gets its own file).
+            # Only meaningful while split_by_chapter is on.
+            "minimum_file_duration": 3,
         },
     },
     "import": {

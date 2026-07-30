@@ -140,6 +140,16 @@ if ! sqlite3 "$DB_FILE" ".table job_items" | grep -q "job_items"; then
     sqlite3 "$DB_FILE" "CREATE TABLE job_items (item_id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL, asin TEXT NOT NULL, status TEXT NOT NULL, log TEXT, FOREIGN KEY (job_id) REFERENCES jobs (job_id));"
     echo " -> 'job_items' table created."
 fi
+# Create the per-chapter split file table if it doesn't exist (v0.24.0).
+# One row per output part of a split book; single-file books simply have no rows
+# here, so "is this book split?" is answered by the presence of child rows. This
+# table is deliberately NOT part of DB_SCHEMA/DB_COLUMN_ORDER above — those drive
+# the 'audiobooks' rebuild machinery only.
+if ! sqlite3 "$DB_FILE" ".table book_files" | grep -q "book_files"; then
+    echo "Creating 'book_files' table..."
+    sqlite3 "$DB_FILE" "CREATE TABLE IF NOT EXISTS book_files (asin TEXT NOT NULL, part_index INTEGER NOT NULL, filepath TEXT NOT NULL, PRIMARY KEY (asin, part_index));"
+    echo " -> 'book_files' table created."
+fi
 if ! sqlite3 "$DB_FILE" "PRAGMA table_info(jobs);" | cut -d'|' -f2 | grep -q "^job_params$"; then
     echo "Schema mismatch. Adding missing column: 'job_params' to 'jobs' table..."
     # Add the column. It will store job-specific parameters as a JSON string.

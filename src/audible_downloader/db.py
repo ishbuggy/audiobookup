@@ -62,11 +62,16 @@ def get_all_books():
         return []
     con = get_db_connection()
     cur = con.cursor()
-    # Select only the columns needed for the main library grid to be efficient
+    # Select only the columns needed for the main library grid to be efficient.
+    # `file_count` is a correlated count of the book's `book_files` rows: 0 for a
+    # single-file (or legacy) book, N for a book split into N chapter files. The
+    # table is created unconditionally by bin/start.sh before the app ever starts,
+    # so the subquery is always resolvable.
     cur.execute(
-        "SELECT author, title, custom_title, custom_author, status, asin, series, narrator, "
-        "runtime_min, release_date, date_added, source, is_duplicate "
-        "FROM audiobooks ORDER BY author, title"
+        "SELECT a.author, a.title, a.custom_title, a.custom_author, a.status, a.asin, a.series, a.narrator, "
+        "a.runtime_min, a.release_date, a.date_added, a.source, a.is_duplicate, "
+        "(SELECT COUNT(*) FROM book_files bf WHERE bf.asin = a.asin) AS file_count "
+        "FROM audiobooks a ORDER BY a.author, a.title"
     )
     books_from_db = cur.fetchall()
     con.close()
@@ -84,6 +89,125 @@ def get_all_books():
         book_dict["cover_url"] = f"/covers/{book_dict['asin']}_thumb.jpg"
         books_with_covers.append(book_dict)
     return books_with_covers
+
+
+# --- Split-book part files (`book_files`) ---
+# A book that was converted into one file per chapter gets one `book_files` row
+# per output file; a normal single-file book has none. That presence/absence IS
+# the split flag — there is no column on `audiobooks` saying "this book is split"
+# — so every writer below keeps the row set consistent with what is on disk.
+# The `filepath` column on `audiobooks` still holds a path for split books too
+# (the book's folder), which is why these helpers never touch it: the caller
+# updates the parent row, these update the children, ideally together (see the
+# shared-connection note on replace_book_files).
+
+
+def get_book_files(asin):
+    """
+    Returns the book's part rows as a list of dicts (`part_index`, `filepath`),
+    ordered by `part_index` — i.e. in playback order. An empty list means the
+    book is not split (a normal single-file book, or one downloaded before this
+    feature existed).
+    """
+    if not os.path.exists(DB_FILE):
+        return []
+
+    con = get_db_connection()
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT part_index, filepath FROM book_files WHERE asin = ? ORDER BY part_index", (asin,))
+        return [dict(row) for row in cur.fetchall()]
+    except sqlite3.Error as e:
+        log.error(f"Database error while fetching part files for {asin}: {e}", exc_info=True)
+        return []
+    finally:
+        con.close()
+
+
+def replace_book_files(asin, paths, con=None):
+    """
+    Replaces the book's entire part list with `paths`, in order: every existing
+    row for the ASIN is deleted and the new list inserted, so no stale part can
+    survive a re-download that produced fewer files. `part_index` is the
+    ZERO-BASED position in `paths` and exists purely to preserve that order —
+    user-facing chapter numbering is rendered separately from the file names.
+    Passing an empty `paths` list is therefore the same as deleting the rows,
+    which is exactly what converting a split book back to a single file needs.
+
+    Delete and insert always run in ONE transaction, so the row set is never
+    observed half-written. Pass an open connection as `con` to enlist in the
+    CALLER's transaction — that is how the finalize step writes the `audiobooks`
+    row (status/filepath) and these child rows as a single atomic update; the
+    caller then owns the commit and the close. With no `con`, this opens its own
+    connection and commits. Database errors propagate: a failed part-list write
+    must not be mistaken for a successful download.
+    """
+    rows = [(asin, part_index, path) for part_index, path in enumerate(paths)]
+
+    owns_connection = con is None
+    if owns_connection:
+        # Same existence guard the read helpers use, and it matters more here:
+        # sqlite3.connect CREATES the file, so writing with the database missing
+        # would leave a 0-byte stub that start.sh then mistakes for a real
+        # database and tries to migrate. A borrowed connection is already open
+        # against a real database, so that path skips the check.
+        if not os.path.exists(DB_FILE):
+            log.error(f"Database not found, skipping part-file write for {asin}.")
+            return
+        con = get_db_connection()
+    try:
+        con.execute("DELETE FROM book_files WHERE asin = ?", (asin,))
+        if rows:
+            con.executemany("INSERT INTO book_files (asin, part_index, filepath) VALUES (?, ?, ?)", rows)
+        if owns_connection:
+            con.commit()
+    finally:
+        # Closing without a commit discards the implicit transaction, so an
+        # exception on our own connection leaves the old rows untouched.
+        if owns_connection:
+            con.close()
+
+
+def delete_book_files(asin):
+    """
+    Removes every part row for the ASIN, marking the book as no longer split
+    (used when its files are deleted or it is re-downloaded unsplit). Deleting
+    rows that don't exist is a no-op, so this is safe to call unconditionally.
+    """
+    # No database means no part rows to remove — and connecting would create an
+    # empty file rather than delete anything (see replace_book_files).
+    if not os.path.exists(DB_FILE):
+        log.error(f"Database not found, skipping part-file delete for {asin}.")
+        return
+
+    con = get_db_connection()
+    try:
+        con.execute("DELETE FROM book_files WHERE asin = ?", (asin,))
+        con.commit()
+    finally:
+        con.close()
+
+
+def get_all_tracked_part_paths():
+    """
+    Returns a flat list of every part `filepath` known to the database, across
+    all books. Filesystem scanners use it to tell a file the app produced from a
+    stray one, for which the single `audiobooks.filepath` column is not enough
+    once a book can own many files.
+    """
+    if not os.path.exists(DB_FILE):
+        return []
+
+    con = get_db_connection()
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT filepath FROM book_files")
+        return [row["filepath"] for row in cur.fetchall()]
+    except sqlite3.Error as e:
+        log.error(f"Database error while fetching tracked part paths: {e}", exc_info=True)
+        return []
+    finally:
+        con.close()
 
 
 def cleanup_stale_jobs():
