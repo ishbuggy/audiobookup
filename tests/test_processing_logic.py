@@ -59,7 +59,7 @@ BOOK_ROW = {
 }
 
 
-def _resolve_output_path(
+def _run_prepare(
     asin="B0OURS",
     template="{author}/{title}/{author} - {title}",
     book_row=BOOK_ROW,
@@ -76,7 +76,8 @@ def _resolve_output_path(
     decide the final output path, with every external boundary mocked:
     settings, the database, the filesystem, ffprobe, and the asset download
     (which returns a falsy context so the method stops right after the path
-    decision). Returns the final_output_path the processor chose.
+    decision). Returns the processor itself, so tests can assert on any state
+    PREPARE lifted out of the DB row and not just the chosen path.
     """
     processor = BookProcessor(asin=asin, job_id=1)
 
@@ -116,7 +117,12 @@ def _resolve_output_path(
     ):
         processor._prepare_and_spawn_encode_tasks()
 
-    return processor.final_output_path
+    return processor
+
+
+def _resolve_output_path(**kwargs):
+    """The common case of _run_prepare: only the chosen output path matters."""
+    return _run_prepare(**kwargs).final_output_path
 
 
 class TestNamingTemplate:
@@ -338,6 +344,18 @@ class TestApplyCustomToFilenames:
         row = dict(BOOK_ROW, custom_title=None, custom_author="B. Stoker")
         path = _resolve_output_path(template="{author}/{title}", book_row=row, apply_custom_to_filenames=True)
         assert path == "/data/B. Stoker/Dracula.m4b"
+
+    def test_prepare_carries_custom_title_to_the_processor(self):
+        # PREPARE lifts custom_title off the DB row so the sidecar writers can
+        # reach it at finalize time. It is carried regardless of
+        # apply_custom_to_filenames, which governs the filename only: the
+        # embedded tags and the sidecars always prefer the custom title.
+        row = dict(BOOK_ROW, custom_title="Dracula (Curry)")
+        assert _run_prepare(book_row=row).custom_title == "Dracula (Curry)"
+        assert _run_prepare(book_row=row, apply_custom_to_filenames=True).custom_title == "Dracula (Curry)"
+
+    def test_prepare_leaves_custom_title_unset_when_the_column_is_null(self):
+        assert _run_prepare(book_row=dict(BOOK_ROW, custom_title=None)).custom_title is None
 
 
 class TestRenameToMatchMetadata:
