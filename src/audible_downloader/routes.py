@@ -166,11 +166,28 @@ def history():
     return render_template("history.html", server_version=server_version)
 
 
-## The SSE stream endpoint
+# Top-level settings keys that never leave the server. The settings page's
+# "Export as JSON" button downloads GET /api/settings verbatim and users share
+# that file for backup/migration, so the web-UI password hash must never be in
+# it — it is offline-crackable. initial_setup_complete goes too: it is
+# first-run wizard state, not a user preference, and has no meaning outside
+# this install. No client-side code reads either key.
+REDACTED_SETTINGS_KEYS = frozenset({"password_hash", "initial_setup_complete"})
+
+
 @app.route("/api/settings", methods=["GET"])
 @login_required
 def get_settings():
-    return jsonify(load_settings())
+    """Returns the current settings with the credential/setup keys stripped."""
+    # Build a NEW filtered dict rather than popping from the loaded one.
+    # load_settings() hands out a fresh deep copy today, so a pop would happen
+    # to be safe — but redaction that silently depends on that guarantee would
+    # start corrupting the process's in-memory settings the moment it changed.
+    # Importing is unaffected: POST /api/settings deep-merges its payload into
+    # the stored settings, so a hash-less export imports cleanly and leaves the
+    # existing credential in place.
+    current_settings = load_settings()
+    return jsonify({key: value for key, value in current_settings.items() if key not in REDACTED_SETTINGS_KEYS})
 
 
 @app.route("/api/settings", methods=["POST"])

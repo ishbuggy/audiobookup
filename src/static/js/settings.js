@@ -405,6 +405,20 @@ document.addEventListener("DOMContentLoaded", () => {
         const newPassword = document.getElementById("new_password").value;
         const confirmPassword = document.getElementById("confirm_password").value;
 
+        // Guard against a mistyped confirmation before anything is sent. Both fields blank
+        // means "keep the current password" — but if EITHER field is filled and they disagree
+        // (including text typed only into Confirm), the *entire* save is aborted. Blocking the
+        // whole save (rather than quietly dropping just the password) is deliberate: the
+        // alternative is a user who sees "Settings saved!", stays logged in, and only discovers
+        // the typo when they are locked out at the next login.
+        if ((newPassword !== "" || confirmPassword !== "") && newPassword !== confirmPassword) {
+            showCustomAlert(
+                "The new password and its confirmation do not match. Nothing was saved — please re-enter both fields.",
+                '<i class="fas fa-times-circle" style="color: #dc3545;"></i> Passwords Do Not Match',
+            );
+            return;
+        }
+
         // Correctly get the initial username from the data attribute set in the HTML
         const initialUsername = usernameInput.dataset.initialUsername;
 
@@ -439,12 +453,12 @@ document.addEventListener("DOMContentLoaded", () => {
             settingsToSave.tasks.deep_sync_schedule = { cron: deepSyncScheduler.generateCron() };
             settingsToSave.tasks.process_schedule = { cron: processScheduler.generateCron() };
 
-            // Manually check the new password field's value.
-            const newPasswordValue = document.getElementById("new_password").value;
-
-            // Only include the 'password' key in the payload if the user actually entered a new one.
-            if (newPasswordValue) {
-                settingsToSave.password = newPasswordValue;
+            // The password input carries no data-path, so the sweep above cannot have picked it
+            // up — this is the only place a new password can enter the payload. We send the value
+            // captured when the button was clicked (already checked against Confirm) rather than
+            // re-reading the field, so what gets hashed is exactly what was validated.
+            if (passwordHasChanged) {
+                settingsToSave.password = newPassword;
             }
 
             // Sanity check for overly frequent schedules.

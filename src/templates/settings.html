@@ -1371,13 +1371,17 @@
                                     >Leave blank to keep the current password.</small
                                 >
                             </label>
+                            {# This input is deliberately NOT marked with class="setting-input"/data-path="password".
+                            Every other field on this page is harvested by the generic save sweep in settings.js, but a
+                            password must not be: the sweep would post whatever was typed here even when it disagrees
+                            with the Confirm field below, and the server would hash and store the typo, locking the user
+                            out at their next login. settings.js reads this field by id instead, and only ever sends it
+                            after confirming the two fields match. #}
                             <input
                                 type="password"
                                 id="new_password"
                                 name="new_password"
                                 minlength="8"
-                                class="setting-input"
-                                data-path="password"
                                 autocomplete="new-password"
                             />
                         </div>

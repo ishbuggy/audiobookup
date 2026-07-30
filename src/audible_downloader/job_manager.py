@@ -448,6 +448,13 @@ def start_new_job(job_type, asins=None, job_params=None):
             worker_target = None
 
             if job_type == "DOWNLOAD":
+                # Whether this job came from a human must be decided BEFORE the
+                # auto-fetch below populates `asins`, because that is the only
+                # thing that distinguishes the two cases: a caller-supplied ASIN
+                # list is a manual request (card button, bulk selection, retry),
+                # an empty one is the scheduler asking for whatever is due.
+                is_manual = bool(asins)
+
                 # If no ASINs are provided, this is an automatic job. Fetch the list
                 # of downloadable books based on the user's settings.
                 if not asins:
@@ -458,10 +465,22 @@ def start_new_job(job_type, asins=None, job_params=None):
                     asins = [book["asin"] for book in books_to_process]
 
                 # --- START: LOGIC TO RESET RETRY COUNT ---
-                # For any book included in a manually started job, reset its retry counter.
-                # This gives the user control to re-include a failed book in automatic queues.
-                if asins:
-                    log.info(f"Resetting retry count for {len(asins)} book(s) before starting job {job_id}.")
+                # A MANUALLY started job resets the retry counter of every book in
+                # it, which re-arms one future automatic attempt — the user's way
+                # of putting a failed book back into the automatic queues.
+                #
+                # An automatic job must NOT reset it. The auto-process ERROR gate
+                # (db.py `_get_books_by_status`) admits a book while its counter is
+                # <= 1, and the counter only ever rises in the download failure
+                # path (processing_logic.py `_update_db_on_failure`). If a
+                # scheduled run cleared the counter for the books it just picked
+                # up, every failure would be reset before the next run could see
+                # it and a permanently failing title would be re-downloaded
+                # forever.
+                # (is_manual is exactly "the caller supplied a non-empty list", so
+                # it already guarantees there is something to reset here.)
+                if is_manual:
+                    log.info(f"Manual job {job_id}: resetting retry count for {len(asins)} book(s).")
                     placeholders = ",".join("?" for _ in asins)
                     # We use the cursor here because we need to commit this change
                     # with the rest of the job creation transaction.

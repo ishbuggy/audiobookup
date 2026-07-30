@@ -1,10 +1,13 @@
 # tests/test_db.py
 
 import sqlite3
+from threading import Event
+from unittest import mock
 
 import pytest
 
 from audible_downloader import db as db_module
+from audible_downloader import processing_logic
 
 SEED_ROWS = [
     # (asin, title, author, status, retry_count)
@@ -73,6 +76,162 @@ class TestGetBooksForAutoJob:
     def test_all_toggles_off_selects_nothing(self, seeded_db):
         settings = {"tasks": {}}
         assert db_module.get_books_for_auto_job(settings) == []
+
+
+@pytest.fixture
+def retry_counter_db(tmp_path, monkeypatch):
+    """
+    A temp library.db wide enough for the processor's real failure/success
+    UPDATEs, so the retry counter can be driven through the writes that maintain
+    it and then read back through the auto-process gate.
+
+    Only db_module.DB_FILE is patched: processing_logic goes through the same
+    get_db_connection, which resolves DB_FILE at call time. retry_count is left
+    nullable exactly as bin/start.sh declares it, so the legacy-NULL row below is
+    a state a real database can actually be in.
+    """
+    db_path = tmp_path / "library.db"
+    con = sqlite3.connect(db_path)
+    con.execute(
+        "CREATE TABLE audiobooks ("
+        "asin TEXT PRIMARY KEY, title TEXT, author TEXT, status TEXT NOT NULL DEFAULT 'NEW', "
+        "retry_count INTEGER DEFAULT 0, error_message TEXT, filepath TEXT, is_duplicate INTEGER)"
+    )
+    con.executemany(
+        "INSERT INTO audiobooks (asin, title, author, status, retry_count) VALUES (?, ?, ?, ?, ?)",
+        [
+            ("B009", "Foxtrot", "Author F", "ERROR", 0),  # never failed since its last re-arm
+            ("B010", "Golf", "Author G", "ERROR", None),  # legacy row, counter never written
+            ("B011", "Hotel", "Author H", "ERROR", 1),  # failed once: the one auto retry is due
+            ("B012", "India", "Author I", "ERROR", 2),  # the auto retry failed too
+        ],
+    )
+    con.commit()
+    con.close()
+    monkeypatch.setattr(db_module, "DB_FILE", str(db_path))
+    return db_path
+
+
+def _read_row(asin):
+    con = db_module.get_db_connection()
+    try:
+        return con.execute("SELECT status, retry_count FROM audiobooks WHERE asin = ?", (asin,)).fetchone()
+    finally:
+        con.close()
+
+
+class TestRetryCounterGate:
+    """
+    v0.23.0 #9: the ERROR gate above only works if something actually raises
+    retry_count. The download failure path does (and nothing else does), which is
+    what limits a failing book to ONE automatic re-download: the failure that put
+    it in ERROR takes the counter to 1, the gate still admits 1 so the retry runs,
+    and the retry's own failure takes it to 2 and out. A cancellation must not
+    count as an attempt, and success clears the slate.
+    """
+
+    def test_gate_admits_zero_and_one_only(self, retry_counter_db):
+        # The arithmetic the whole feature rests on: 0 (fresh/re-armed) and 1
+        # (failed once, retry due) are in; 2+ is spent; NULL matches neither.
+        assert _asins(db_module._get_books_by_status(["ERROR"])) == ["B009", "B011"]
+        # Manual selection ignores the counter entirely and offers all four.
+        manual = db_module._get_books_by_status(["ERROR"], include_errored_retries=True)
+        assert _asins(manual) == ["B009", "B010", "B011", "B012"]
+
+    def test_failure_increments_but_leaves_the_one_retry(self, retry_counter_db):
+        # First failure: the book becomes ERROR at 1, which the gate still admits,
+        # so the next scheduled run performs the promised single retry.
+        processor = processing_logic.BookProcessor(asin="B009", job_id=1)
+        with mock.patch.object(processing_logic, "_yield_progress"):
+            processor._update_db_on_failure("ffmpeg exploded")
+
+        assert _read_row("B009")["retry_count"] == 1
+        assert "B009" in _asins(db_module._get_books_by_status(["ERROR"]))
+
+    def test_second_failure_spends_the_retry(self, retry_counter_db):
+        # The automatic retry does NOT reset the counter (only a manual job or a
+        # success does), so its failure lands at 2 and the book drops out for good.
+        processor = processing_logic.BookProcessor(asin="B009", job_id=1)
+        with mock.patch.object(processing_logic, "_yield_progress"):
+            processor._update_db_on_failure("first failure")
+            processor._update_db_on_failure("second failure")
+
+        assert _read_row("B009")["retry_count"] == 2
+        assert "B009" not in _asins(db_module._get_books_by_status(["ERROR"]))
+        # The user can still pick it up by hand, which re-arms it.
+        manual = db_module._get_books_by_status(["ERROR"], include_errored_retries=True)
+        assert "B009" in _asins(manual)
+
+    def test_manual_rearm_grants_exactly_one_more_auto_attempt(self, retry_counter_db):
+        # Simulates what a manually started job does (job_manager.start_new_job
+        # resets the counter for the books the user picked) to the spent book, then
+        # replays a failing attempt. Even though that manual attempt fails, the
+        # book is back inside the gate for one automatic retry — and no further.
+        con = sqlite3.connect(retry_counter_db)
+        con.execute("UPDATE audiobooks SET retry_count = 0 WHERE asin = 'B012'")
+        con.commit()
+        con.close()
+
+        processor = processing_logic.BookProcessor(asin="B012", job_id=1)
+        with mock.patch.object(processing_logic, "_yield_progress"):
+            processor._update_db_on_failure("the manual attempt failed too")
+        assert _read_row("B012")["retry_count"] == 1
+        assert "B012" in _asins(db_module._get_books_by_status(["ERROR"]))
+
+        with mock.patch.object(processing_logic, "_yield_progress"):
+            processor._update_db_on_failure("and so did the automatic retry")
+        assert _read_row("B012")["retry_count"] == 2
+        assert "B012" not in _asins(db_module._get_books_by_status(["ERROR"]))
+
+    def test_legacy_null_counter_stays_out_of_automatic_jobs(self, retry_counter_db):
+        # A row predating the column can hold NULL, which neither `<= 1` nor any
+        # plain comparison matches — deliberately, so these rows keep the behavior
+        # they have always had (never auto-retried). The failure UPDATE still
+        # coalesces, because a plain NULL + 1 stays NULL and would leave the
+        # counter stuck at "unknown" forever.
+        assert "B010" not in _asins(db_module._get_books_by_status(["ERROR"]))
+
+        processor = processing_logic.BookProcessor(asin="B010", job_id=1)
+        with mock.patch.object(processing_logic, "_yield_progress"):
+            processor._update_db_on_failure("ffmpeg exploded")
+
+        assert _read_row("B010")["retry_count"] == 1
+
+    def test_cancellation_does_not_consume_the_retry(self, retry_counter_db):
+        # A user-cancelled download is not a failure: _fail_or_cancel short-
+        # circuits, so the status and the counter are both left alone and the
+        # book is still eligible for its automatic attempt.
+        stop_event = Event()
+        stop_event.set()
+        processor = processing_logic.BookProcessor(asin="B009", job_id=1, stop_event=stop_event)
+        with mock.patch.object(processing_logic, "_yield_progress"):
+            processor._fail_or_cancel("Final merge of chapter chunks failed.")
+
+        row = _read_row("B009")
+        assert row["retry_count"] == 0
+        assert row["status"] == "ERROR"  # unchanged: it was already ERROR here
+        assert "B009" in _asins(db_module._get_books_by_status(["ERROR"]))
+
+    def test_success_resets_the_counter(self, retry_counter_db):
+        processor = processing_logic.BookProcessor(asin="B009", job_id=1)
+        with mock.patch.object(processing_logic, "_yield_progress"):
+            processor._update_db_on_failure("ffmpeg exploded")
+        assert _read_row("B009")["retry_count"] == 1
+
+        processor.final_output_path = "/data/Author F/Foxtrot/Foxtrot.m4b"
+        with (
+            mock.patch.object(processing_logic, "_yield_progress"),
+            mock.patch.object(processor, "_verify_output_file", return_value=(True, None)),
+            mock.patch.object(processor, "_place_supplementary_pdf"),
+            mock.patch.object(processor, "_place_sidecar_files"),
+            mock.patch.object(processor, "_apply_file_timestamps"),
+            mock.patch.object(processor, "_cleanup_stale_files"),
+        ):
+            processor._finalize_success(conversion_start_time=0.0, record_eta=False)
+
+        row = _read_row("B009")
+        assert row["status"] == "DOWNLOADED"
+        assert row["retry_count"] == 0
 
 
 class TestApplyMetadataOverrides:

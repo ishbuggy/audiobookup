@@ -138,8 +138,10 @@ def _get_books_by_status(statuses, include_errored_retries=False):
 
     Args:
         statuses (list): A list of statuses to query for (e.g., ['NEW', 'MISSING']).
-        include_errored_retries (bool): If True, ignores the retry_count for ERROR books.
-                                        This is for manual selection.
+        include_errored_retries (bool): If True, ignores the retry_count for ERROR books
+                                        (manual selection offers every errored book).
+                                        If False, ERROR books are limited to the
+                                        one automatic re-download attempt below.
     """
     if not os.path.exists(DB_FILE) or not statuses:
         return []
@@ -161,8 +163,19 @@ def _get_books_by_status(statuses, include_errored_retries=False):
             # For manual selection, get all ERROR books
             conditions.append("status = 'ERROR'")
         else:
-            # For automatic jobs, only get ERROR books that haven't been retried
-            conditions.append("(status = 'ERROR' AND retry_count = 0)")
+            # For automatic jobs, only get ERROR books that still have their one
+            # automatic re-download left. The counter rises by one per failure
+            # (processing_logic.py `_update_db_on_failure`) and is only reset by a
+            # success or a manually started job, so:
+            #   0 -> first failure hasn't happened yet (or was manually re-armed)
+            #   1 -> failed once; this is the one automatic retry the settings UI
+            #        promises, and it runs without clearing the counter
+            #   2+ -> the retry failed too; never selected automatically again
+            # Plain comparison, deliberately NOT COALESCE: a legacy row whose
+            # retry_count is NULL matches neither, which is the safe direction
+            # (it is simply never auto-retried) and is the behavior these rows
+            # have always had.
+            conditions.append("(status = 'ERROR' AND retry_count <= 1)")
 
     # We must have other_statuses for the IN clause, so we pass them in order
     params = other_statuses

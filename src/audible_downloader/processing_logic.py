@@ -1388,11 +1388,40 @@ class BookProcessor:
         self._update_db_on_failure(error_message)
 
     def _update_db_on_failure(self, error_message):
-        """Centralized method to update the database when any step fails."""
+        """
+        Centralized method to update the database when any step fails.
+
+        The retry counter is bumped here, and this is the ONLY place that raises
+        it — without the bump, a permanently failing title is re-downloaded on
+        every scheduled run forever, hammering the Audible API. Read together
+        with the auto-process ERROR gate (`retry_count <= 1` in db.py
+        `_get_books_by_status`) and the two resets, the full lifecycle is:
+
+          0 --fail--> 1   still selected: this is the ONE automatic retry the
+                          settings UI promises, and an automatic job does not
+                          reset the counter, so the retry is genuinely the last
+          1 --fail--> 2   above the gate; never selected automatically again
+          success -> 0    a working book starts over with a clean slate
+          manual  -> 0    enqueuing by hand re-arms exactly one future automatic
+                          attempt, even if the manual attempt itself fails (0 ->
+                          1 is still inside the gate)
+          cancel  -> unchanged (see below); a cancel is not an attempt
+
+        The bump is done inside the UPDATE (rather than read-modify-write) so two
+        book processors failing at once can't clobber each other's count; the
+        COALESCE mirrors bin/start.sh, which treats the column as possibly NULL
+        on rows that predate it.
+
+        Callers must not route cancellations here — see `_fail_or_cancel` and the
+        (None, None) prepare-path check: a user-cancelled download leaves the
+        book's status untouched, so it must not consume the automatic retry.
+        """
         log.error(f"PROCESSOR ({self.asin}):   -> ERROR: {error_message}")
         with get_db_connection() as con:
             con.execute(
-                "UPDATE audiobooks SET status = 'ERROR', error_message = ? WHERE asin = ?", (error_message, self.asin)
+                "UPDATE audiobooks SET status = 'ERROR', error_message = ?, "
+                "retry_count = COALESCE(retry_count, 0) + 1 WHERE asin = ?",
+                (error_message, self.asin),
             )
         _yield_progress(self.asin, "Failed!", 100, self.job_id)
 

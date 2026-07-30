@@ -652,6 +652,60 @@ class TestClearJobs:
         assert data == {"success": True, "deleted_jobs": 0, "deleted_items": 0}
 
 
+class TestSettingsGetRedaction:
+    """GET /api/settings is what the settings page's "Export as JSON" button
+    downloads, and users share that file to back up or migrate an install — so
+    the response must not carry the web-UI password hash (offline-crackable) or
+    the first-run setup flag."""
+
+    def test_response_omits_credential_and_setup_keys(self, client, completed_setup):
+        _login_session(client)
+        response = client.get("/api/settings")
+        assert response.status_code == 200
+        settings = response.get_json()
+        assert "password_hash" not in settings
+        assert "initial_setup_complete" not in settings
+
+    def test_response_still_carries_the_real_settings(self, client, completed_setup):
+        # Redaction must be surgical: everything the UI actually reads survives.
+        _login_session(client)
+        settings = client.get("/api/settings").get_json()
+        assert settings["username"] == "admin"
+        for key in ("advanced_mode_enabled", "job", "naming", "conversion", "import", "tasks"):
+            assert key in settings
+
+    def test_redaction_does_not_mutate_the_stored_settings(self, client, completed_setup, settings_file):
+        """The handler must filter a copy, never pop the loaded dict — otherwise
+        a single export would strip the credential from live in-memory settings
+        (and from the next save, locking the user out)."""
+        from audible_downloader import settings as settings_module
+
+        # A recognizable stand-in for the stored hash (not a real credential).
+        sentinel_hash = "pbkdf2:sha256:600000$testsalt$0123456789abcdef"
+        settings_file.write_text(json.dumps({"initial_setup_complete": True, "password_hash": sentinel_hash}))
+
+        _login_session(client)
+        response = client.get("/api/settings")
+        assert response.status_code == 200
+        assert "password_hash" not in response.get_json()
+
+        # The store behind the endpoint is untouched by the redaction.
+        stored = settings_module.load_settings()
+        assert stored["password_hash"] == sentinel_hash
+        assert stored["initial_setup_complete"] is True
+
+    def test_the_shared_defaults_are_not_stripped(self, client, completed_setup):
+        """completed_setup writes a minimal settings.json, so both redacted keys
+        come from DEFAULT_SETTINGS via the load-time merge — that module-level
+        dict is shared process-wide and must survive an export untouched."""
+        from audible_downloader import settings as settings_module
+
+        _login_session(client)
+        assert client.get("/api/settings").status_code == 200
+        assert "password_hash" in settings_module.DEFAULT_SETTINGS
+        assert "initial_setup_complete" in settings_module.DEFAULT_SETTINGS
+
+
 class TestSettingsOutputFormatMirror:
     """Phase 0: POST /api/settings mirrors the legacy no_reencode flag from the
     new output_format enum so code still reading the old flag stays correct."""

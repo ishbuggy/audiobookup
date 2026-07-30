@@ -122,3 +122,47 @@ class TestDownloadWorkerCleanupConsent:
         # Only a real JSON boolean counts as an answer; a string must not sneak
         # through as a truthy "yes".
         assert self._cleanup_arg({"cleanup_stale_files": "false"}) is None
+
+
+class TestRetryCountResetIsManualOnly:
+    """v0.23.0 #9: resetting retry_count re-arms a book for one automatic retry,
+    so only a human may do it. If a scheduled run cleared the counter for the
+    books it just picked up, the auto-process ERROR gate (retry_count <= 1) would
+    never see a failure accumulate and a broken title would be re-downloaded
+    forever. The only signal available here is whether the caller supplied ASINs,
+    which must be captured before the auto-fetch fills the list in."""
+
+    def _reset_asins(self, asins, auto_books=()):
+        """Returns the ASIN list the retry-count reset was issued for, or None if
+        the reset never ran."""
+        con = mock.MagicMock()
+        cur = con.cursor.return_value
+        cur.lastrowid = 42  # a real int: the job_started payload is JSON-encoded
+        cur.execute.return_value.fetchall.return_value = []  # no job_items to announce
+
+        with (
+            mock.patch.dict(job_manager.active_job, {"job_id": None, "thread": None, "stop_event": None}),
+            mock.patch.object(job_manager, "get_db_connection", return_value=con),
+            mock.patch.object(job_manager, "load_settings", return_value={}),
+            mock.patch.object(job_manager, "get_books_for_auto_job", return_value=list(auto_books)),
+            mock.patch.object(job_manager, "Thread"),
+            mock.patch.object(job_manager.announcer, "announce"),
+        ):
+            ok, result = job_manager.start_new_job("DOWNLOAD", asins=asins)
+
+        # Guard against a vacuous pass: "no reset happened" is only meaningful if
+        # the job was really created (an empty book list returns early instead).
+        assert ok and result["job_id"] == 42
+
+        for call in cur.execute.call_args_list:
+            if "SET retry_count = 0" in call.args[0]:
+                return call.args[1]
+        return None
+
+    def test_manual_job_resets_the_books_the_user_picked(self):
+        assert self._reset_asins(["B001", "B002"]) == ["B001", "B002"]
+
+    def test_automatic_job_does_not_reset(self):
+        # The scheduler passes no ASINs; the books it ends up processing keep
+        # whatever retry_count they arrived with.
+        assert self._reset_asins(None, auto_books=[{"asin": "B001"}, {"asin": "B002"}]) is None
