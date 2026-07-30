@@ -968,16 +968,16 @@ class TestEncodeBookMp3CancelRace:
         "total_duration_sec": 3_600.0,
     }
 
-    def _run(self, probe_returncode, stop_event=None):
+    def _run(self, probe_returncode, stop_event=None, probe_stdout="", settings=None):
         """Drive encode_book_mp3 with a real _probe_source_audio_params over a
         mocked ffprobe result, returning (result, the Popen mock)."""
         proc = mock.MagicMock()
         proc.stdout.readline.return_value = ""
         proc.stderr.read.return_value = ""
         proc.wait.return_value = 0
-        probe_res = subprocess.CompletedProcess(["ffprobe"], probe_returncode, "", "")
+        probe_res = subprocess.CompletedProcess(["ffprobe"], probe_returncode, probe_stdout, "")
         with (
-            mock.patch.object(ccl, "load_settings", return_value={}),
+            mock.patch.object(ccl, "load_settings", return_value=settings if settings is not None else {}),
             mock.patch.object(ccl, "_run_registered", return_value=probe_res),
             mock.patch.object(ccl.subprocess, "Popen", return_value=proc) as popen,
             mock.patch.object(ccl.process_registry, "register"),
@@ -1006,10 +1006,24 @@ class TestEncodeBookMp3CancelRace:
         assert result is True
         popen.assert_called_once()
 
+    # A sample-rate cap only takes effect when the probe actually reported a
+    # HIGHER source rate, so these two cases share settings and differ only in
+    # whether the probe succeeded — which is what separates "benign failure" from
+    # "cancellation" at the same (None, None) return.
+    CAP_SETTINGS = {"conversion": {"mp3": {"max_sample_rate": 44100}}}
+    PROBE_STDOUT = "bit_rate=64000\nsample_rate=48000"
+
+    def test_successful_probe_applies_the_sample_rate_cap(self):
+        result, popen = self._run(0, probe_stdout=self.PROBE_STDOUT, settings=self.CAP_SETTINGS)
+        assert result is True
+        cmd = popen.call_args.args[0]
+        assert cmd[cmd.index("-ar") + 1] == "44100"
+
     def test_ordinary_probe_failure_still_encodes_with_fallback_flags(self):
-        # A probe that simply couldn't read the master is benign: build_mp3_flags
-        # falls back to its defaults and the encode proceeds.
-        result, popen = self._run(1)
+        # A probe that simply couldn't read the master is benign: the encode
+        # proceeds, and with no source sample rate to compare against, the cap
+        # that the successful probe above applied is suppressed.
+        result, popen = self._run(1, probe_stdout=self.PROBE_STDOUT, settings=self.CAP_SETTINGS)
         assert result is True
         cmd = popen.call_args.args[0]
         assert "-q:a" in cmd

@@ -647,9 +647,18 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
                 log.info(
                     f"PREPARE ({asin}): Trimming Audible branding (intro {brand_intro_ms}ms, outro {brand_outro_ms}ms)."
                 )
+                chapters_before_trim = len(chapters_list)
                 chapters_list, effective_total_ms = apply_branding_trim(
                     chapters_list, brand_intro_ms, brand_outro_ms, total_duration_ms
                 )
+                # The trim drops markers whose whole span sits inside the outro.
+                # Say so in the log: losing a chapter is worth a line when a user
+                # later asks why the book has one fewer than Audible shows.
+                dropped_in_outro = chapters_before_trim - len(chapters_list)
+                if dropped_in_outro:
+                    log.info(
+                        f"PREPARE ({asin}): Dropped {dropped_in_outro} chapter marker(s) inside the trimmed outro."
+                    )
                 effective_total_sec = effective_total_ms / 1000.0
                 trim_intro_ms = brand_intro_ms
                 trim_outro_ms = brand_outro_ms

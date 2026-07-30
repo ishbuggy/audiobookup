@@ -227,9 +227,11 @@ class TestApplyBrandingTrim:
         assert out[-1]["start_offset_ms"] == 1_789_999
         assert effective == 1_790_000
 
-    def test_marker_shifted_into_the_outro_by_the_intro_is_kept(self):
-        # The intro shift moves starts DOWN, so a marker that would be inside the
-        # outro measured on the master can land back inside the retained audio.
+    def test_marker_the_intro_shift_pulls_back_into_the_retained_audio_is_kept(self):
+        # The drop compares the SHIFTED start against the effective total, not the
+        # raw one. Here the raw start (1_792_000) is already past that total
+        # (1_790_000), but the intro shift moves it down to 1_787_000 — inside the
+        # retained audio, so the marker stays.
         chapters = [_ch("One", 0, 600_000), _ch("Two", 1_792_000, 8_000)]
         out, _ = apply_branding_trim(chapters, 5_000, 5_000, self.TOTAL)
         assert [c["start_offset_ms"] for c in out] == [0, 1_787_000]
