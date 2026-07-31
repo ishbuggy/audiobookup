@@ -397,6 +397,17 @@ h2 {
     border-top: 1px solid var(--color-border);
 }
 
+/* Small secondary buttons that sit inline with the modal's body text ("Get Full
+   Summary", "Download Annotations"). They pair with .action-button, which supplies
+   the secondary look (background, border, radius, hover) and the dark-mode
+   handling; this class only shrinks them so they don't tower over the 0.9em text
+   they follow. The JS shows them with an inline display:inline-block, matching
+   .action-button's own display. */
+.modal-inline-btn {
+    font-size: 0.9em;
+    padding: 0.4em 0.9em;
+}
+
 .close-btn {
     position: absolute;
     top: 10px;
