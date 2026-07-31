@@ -788,7 +788,14 @@ class TestSplitDecision:
         assert context["split_output"] is True
         assert [c["title"] for c in context["chapters"]] == ["Blip", "Real"]
 
-    @pytest.mark.parametrize("junk", ["", "abc", None, {}])
+    @pytest.mark.parametrize(
+        "junk",
+        # The non-finite family is here because `float()` accepts it and `int()`
+        # then raises OverflowError (NaN raises ValueError): `Infinity` and
+        # `1e999` are both shapes json.loads produces, so the settings page's
+        # Import from JSON can deliver one without any hand-editing at all.
+        ["", "abc", None, {}, float("inf"), float("-inf"), float("nan"), "Infinity", "1e999"],
+    )
     def test_unusable_minimum_is_treated_as_no_merge(self, junk):
         # A hand-edited settings.json must not raise its way through prepare.
         chapters = [

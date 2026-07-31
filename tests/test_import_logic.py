@@ -20,7 +20,7 @@ _SCHEMA = (
     "asin TEXT PRIMARY KEY, author TEXT, title TEXT, status TEXT, series TEXT, narrator TEXT, "
     "runtime_min INTEGER, release_date TEXT, filepath TEXT, publisher TEXT, language TEXT, "
     "purchase_date TEXT, summary TEXT, date_added TEXT, source TEXT DEFAULT 'audible', "
-    "retry_count INTEGER DEFAULT 0)"
+    "error_message TEXT, retry_count INTEGER DEFAULT 0)"
 )
 
 # Copied verbatim from the idempotent migration block in bin/start.sh: schema
@@ -223,6 +223,43 @@ class TestAdoptFile:
         assert row["status"] == "DOWNLOADED"
         assert row["filepath"] == path
         assert row["retry_count"] == 0
+
+    def test_reconcile_clears_the_error_that_flagged_the_book(self, db, tmp_path):
+        # The modal renders its red error block on any non-empty error_message
+        # whatever the status, so a book healed back to DOWNLOADED by an import
+        # would otherwise keep the banner that flagged it as broken forever.
+        _seed(
+            db,
+            asin="B0KNOWN123",
+            title="Known",
+            status="ERROR",
+            filepath="",
+            source="audible",
+            error_message="3 of 12 parts missing from disk",
+        )
+        result, _path, _cover = _adopt(db, "known.m4b", tmp_path, embedded_asin="B0KNOWN123")
+        assert result["action"] == "reconciled"
+        row = _rows(db)[0]
+        assert row["status"] == "DOWNLOADED"
+        assert row["error_message"] == ""
+
+    def test_reimport_of_an_existing_key_clears_the_error_too(self, db, tmp_path):
+        # The step-(3) sibling of the test above: the re-adoption UPDATE branch
+        # carries the same clear.
+        _seed(
+            db,
+            asin="B0KNOWN123",
+            title="Known",
+            status="ERROR",
+            filepath="",
+            source="imported",
+            error_message="Conversion failed",
+        )
+        result, _path, _cover = _adopt(db, "k.m4b", tmp_path, allow_reconcile=False, embedded_asin="B0KNOWN123")
+        assert result["key"] == "B0KNOWN123"
+        row = _rows(db)[0]
+        assert row["status"] == "DOWNLOADED"
+        assert row["error_message"] == ""
 
     def test_already_tracked_path_is_skipped(self, db, tmp_path):
         full = tmp_path / "dup.m4b"

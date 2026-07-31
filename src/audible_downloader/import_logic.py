@@ -299,9 +299,12 @@ def adopt_file(filepath, *, allow_reconcile=True, key=None, job_id=None):
                 # counter tracks failures of the attempt to GET this book, and the
                 # book is now here. A stale count would leave a twice-failed book
                 # permanently past the `retry_count <= 1` auto-retry gate if a later
-                # Verify ever flags it ERROR again.
+                # Verify ever flags it ERROR again. error_message goes with it: the
+                # modal shows its red block on any non-empty message whatever the
+                # status, so a healed book would keep the banner that flagged it.
                 con.execute(
-                    "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, retry_count = 0 WHERE asin = ?",
+                    "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, error_message = '', "
+                    "retry_count = 0 WHERE asin = ?",
                     (filepath, embedded_asin),
                 )
                 con.commit()
@@ -358,11 +361,12 @@ def adopt_file(filepath, *, allow_reconcile=True, key=None, job_id=None):
                 return {"action": "skipped", "reason": "key-already-linked", "key": key}
             # Re-adopting a previously imported book (embedded-ASIN key) at a new
             # path: refresh its location without spawning a duplicate row.
-            # retry_count is cleared here too — same constraint as step (1).
+            # retry_count and error_message are cleared here too — same
+            # constraints as step (1).
             con.execute(
                 (
                     "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, source = 'imported', "
-                    "retry_count = 0 WHERE asin = ?"
+                    "error_message = '', retry_count = 0 WHERE asin = ?"
                 ),
                 (filepath, key),
             )

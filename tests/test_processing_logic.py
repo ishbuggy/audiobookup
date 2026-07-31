@@ -696,6 +696,7 @@ class TestRenameToMatchMetadata:
         also_present=(),
         move_side_effect=None,
         db_error=None,
+        shared_error=None,
     ):
         row = row if row is not None else self._row()
         con = mock.MagicMock()
@@ -725,12 +726,22 @@ class TestRenameToMatchMetadata:
                 return target_exists
             return path in also_present
 
+        # `shared_error` makes the #20 shared-base check raise (a briefly locked
+        # library.db); otherwise it behaves exactly as it does unpatched.
+        real_base_is_shared = processing_logic._output_base_is_shared
+
+        def base_is_shared(*args, **kwargs):
+            if shared_error is not None:
+                raise shared_error
+            return real_base_is_shared(*args, **kwargs)
+
         with (
             mock.patch.object(
                 processing_logic, "load_settings", return_value={"naming": {"apply_custom_to_filenames": apply}}
             ),
             mock.patch.object(processing_logic, "get_db_connection", return_value=con),
             mock.patch.object(processing_logic, "build_base_output_path", return_value=target),
+            mock.patch.object(processing_logic, "_output_base_is_shared", side_effect=base_is_shared),
             mock.patch("os.path.exists", side_effect=exists),
             mock.patch("os.makedirs", side_effect=makedirs_error),
             mock.patch.object(processing_logic.shutil, "move", side_effect=move_side_effect) as move,
@@ -890,6 +901,21 @@ class TestRenameToMatchMetadata:
         assert move.call_args_list[-2].args == ("/data/New/New.m4b", self.CURRENT)
         assert move.call_args_list[-1].args == ("/data/New/New.jpg", cover)
         # ...and nothing was committed, so the row still names the old path.
+        self.con.commit.assert_not_called()
+
+    def test_a_raising_shared_base_check_moves_nothing_at_all(self):
+        # W2: the #20 shared-base question opens the database, and it used to be
+        # asked AFTER the audiobook had already moved. A library.db locked for
+        # that instant raised into the outer handler, which logs and returns
+        # WITHOUT undoing the move — leaving the file at its new home and the row
+        # still naming the old one, the very divergence the rollback below exists
+        # to prevent. Asked before the first move, there is nothing to undo.
+        result, move = self._run(
+            target="/data/New/New.m4b",
+            shared_error=sqlite3.OperationalError("database is locked"),
+        )
+        assert result is None
+        move.assert_not_called()
         self.con.commit.assert_not_called()
 
     def test_preserves_mp3_extension(self):
@@ -3467,6 +3493,49 @@ class TestSplitOutputPlanning:
             _run_split_prepare()
         assert [r for r in caplog.records if "no {ch} placeholder" in r.getMessage()] == []
 
+    def test_a_planning_failure_fails_the_book_fast_whatever_its_type(self):
+        # W1: the guard here used to catch (OSError, ValueError) only, but the
+        # realistic escapes are neither — the folder walk reads the ownership map
+        # (sqlite3.OperationalError, "database is locked") and the chapter
+        # template can be a hand-edited JSON object (AttributeError). Anything
+        # that escapes is swallowed by the task runner, leaving the completion
+        # event unset and `run` blocked on this book for the full two-hour
+        # completion timeout — holding a download worker's slot — before
+        # reporting a timeout for work that never started.
+        for error in (sqlite3.OperationalError("database is locked"), AttributeError("'dict' object has no split")):
+            with mock.patch.object(processing_logic.BookProcessor, "_plan_split_output", side_effect=error):
+                processor, submitted, _ = _run_split_prepare()
+            assert processor._completion_event.is_set()
+            # Failed fast: no chunk was queued, and the failure was recorded once.
+            assert submitted == []
+            assert processor._failure_reported is True
+
+    def test_the_completion_event_survives_a_failure_report_that_raises_too(self):
+        # The same locked database that broke the planning breaks the ERROR write
+        # — which re-raises by design — so the event is set in a `finally`. An
+        # unreported failure is recoverable; a book that never unblocks `run` is
+        # a worker slot held for two hours.
+        captured = {}
+
+        def failing_report(self, _message):
+            captured["processor"] = self  # patched onto the class, so `self` arrives
+            raise sqlite3.OperationalError("database is locked")
+
+        with (
+            mock.patch.object(
+                processing_logic.BookProcessor,
+                "_plan_split_output",
+                side_effect=sqlite3.OperationalError("database is locked"),
+            ),
+            mock.patch.object(processing_logic.BookProcessor, "_update_db_on_failure", failing_report),
+            # The report re-raises by design (see _update_db_on_failure), and in
+            # production the task runner swallows it; what matters is the state
+            # it leaves behind.
+            pytest.raises(sqlite3.OperationalError),
+        ):
+            _run_split_prepare()
+        assert captured["processor"]._completion_event.is_set()
+
     def test_split_book_still_encodes_one_chunk_per_chapter(self):
         processor, submitted, _ = _run_split_prepare()
         assert processor.total_chunks == 3
@@ -3738,6 +3807,209 @@ class TestPromoteSplitParts:
         assert not out_dir.exists()
 
 
+class TestPromotionSparesThePreviousDownload:
+    """B1/W8: a split -> split re-download deliberately overwrites the previous
+    download's own chapter files IN PLACE — the folder walk subtracts this ASIN,
+    so a book's own parts never read as a collision, and unchanged metadata
+    re-renders identical part names. Every teardown around promotion therefore
+    has to tell a file this run created from the file the user already had.
+
+    Deleting the second is the one thing in this release that destroys data on an
+    ordinary action: cancel is one click in the job panel, and promotion is a
+    full cross-device copy of the whole book, so the window is minutes wide. The
+    tests below all start from a REAL previous split set on disk, tracked by
+    `book_files` rows — the state every earlier failure test was missing."""
+
+    def _processor(self, tmp_path, part_count=3, previous=(0, 1)):
+        """A re-download in flight: `part_count` planned targets, of which the
+        `previous` ones are already on disk AND already in `book_files`."""
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        temp_dir = tmp_path / "temp"
+        out_dir = tmp_path / "out" / "Dracula"
+        temp_dir.mkdir()
+        out_dir.mkdir(parents=True)
+        chunks = []
+        for index in range(part_count):
+            chunk = temp_dir / f"chunk_{index:03d}.m4b"
+            chunk.write_text(f"new audio {index}", encoding="utf-8")
+            chunks.append(str(chunk))
+        processor.temp_dir = str(temp_dir)
+        processor.encoded_chunk_paths = chunks
+        processor.split_output_dir = str(out_dir)
+        processor.split_part_paths = [str(out_dir / f"Dracula - {i + 1}.m4b") for i in range(part_count)]
+        processor.context = {"cover_file": None}
+
+        tracked = []
+        for index in previous:
+            path = processor.split_part_paths[index]
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(f"previous audio {index}")
+            tracked.append(path)
+        return processor, out_dir, tracked
+
+    def _patches(self, tracked, move=None):
+        """The DB seam (`book_files`) plus the cover pass, and optionally a
+        substitute for shutil.move that injects the failure."""
+        patches = [
+            mock.patch.object(processing_logic, "_embed_cover_art"),
+            mock.patch.object(processing_logic, "_tracked_part_paths", return_value=list(tracked)),
+        ]
+        if move is not None:
+            patches.append(mock.patch.object(processing_logic.shutil, "move", side_effect=move))
+        return patches
+
+    def test_a_cancel_mid_promotion_keeps_the_previous_downloads_parts(self, tmp_path):
+        processor, out_dir, tracked = self._processor(tmp_path)
+        processor.stop_event = Event()
+        real_move = processing_logic.shutil.move
+
+        def move_then_cancel(src, dst):
+            result = real_move(src, dst)
+            processor.stop_event.set()  # The cancel lands after the first part.
+            return result
+
+        with contextlib.ExitStack() as stack:
+            for patch in self._patches(tracked, move=move_then_cancel):
+                stack.enter_context(patch)
+            assert processor._promote_split_parts() is False
+
+        # Part 1 was already replaced when the cancel arrived: it holds this
+        # run's audio, which is a complete chapter file the rows already name.
+        # Deleting it — what the rollback used to do — would leave the user with
+        # a hole in a book they had before pressing Download.
+        assert (out_dir / "Dracula - 1.m4b").read_text() == "new audio 0"
+        # Part 2 was never reached, so it is still the previous download's.
+        assert (out_dir / "Dracula - 2.m4b").read_text() == "previous audio 1"
+        # The third target belonged to nothing but this run, so it goes...
+        assert not (out_dir / "Dracula - 3.m4b").exists()
+        # ...and the folder stays, because it is not empty.
+        assert out_dir.exists()
+
+    def test_a_failed_move_keeps_the_previous_downloads_parts(self, tmp_path):
+        processor, out_dir, tracked = self._processor(tmp_path)
+        real_move = processing_logic.shutil.move
+        calls = []
+
+        def failing_move(src, dst):
+            calls.append(src)
+            if len(calls) == 3:
+                raise OSError("No space left on device")
+            return real_move(src, dst)
+
+        with contextlib.ExitStack() as stack:
+            for patch in self._patches(tracked, move=failing_move):
+                stack.enter_context(patch)
+            assert processor._promote_split_parts() is False
+
+        assert (out_dir / "Dracula - 1.m4b").read_text() == "new audio 0"
+        assert (out_dir / "Dracula - 2.m4b").read_text() == "new audio 1"
+        assert not (out_dir / "Dracula - 3.m4b").exists()
+
+    def test_a_failed_first_download_still_takes_everything_back(self, tmp_path):
+        # The control, and the behavior the rollback was written for: with no
+        # previous set to protect, half a book in the library is still worse than
+        # none of it — every placed part goes and the folder with it.
+        processor, out_dir, _tracked = self._processor(tmp_path, previous=())
+        real_move = processing_logic.shutil.move
+        calls = []
+
+        def failing_move(src, dst):
+            calls.append(src)
+            if len(calls) == 3:
+                raise OSError("No space left on device")
+            return real_move(src, dst)
+
+        with contextlib.ExitStack() as stack:
+            for patch in self._patches([], move=failing_move):
+                stack.enter_context(patch)
+            assert processor._promote_split_parts() is False
+
+        assert not out_dir.exists()
+
+    def test_an_untracked_previous_run_is_not_mistaken_for_a_tracked_one(self, tmp_path):
+        # Both halves of the test are load-bearing: files at the target paths
+        # that NO row names are this run's own orphans (or a stranger's the
+        # allocator already judged), not a previous download to protect.
+        processor, out_dir, _tracked = self._processor(tmp_path, previous=(0, 1))
+        processor.stop_event = Event()
+        real_move = processing_logic.shutil.move
+
+        def move_then_cancel(src, dst):
+            result = real_move(src, dst)
+            processor.stop_event.set()
+            return result
+
+        with contextlib.ExitStack() as stack:
+            for patch in self._patches([], move=move_then_cancel):
+                stack.enter_context(patch)
+            assert processor._promote_split_parts() is False
+
+        assert not (out_dir / "Dracula - 1.m4b").exists()
+
+    def test_a_raising_finalize_discards_only_the_parts_this_run_created(self, tmp_path):
+        # W8: the part-row write is allowed to raise (a locked database), and that
+        # transaction rolls back whole — so the N parts promotion has already moved
+        # into /data are referenced by nothing and a later deep sync would adopt
+        # them. They are discarded, in the same currency B1 uses: the previous
+        # download's own files stay, because the surviving rows still name them.
+        processor, out_dir, tracked = self._processor(tmp_path)
+        with contextlib.ExitStack() as stack:
+            for patch in self._patches(tracked):
+                stack.enter_context(patch)
+            stack.enter_context(mock.patch.object(processing_logic, "_yield_progress"))
+            stack.enter_context(
+                mock.patch.object(
+                    processor, "_finalize_success", side_effect=sqlite3.OperationalError("database is locked")
+                )
+            )
+            fail = stack.enter_context(mock.patch.object(processor, "_update_db_on_failure"))
+            processor._finalize_split()
+
+        assert not (out_dir / "Dracula - 3.m4b").exists()
+        assert (out_dir / "Dracula - 1.m4b").read_text() == "new audio 0"
+        assert (out_dir / "Dracula - 2.m4b").read_text() == "new audio 1"
+        fail.assert_called_once()
+        assert processor._completion_event.is_set()
+
+    def test_a_raising_finalize_on_a_first_download_leaves_nothing_behind(self, tmp_path):
+        # The same failure with no previous set: every promoted part is untracked
+        # orphan output, so the folder comes back empty and goes.
+        processor, out_dir, _tracked = self._processor(tmp_path, previous=())
+        with contextlib.ExitStack() as stack:
+            for patch in self._patches([]):
+                stack.enter_context(patch)
+            stack.enter_context(mock.patch.object(processing_logic, "_yield_progress"))
+            stack.enter_context(
+                mock.patch.object(
+                    processor, "_finalize_success", side_effect=sqlite3.OperationalError("database is locked")
+                )
+            )
+            stack.enter_context(mock.patch.object(processor, "_update_db_on_failure"))
+            processor._finalize_split()
+
+        assert not out_dir.exists()
+
+    def test_a_non_oserror_escape_still_rolls_the_promotion_back(self, tmp_path):
+        # N2: the rollback is the only thing between a failure and half a book in
+        # the library, so it cannot be reachable only by OSError.
+        processor, out_dir, _tracked = self._processor(tmp_path, previous=())
+        real_move = processing_logic.shutil.move
+        calls = []
+
+        def failing_move(src, dst):
+            calls.append(src)
+            if len(calls) == 3:
+                raise RuntimeError("something nobody predicted")
+            return real_move(src, dst)
+
+        with contextlib.ExitStack() as stack:
+            for patch in self._patches([], move=failing_move):
+                stack.enter_context(patch)
+            assert processor._promote_split_parts() is False
+
+        assert not out_dir.exists()
+
+
 class TestSplitOutputVerification:
     """D10: every part is checked before any row is written, and the durations
     are summed against the book's runtime under the existing tolerance."""
@@ -3863,7 +4135,10 @@ class TestSplitOutputVerification:
 
     def test_a_chapter_without_a_length_skips_the_per_part_check(self, tmp_path):
         # Nothing to compare against, so the part is judged by the size floor and
-        # the summed total alone rather than by a guessed length.
+        # the summed total alone rather than by a guessed length. The first part
+        # is deliberately two seconds long: a duration that would fail the
+        # per-part check outright, so the pass below can only be the check being
+        # skipped rather than a duration that would have cleared it anyway.
         processor = self._processor(
             tmp_path,
             chapters=[
@@ -3871,7 +4146,22 @@ class TestSplitOutputVerification:
                 {"title": "two", "start_offset_ms": 1_800_000, "length_ms": 1_800_000},
             ],
         )
-        assert self._verify(processor, durations=(1800.0, 1800.0)) == (True, None)
+        assert self._verify(processor, runtime_min=30, durations=(2.0, 1800.0)) == (True, None)
+
+        # ...and the paired case that proves it: the same 2-second part fails the
+        # moment its chapter carries a length.
+        second = tmp_path / "second"
+        second.mkdir()
+        with_length = self._processor(
+            second,
+            chapters=[
+                {"title": "one", "start_offset_ms": 0, "length_ms": 1_800_000},
+                {"title": "two", "start_offset_ms": 1_800_000, "length_ms": 1_800_000},
+            ],
+        )
+        ok, reason = self._verify(with_length, runtime_min=30, durations=(2.0, 1800.0))
+        assert ok is False
+        assert "Chapter file 1 of 2 is truncated" in reason
 
 
 class TestSplitFinalizeSuccess:
@@ -3891,11 +4181,11 @@ class TestSplitFinalizeSuccess:
         con.execute.return_value.fetchone.return_value = {"runtime_min": 60, "filepath": None}
         with (
             mock.patch.object(processor, "_promote_split_parts", return_value=promoted),
-            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con) as connect,
             mock.patch.object(processing_logic, "replace_book_files", side_effect=replace_error) as replace,
             mock.patch.object(processing_logic, "record_conversion_time") as record_eta,
             mock.patch.object(processing_logic, "_yield_progress") as progress,
-            mock.patch.object(processing_logic, "_cleanup_empty_dirs") as prune,
+            mock.patch("os.rmdir") as prune,
             mock.patch.object(processor, "_verify_output_file", return_value=verify),
             mock.patch.object(processor, "_place_supplementary_pdf") as pdf,
             mock.patch.object(processor, "_place_sidecar_files") as sidecars,
@@ -3909,6 +4199,7 @@ class TestSplitFinalizeSuccess:
         return {
             "processor": processor,
             "con": con,
+            "connect": connect,
             "downloaded": downloaded,
             "replace": replace,
             "record_eta": record_eta,
@@ -3928,6 +4219,11 @@ class TestSplitFinalizeSuccess:
         # audiobooks.filepath holds the FOLDER for a split book (D3).
         assert r["downloaded"][0].args[1][0] == "/data/A/Dracula"
         # ...and the authoritative per-file list goes in the SAME transaction.
+        # The connection COUNT is what proves that: with one shared fake
+        # connection, passing `con=` would look identical if the parent row and
+        # the part rows sat in two separate `with` blocks committing
+        # independently. Exactly one is opened for the whole finalize.
+        assert r["connect"].call_count == 1
         r["replace"].assert_called_once_with("B0OURS", self.PARTS, con=r["con"])
 
     def test_part_rows_are_written_in_playback_order(self):
@@ -3979,7 +4275,7 @@ class TestSplitFinalizeSuccess:
         with (
             mock.patch.object(processing_logic, "get_db_connection", return_value=con),
             mock.patch.object(processing_logic, "_yield_progress"),
-            mock.patch.object(processing_logic, "_cleanup_empty_dirs") as prune,
+            mock.patch("os.rmdir") as prune,
             mock.patch.object(processor, "_verify_output_file", return_value=(False, "truncated")),
             mock.patch.object(processor, "_update_db_on_failure"),
             mock.patch("os.path.exists", return_value=True),
@@ -3989,7 +4285,8 @@ class TestSplitFinalizeSuccess:
         assert [c.args[0] for c in remove.call_args_list] == self.PARTS
         # M5: removing every part empties the folder _plan_split_output created
         # before the first chunk was queued — most visibly D5's flat-guard
-        # subfolder, a level that did not exist before this run.
+        # subfolder, a level that did not exist before this run. That folder, and
+        # nothing above it (W3).
         prune.assert_called_once_with("/data/A/Dracula")
 
     def test_an_unsplit_failed_verification_prunes_no_directory(self):
@@ -4003,7 +4300,7 @@ class TestSplitFinalizeSuccess:
         with (
             mock.patch.object(processing_logic, "get_db_connection", return_value=con),
             mock.patch.object(processing_logic, "_yield_progress"),
-            mock.patch.object(processing_logic, "_cleanup_empty_dirs") as prune,
+            mock.patch("os.rmdir") as prune,
             mock.patch.object(processor, "_verify_output_file", return_value=(False, "truncated")),
             mock.patch.object(processor, "_update_db_on_failure"),
             mock.patch("os.path.exists", return_value=True),
@@ -4113,49 +4410,70 @@ class TestFailedSplitRunLeavesNoEmptyFolder:
     directory behind in the library — most visibly under a flat naming template,
     where that folder is a level that did not exist before the run. Every failure
     and cancel report goes through _fail_or_cancel, so that is where the folder is
-    swept; _cleanup_empty_dirs only ever rmdirs, so nothing holding files is at
-    risk."""
+    swept.
 
-    def _report(self, message, *, split=True, stop_event=None, timed_out=False):
+    Driven against REAL directories rather than a mocked sweep, because the
+    property that matters is how far the removal reaches (W3): this runs on every
+    cancelled split download, and the levels above the book — the author folder,
+    a series folder — belong to the user, not to this run."""
+
+    def _report(self, tmp_path, message, *, split=True, stop_event=None, timed_out=False, leftover=None):
         processor = BookProcessor(asin="B0OURS", job_id=7, stop_event=stop_event)
-        processor.final_output_path = "/data/Bram Stoker - Dracula.m4b"
+        # An author level the user already had, holding nothing but this book.
+        author_dir = tmp_path / "Bram Stoker"
+        book_dir = author_dir / "Dracula"
+        book_dir.mkdir(parents=True)
+        processor.final_output_path = str(tmp_path / "Bram Stoker - Dracula.m4b")
         if split:
-            processor.split_output_dir = "/data/Bram Stoker/Dracula"
+            processor.split_output_dir = str(book_dir)
             processor.split_part_paths = [
-                "/data/Bram Stoker/Dracula/Dracula - 01 - One.m4b",
-                "/data/Bram Stoker/Dracula/Dracula - 02 - Two.m4b",
+                str(book_dir / "Dracula - 01 - One.m4b"),
+                str(book_dir / "Dracula - 02 - Two.m4b"),
             ]
+        if leftover:
+            (book_dir / leftover).write_bytes(b"x")
         if timed_out:
             processor._timed_out.set()
-        with (
-            mock.patch.object(processing_logic, "_cleanup_empty_dirs") as cleanup_dirs,
-            mock.patch.object(processor, "_update_db_on_failure") as fail,
-        ):
+        with mock.patch.object(processor, "_update_db_on_failure") as fail:
             processor._fail_or_cancel(message)
-        return cleanup_dirs, fail
+        return book_dir, author_dir, fail
 
-    def test_a_failed_chunk_encode_removes_the_planned_folder(self):
-        cleanup_dirs, fail = self._report("A chapter chunk failed to encode.")
-        cleanup_dirs.assert_called_once_with("/data/Bram Stoker/Dracula")
+    def test_a_failed_chunk_encode_removes_the_planned_folder(self, tmp_path):
+        book_dir, author_dir, fail = self._report(tmp_path, "A chapter chunk failed to encode.")
+        assert not book_dir.exists()
+        # ...and stops there. The author level was not this run's to remove, even
+        # though the run's own folder was the only thing in it.
+        assert author_dir.exists()
         fail.assert_called_once()
 
-    def test_a_cancel_removes_it_too_without_touching_the_book(self):
+    def test_a_cancel_removes_it_too_without_touching_the_book(self, tmp_path):
         # The cancel path returns before any DB write, so the sweep runs first —
         # a cancelled split download must not leave a folder either.
         stop_event = Event()
         stop_event.set()
-        cleanup_dirs, fail = self._report("A chapter chunk failed to encode.", stop_event=stop_event)
-        cleanup_dirs.assert_called_once_with("/data/Bram Stoker/Dracula")
+        book_dir, author_dir, fail = self._report(tmp_path, "A chapter chunk failed to encode.", stop_event=stop_event)
+        assert not book_dir.exists()
+        assert author_dir.exists()
         fail.assert_not_called()
 
-    def test_a_post_timeout_echo_removes_it_too_without_reporting_again(self):
-        cleanup_dirs, fail = self._report("A chapter chunk failed to encode.", timed_out=True)
-        cleanup_dirs.assert_called_once_with("/data/Bram Stoker/Dracula")
+    def test_a_post_timeout_echo_removes_it_too_without_reporting_again(self, tmp_path):
+        book_dir, author_dir, fail = self._report(tmp_path, "A chapter chunk failed to encode.", timed_out=True)
+        assert not book_dir.exists()
+        assert author_dir.exists()
         fail.assert_not_called()
 
-    def test_an_unsplit_run_has_no_folder_of_its_own_to_remove(self):
-        cleanup_dirs, fail = self._report("MP3 encode failed.", split=False)
-        cleanup_dirs.assert_not_called()
+    def test_a_folder_still_holding_something_is_left_exactly_as_it_is(self, tmp_path):
+        # The prune only ever rmdirs, so the previous download's chapter files —
+        # which the promotion rollback deliberately spares — keep their folder.
+        book_dir, _author_dir, _fail = self._report(
+            tmp_path, "A chapter chunk failed to encode.", leftover="Dracula - 01 - One.m4b"
+        )
+        assert (book_dir / "Dracula - 01 - One.m4b").exists()
+
+    def test_an_unsplit_run_has_no_folder_of_its_own_to_remove(self, tmp_path):
+        book_dir, author_dir, fail = self._report(tmp_path, "MP3 encode failed.", split=False)
+        assert book_dir.exists()
+        assert author_dir.exists()
         fail.assert_called_once()
 
 
@@ -4170,6 +4488,8 @@ class TestUnsplitFinalizeStillClearsPartRows:
         con = mock.MagicMock()
         con.__enter__.return_value = con
         con.execute.return_value.fetchone.return_value = {"runtime_min": 60, "filepath": None}
+        # Kept on the test instance so a test can assert how the transaction ended.
+        self.con = con
         with (
             mock.patch.object(processing_logic, "get_db_connection", return_value=con),
             mock.patch.object(processing_logic, "replace_book_files", side_effect=replace_side_effect) as replace,
@@ -4192,6 +4512,19 @@ class TestUnsplitFinalizeStillClearsPartRows:
     def test_a_failing_clear_does_not_fail_the_download(self):
         downloaded, _replace = self._run(replace_side_effect=sqlite3.OperationalError("no such table: book_files"))
         assert len(downloaded) == 1
+
+    def test_a_locked_database_fails_the_download_instead_of_committing_half_of_it(self):
+        # W9: "no such table" and "database is locked" are both sqlite3 errors,
+        # and swallowing the second committed the parent row — this `with` block
+        # IS the transaction — while the book's OLD part rows survived. The
+        # result is a single-file book that every reader counts as an N-part
+        # split, whose parts the stale cleanup is about to delete. Only the
+        # missing-table case is tolerated; a lock propagates.
+        with pytest.raises(sqlite3.OperationalError):
+            self._run(replace_side_effect=sqlite3.OperationalError("database is locked"))
+        # The connection's context manager saw the exception, which is what makes
+        # sqlite3 roll the parent UPDATE back with it.
+        assert self.con.__exit__.call_args.args[0] is sqlite3.OperationalError
 
 
 class TestSplitSidecarPlacement:
@@ -4337,6 +4670,7 @@ class TestSplitRename:
         move_error=None,
         row_over=None,
         update_error=None,
+        shared_error=None,
     ):
         """Drive the rename against the real files under `folder`, with only the
         database and the naming engine faked. Returns (result, fake connection)."""
@@ -4359,6 +4693,9 @@ class TestSplitRename:
         ]
         if move_error is not None:
             patches.append(mock.patch.object(processing_logic.shutil, "move", side_effect=move_error))
+        if shared_error is not None:
+            # The #20 shared-base check hitting a briefly locked library.db.
+            patches.append(mock.patch.object(processing_logic, "_output_base_is_shared", side_effect=shared_error))
         with contextlib.ExitStack() as stack:
             for patch in patches:
                 stack.enter_context(patch)
@@ -4524,6 +4861,25 @@ class TestSplitRename:
         assert sorted(p.name for p in folder.iterdir()) == sorted([*self.PARTS, *self.SIDECARS])
         assert list(new_folder.iterdir()) == []
         # ...and nothing was written, so the rows still point at the old folder.
+        assert con.updates() == []
+        assert con.commits == 0
+
+    def test_a_raising_shared_base_check_moves_nothing_at_all(self, tmp_path):
+        # W2, split shape: the #20 check sat BETWEEN the file moves and the row
+        # write, and its exception is caught by the function's outer handler —
+        # which logs and returns without undoing the moves, stranding the whole
+        # set in the new folder while `filepath` and `book_files` still name the
+        # old one. Asked before the first move, nothing has moved to strand.
+        folder = self._library(tmp_path)
+        new_folder = tmp_path / "new" / "Nosferatu"
+        result, con = self._run(
+            folder,
+            str(new_folder / "Bram Stoker - Nosferatu.m4b"),
+            shared_error=sqlite3.OperationalError("database is locked"),
+        )
+        assert result is None
+        assert sorted(p.name for p in folder.iterdir()) == sorted([*self.PARTS, *self.SIDECARS])
+        assert not new_folder.exists()
         assert con.updates() == []
         assert con.commits == 0
 
@@ -4802,6 +5158,46 @@ class TestCleanupStaleSets(TestCleanupStaleFiles):
         )
         assert removed == set()
         cleanup_dirs.assert_not_called()
+
+    def test_single_to_split_in_place_removes_the_old_cue_sheet(self):
+        # W10: converting a book to chapter files under unchanged naming keeps
+        # the same base, so `old_base` IS this run's own sidecar base and the
+        # sweep is correctly skipped — the cover and metadata there are the ones
+        # just written. The cue sheet is the exception: a split book never gets
+        # one (D9), so the one on disk describes the single-file timeline that
+        # has just been deleted, and nothing else would ever remove it.
+        folder = "/data/Author/Dracula"
+        old_single = f"{folder}/Dracula.m4b"
+        base = f"{folder}/Dracula"
+        new_parts = [f"{folder}/Dracula - 1 - One.m4b", f"{folder}/Dracula - 2 - Two.m4b"]
+        removed, _cleanup_dirs = self._run(
+            old_single,
+            new_path=old_single,  # the reserved single-file-equivalent path
+            param=True,
+            split_parts=new_parts,
+            split_dir=folder,
+            split_sidecar_base=base,
+            present={old_single, *new_parts, base + ".cue", base + ".jpg", base + ".metadata.json"},
+        )
+        assert removed == {old_single, base + ".cue"}
+        # This run's own cover and metadata are untouched — the reason the sweep
+        # is skipped at all, and why the cue is named rather than inferred.
+        assert base + ".jpg" not in removed
+        assert base + ".metadata.json" not in removed
+
+    def test_an_unsplit_re_download_in_place_keeps_its_cue_sheet(self):
+        # The control: an ordinary format change writes a new cue at the same
+        # base, so removing "the old one" would delete this run's own output.
+        folder = "/data/Author/Dracula"
+        old_single = f"{folder}/Dracula.mp3"
+        base = f"{folder}/Dracula"
+        removed, _cleanup_dirs = self._run(
+            old_single,
+            new_path=f"{base}.m4b",
+            param=True,
+            present={old_single, base + ".cue", base + ".jpg"},
+        )
+        assert removed == {old_single}
 
     def test_the_old_folders_sidecars_are_swept_with_its_parts(self):
         # The old sidecar base is read back off the folder (nothing records it),
@@ -5132,6 +5528,35 @@ class TestOwnedSidecarBase:
         # The AAX fallback leaves a ".aax" and no voucher; it has to count too.
         (tmp_path / "Old Title.aax").write_bytes(b"master")
         assert processing_logic._owned_sidecar_base(str(tmp_path), "New Title") == str(tmp_path / "Old Title")
+
+    def test_a_foreign_cue_does_not_corroborate_a_split_books_folder(self, tmp_path):
+        # W4: split output never writes a cue sheet (D9 refuses one), so a ".cue"
+        # at a stem this book does not render is affirmative evidence the base
+        # belongs to something ELSE — cue sheets beside audiobooks are ordinary
+        # output from CD rippers and taggers. It corroborated ownership anyway,
+        # which handed a foreign base to the sweep that deletes and the rename
+        # that moves.
+        (tmp_path / "Old Title.cue").write_bytes(b"cue")
+        (tmp_path / "Old Title.jpg").write_bytes(b"cover")
+        assert processing_logic._owned_sidecar_base(str(tmp_path), "New Title", split=True) is None
+        # ...and it still corroborates for a single-file book, which does write one.
+        assert processing_logic._owned_sidecar_base(str(tmp_path), "New Title") == str(tmp_path / "Old Title")
+
+    def test_a_split_books_own_stem_still_names_its_base(self, tmp_path):
+        # The name arm is untouched: only the file-based backstop shrinks.
+        (tmp_path / "Bram Stoker - Dracula.cue").write_bytes(b"cue")
+        base = processing_logic._owned_sidecar_base(str(tmp_path), "Bram Stoker - Dracula", split=True)
+        assert base == str(tmp_path / "Bram Stoker - Dracula")
+
+    def test_a_retained_master_still_corroborates_a_renamed_split_book(self, tmp_path):
+        # And the suffixes that matter most for a split book stay in the set: a
+        # retained master and its voucher are usually the ONLY corroborator on
+        # offer there, and they are hundreds of MB to strand.
+        (tmp_path / "Old Title.aaxc").write_bytes(b"master")
+        (tmp_path / "Old Title.voucher").write_bytes(b"{}")
+        assert processing_logic._owned_sidecar_base(str(tmp_path), "New Title", split=True) == str(
+            tmp_path / "Old Title"
+        )
 
     def test_an_empty_folder_is_answered_not_raised(self, tmp_path):
         assert processing_logic._owned_sidecar_base(str(tmp_path / "gone"), "Title") is None

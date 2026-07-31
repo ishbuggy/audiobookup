@@ -116,6 +116,14 @@ _SIDECAR_SUFFIXES = (
 # folder no row points at — while a wrong one costs a user's data.
 _APP_WRITTEN_SIDECAR_SUFFIXES = (".cue", ".metadata.json", ".annotations.json", ".aax", ".aaxc", ".voucher")
 
+# The same list for a SPLIT book, minus the cue sheet. A split book never gets
+# one (D9 refuses to write it), so a ".cue" in a split book's folder is not weak
+# evidence that the base is ours — it is affirmative evidence that it is somebody
+# else's, since cue sheets beside audiobooks are ordinary output from CD rippers
+# and other taggers. Corroborating on it would hand a foreign base to the sweep
+# that deletes and the rename that moves.
+_SPLIT_APP_WRITTEN_SIDECAR_SUFFIXES = tuple(suffix for suffix in _APP_WRITTEN_SIDECAR_SUFFIXES if suffix != ".cue")
+
 # Every audio extension a tracked book's file can carry. Two books at the same
 # base under DIFFERENT audio extensions share one set of sidecars, so any of
 # these occupying our base is a collision — not just the format we happen to be
@@ -232,7 +240,7 @@ def _unique_sidecar_base(folder):
     return None
 
 
-def _owned_sidecar_base(folder, expected_stem=None, quiet=False):
+def _owned_sidecar_base(folder, expected_stem=None, quiet=False, split=False):
     """
     The sidecar base inside `folder` that this book can be shown to OWN, or None
     when the folder's one candidate cannot be corroborated.
@@ -260,6 +268,11 @@ def _owned_sidecar_base(folder, expected_stem=None, quiet=False):
        retained ".aax"/".aaxc" master and its ".voucher" — and a renamed split
        book with none of those on disk is simply left alone.
 
+    `split` says the book being asked about is a split one, which SHRINKS the
+    corroborating set: since a split book never gets a cue sheet, a ".cue" there
+    can only have come from somewhere else, and reading it as proof of ownership
+    inverts the whole point of this function.
+
     Neither answered means we cannot prove the files are ours, so we do nothing
     with them: an abandoned cover left behind in a folder is a mess, deleting a
     file this app never wrote is data loss.
@@ -282,7 +295,8 @@ def _owned_sidecar_base(folder, expected_stem=None, quiet=False):
     # Matched case-insensitively for the same reason the sweeps are: the files
     # on disk are not always spelled the way the suffix list is ('.Metadata.JSON'
     # is a real thing a user's filesystem hands back).
-    if any(suffix.lower() in _APP_WRITTEN_SIDECAR_SUFFIXES for suffix in _existing_sidecar_suffixes(base)):
+    corroborating = _SPLIT_APP_WRITTEN_SIDECAR_SUFFIXES if split else _APP_WRITTEN_SIDECAR_SUFFIXES
+    if any(suffix.lower() in corroborating for suffix in _existing_sidecar_suffixes(base)):
         return base
 
     if not quiet:
@@ -974,7 +988,7 @@ def sidecar_base_for_tracked_book(asin):
     # `quiet=True`: this is a read-only lookup behind the annotations button, so
     # a folder shared with another library manager must not announce its refusal
     # into app.log on every press (same rule as the D5 guard line above).
-    return _owned_sidecar_base(filepath, expected_stem, quiet=True) or rendered_base
+    return _owned_sidecar_base(filepath, expected_stem, quiet=True, split=True) or rendered_base
 
 
 def _rendered_split_sidecar_base(asin, folder, part_paths):
@@ -1223,8 +1237,6 @@ def rename_book_to_match_metadata(asin):
         # (routes.py clears the flag and then calls this function).
         if os.path.abspath(target) == os.path.abspath(current_path):
             return None
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        shutil.move(current_path, target)
         # Move every sidecar sharing the old base name alongside the audiobook,
         # so a rename keeps the companion PDF, cover, cue sheet, metadata JSON,
         # and any retained raw master (+voucher) matched to the new file name.
@@ -1238,8 +1250,18 @@ def rename_book_to_match_metadata(asin):
         # different audio extensions (pre-existing libraries, or an upload), and
         # those sidecars may be the other book's ONLY cover/PDF/cue — walking off
         # with them is as destructive as deleting them.
+        #
+        # Asked BEFORE the first move, deliberately: it opens the database, and a
+        # locked library.db raises out of a rename that has already moved files
+        # — into the outer handler below, which logs and returns WITHOUT undoing
+        # them, leaving the row naming a path that holds nothing. It reads
+        # nothing the move changes (this book's own file is excluded either way),
+        # so asking first costs nothing and takes the whole failure mode away.
+        base_is_shared = _output_base_is_shared(asin, os.path.realpath(old_base), {os.path.realpath(current_path)})
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.move(current_path, target)
         moved_sidecars = []
-        if _output_base_is_shared(asin, os.path.realpath(old_base), {os.path.realpath(current_path)}):
+        if base_is_shared:
             log.info(
                 f"RENAME ({asin}): Left the sidecars at '{old_base}' where they are — "
                 f"the base is still in use by another book."
@@ -1444,12 +1466,22 @@ def _rename_split_book(asin, row, settings, part_paths):
         # hanging off it. An uncorroborated base answers None and simply stays
         # where it is — the chapter files still move, and a foreign cover is left
         # in the old folder rather than walked off with.
-        old_base = _owned_sidecar_base(current_folder, stem)
+        old_base = _owned_sidecar_base(current_folder, stem, split=True)
         new_base = os.path.join(new_folder, stem)
         folder_moved = os.path.abspath(new_folder) != os.path.abspath(current_folder)
         base_moved = old_base is not None and os.path.abspath(old_base) != os.path.abspath(new_base)
         if not folder_moved and not base_moved:
             return None  # Everything is already where the current metadata wants it.
+
+        # The #20 guard's DB read, asked BEFORE the first move for the same
+        # reason the single-file path asks it there: a locked library.db raises
+        # out of this function's outer handler, which logs and returns without
+        # undoing anything, so a read that sits BETWEEN the moves and the rows
+        # can strand the whole set at the new location with the rows naming the
+        # old one. Nothing it reads is changed by moving the files.
+        base_is_shared = base_moved and _output_base_is_shared(
+            asin, os.path.realpath(old_base), {os.path.realpath(p) for p in part_paths}
+        )
 
         new_parts = list(part_paths)
         if folder_moved:
@@ -1462,7 +1494,7 @@ def _rename_split_book(asin, row, settings, part_paths):
         if base_moved:
             # The #20 guard, same as the single-file path: another book's
             # sidecars may share this base, and they are not ours to move.
-            if _output_base_is_shared(asin, os.path.realpath(old_base), {os.path.realpath(p) for p in part_paths}):
+            if base_is_shared:
                 log.info(
                     f"RENAME ({asin}): Left the sidecars at '{old_base}' where they are — "
                     f"the base is still in use by another book."
@@ -1690,6 +1722,16 @@ class BookProcessor:
         # know it: a collision moves the ASIN suffix onto the folder, so the
         # reserved filename's stem is no longer the sidecar stem.
         self.split_sidecar_base = None
+        # Which of this run's planned part paths were ALREADY on disk and already
+        # tracked to this book when promotion started — i.e. the PREVIOUS
+        # download's own chapter files, which a split->split re-download
+        # deliberately overwrites in place (the folder walk subtracts this ASIN,
+        # so a book's own parts never read as a collision). Filled in by
+        # _promote_split_parts and read by every teardown below, which skip them:
+        # an overwritten-but-valid file is strictly better than a deleted one,
+        # and the `book_files` rows still name exactly those paths. Empty for a
+        # first download, which is why a failed one still cleans up completely.
+        self.preexisting_part_targets = set()
         # The folder claim this book took in `_reserved_output_paths` (D12/W3),
         # or None when it took none. A split book's parts are disambiguated by
         # their FOLDER, so the folder — not just the reserved filename base — is
@@ -2183,10 +2225,28 @@ class BookProcessor:
         if self.context.get("split_output"):
             try:
                 self._plan_split_output(settings, book_details, author, title, chapters)
-            except (OSError, ValueError) as e:
-                log.error(f"TASK-PREPARE ({self.asin}): Could not prepare the per-chapter file paths: {e}")
-                self._update_db_on_failure("Failed to prepare the per-chapter file paths.")
-                self._completion_event.set()
+            except Exception as e:
+                # `Exception`, matching the reservation block above, because the
+                # realistic escapes are not the filesystem ones: the folder walk
+                # reads the ownership map and ffprobes each occupant, so a locked
+                # library.db raises sqlite3.Error, and a hand-edited
+                # `chapter_file_template` holding a JSON object raises
+                # AttributeError. Neither is an OSError, and anything that
+                # escapes here is swallowed by the task runner — leaving the
+                # completion event unset and `run` blocked on this book for the
+                # full two-hour completion timeout, holding a download slot, to
+                # report a timeout for work that never started.
+                log.error(
+                    f"TASK-PREPARE ({self.asin}): Could not prepare the per-chapter file paths: {e}", exc_info=True
+                )
+                try:
+                    self._update_db_on_failure("Failed to prepare the per-chapter file paths.")
+                finally:
+                    # The failure write re-raises on a locked database — the very
+                    # cause that brought us here — so the event is set in a
+                    # `finally`: an unreported failure is recoverable, a book that
+                    # never unblocks `run` is not.
+                    self._completion_event.set()
                 return
 
         for i, chapter in enumerate(chapters):
@@ -2464,15 +2524,29 @@ class BookProcessor:
         callers cover exactly those: _fail_or_cancel (every failed or cancelled
         step, including a chunk that never got to encode), the verification
         failure, the promotion rollback and the post-timeout discard.
-        _cleanup_empty_dirs does the
-        work and carries the guarantees that matter: it only ever rmdirs, so a
-        folder holding anything at all (another book's files, a stray sidecar) is
-        left alone, and it refuses to walk outside /data.
+
+        Exactly ONE directory, and deliberately not `_cleanup_empty_dirs`: that
+        helper walks every empty parent up to /data, which is right when a naming
+        change has emptied whole levels the app itself created, but wrong here.
+        This runs on every cancelled split download, and the levels above the
+        book's folder are the user's — a cancel in "/data/Author/Series/Book"
+        must not take "Series" and "Author" with it just because they happened to
+        hold nothing else yet. A run only ever creates this one folder, so this
+        one folder is all it may remove.
+
+        rmdir rather than any recursive removal, so a folder holding anything at
+        all (another book's files, a stray sidecar, a part this run did not put
+        there) is left exactly as it is.
 
         Unsplit runs never had a folder of their own to remove and are untouched.
         """
-        if self.split_part_paths and self.split_output_dir:
-            _cleanup_empty_dirs(self.split_output_dir)
+        if not (self.split_part_paths and self.split_output_dir):
+            return
+        try:
+            os.rmdir(self.split_output_dir)  # only succeeds when empty
+            log.info(f"PROCESSOR ({self.asin}): Removed the empty output folder '{self.split_output_dir}'.")
+        except OSError:
+            pass
 
     def _tracked_filepath(self):
         """
@@ -2887,14 +2961,24 @@ class BookProcessor:
             else:
                 # The mirror case: a book that WAS split and has just been
                 # re-downloaded as a single file must lose its old part rows,
-                # since their presence is what marks a book as split. Best-effort
-                # only — the single file is already on disk and verified, and a
-                # database missing the child table (never true after start.sh
-                # runs, but a hand-restored library.db is a real thing) must not
-                # turn a finished download into an error.
+                # since their presence is what marks a book as split. Tolerated
+                # for exactly ONE cause — a database missing the child table
+                # (never true after start.sh runs, but a hand-restored library.db
+                # is a real thing), which must not turn a finished download into
+                # an error.
+                #
+                # Narrowly, and this is the point: a locked database is also an
+                # sqlite3.Error, and swallowing THAT would commit the parent row
+                # (this `with` block is the transaction) while the book's old
+                # part rows survive — a single-file book that every reader sees
+                # as an N-part split, whose parts _cleanup_stale_files is about
+                # to delete. Letting it propagate rolls the whole transaction
+                # back, which is the same treatment the split branch's write gets.
                 try:
                     replace_book_files(self.asin, [], con=con)
-                except sqlite3.Error as e:
+                except sqlite3.OperationalError as e:
+                    if "no such table" not in str(e).lower():
+                        raise
                     log.warning(f"PROCESSOR ({self.asin}): Could not clear stale per-chapter file rows: {e}")
         # Everything below this line is housekeeping around a book that is
         # ALREADY a success: the output is verified and the DOWNLOADED row is
@@ -2984,7 +3068,9 @@ class BookProcessor:
             if previous_path:
                 stale_dirs.add(previous_path)
             expected_stem = os.path.basename(self._sidecar_base()) if self.final_output_path else None
-            old_sidecar_base = _owned_sidecar_base(previous_path, expected_stem) if previous_path else None
+            # split=True: the PREVIOUS download was the split one (that is what
+            # `previous_parts` means), so a ".cue" in that folder cannot be ours.
+            old_sidecar_base = _owned_sidecar_base(previous_path, expected_stem, split=True) if previous_path else None
             old_base = os.path.realpath(old_sidecar_base) if old_sidecar_base else None
         elif previous_path:
             stale_audio = [previous_path]
@@ -3123,6 +3209,25 @@ class BookProcessor:
                     except OSError as e:
                         log.warning(f"PROCESSOR ({self.asin}): Could not remove stale sidecar '{stale_sidecar}': {e}")
 
+        # The one sidecar a SPLIT run can leave behind at its OWN base. A book
+        # re-downloaded in place as a split one keeps its base, so `old_base` is
+        # this run's own sidecar base and the sweep above is correctly skipped —
+        # those files are the cover and metadata just written. The cue sheet is
+        # the exception: D9 refuses to write one for a split book, so a ".cue"
+        # sitting there is the previous single-file download's, describing a
+        # timeline that no longer exists on disk. Named explicitly rather than by
+        # relaxing the skip, which would take this run's own output with it.
+        if old_base and old_base_is_ours and self.split_part_paths:
+            for suffix in _existing_sidecar_suffixes(old_base):
+                if suffix.lower() != ".cue":
+                    continue
+                stale_cue = f"{old_base}{suffix}"
+                try:
+                    os.remove(stale_cue)
+                    log.info(f"PROCESSOR ({self.asin}): Removed the previous download's cue sheet: {stale_cue}")
+                except OSError as e:
+                    log.warning(f"PROCESSOR ({self.asin}): Could not remove stale cue sheet '{stale_cue}': {e}")
+
         # The old folder(s) may now be empty (a naming-template change moves whole
         # directory levels, and a split book's whole folder can empty out); the
         # existing helper only ever rmdirs, so a folder still holding anything —
@@ -3229,6 +3334,14 @@ class BookProcessor:
             # post-timeout echo is still suppressed, and so the once-only failure
             # latch still applies.
             log.error(f"PROCESSOR ({self.asin}): Finalizing the per-chapter files raised: {e}", exc_info=True)
+            # The parts are already in /data — promotion moved them there before
+            # the write that just failed — and the transaction rolled back whole,
+            # so nothing in the database refers to them. Left alone they are N
+            # untracked files in the library beside a book marked ERROR, which a
+            # later deep sync would adopt. The same discard the post-timeout
+            # guard runs, and for the same reason; it spares the previous
+            # download's own files, so an in-place re-download loses nothing.
+            self._discard_timed_out_output()
             try:
                 self._fail_or_cancel(f"Recording the finished chapter files failed: {e}")
             except Exception as report_error:
@@ -3258,9 +3371,21 @@ class BookProcessor:
         stays within one directory, so it stays atomic.
 
         A failure part-way removes what already landed. Half a book in the
-        library is worse than none of it: nothing tracks the parts yet (the DB
-        write comes later, after verification), so they would sit there
-        untracked, and a later deep sync would find them.
+        library is worse than none of it: for a first download nothing tracks
+        the parts yet (the DB write comes later, after verification), so they
+        would sit there untracked and a later deep sync would find them.
+
+        With ONE exception, and it is the whole reason `preexisting_part_targets`
+        exists. A split->split re-download deliberately writes over the previous
+        download's own files: the folder walk subtracts this ASIN, so the book's
+        own parts never read as a collision, and unchanged metadata re-renders
+        identical part names. Those targets ARE tracked — by the `book_files`
+        rows the previous download wrote — so deleting them on a rollback
+        destroys chapter files the user already had, for a cancel that is one
+        click away in the job panel and a promotion that is a full cross-device
+        copy of the whole book. They are recorded before the loop and skipped by
+        every teardown: an overwritten-but-valid part is strictly better than a
+        deleted one, and the rows keep naming a file that exists.
 
         Cancellation is re-checked between parts for the same reason. A cancel
         SIGTERMs every registered subprocess, but a shutil.move has no process to
@@ -3283,6 +3408,9 @@ class BookProcessor:
             return False
 
         cover_file = (self.context or {}).get("cover_file")
+        # Taken BEFORE the first os.replace, which is the moment the previous
+        # download's copy of a target stops existing.
+        self.preexisting_part_targets = self._preexisting_tracked_targets()
         promoted = []
         try:
             for chunk_path, target in zip(chunk_paths, targets):
@@ -3310,13 +3438,46 @@ class BookProcessor:
                 shutil.move(chunk_path, staged)
                 os.replace(staged, target)
                 promoted.append(target)
-        except OSError as e:
-            log.error(f"PROCESSOR ({self.asin}): Could not place a chapter file: {e}")
+        except Exception as e:
+            # Deliberately broader than OSError: the rollback is the only thing
+            # standing between a failure here and half a book sitting in the
+            # library, so anything at all that escapes the loop has to reach it
+            # — an unexpected type would otherwise unwind straight past into
+            # _finalize_split with the parts already placed.
+            log.error(f"PROCESSOR ({self.asin}): Could not place a chapter file: {e}", exc_info=True)
             self._remove_promoted_parts(promoted, targets)
             return False
 
         log.info(f"PROCESSOR ({self.asin}): Placed {len(promoted)} chapter file(s) in '{self.split_output_dir}'.")
         return True
+
+    def _preexisting_tracked_targets(self):
+        """
+        Which of this run's planned part paths already existed on disk AND are
+        already tracked to this book — the previous download's own chapter files,
+        which an in-place re-download is about to write over.
+
+        Both halves are required. "On disk" alone would spare a stranger's file
+        that happens to sit where a part goes (the allocator's job, not this
+        one's), and "tracked" alone would spare a row whose file is already gone.
+        Together they name exactly the set whose deletion would cost the user
+        data they had before this run started.
+
+        The disk half is asked FIRST, and that is what keeps this free in the
+        common case: a first download has nothing sitting at any of its targets,
+        so no query is made at all. Only a re-download landing on its own files
+        pays for the row read.
+
+        Best-effort by construction: _tracked_part_paths already answers [] for a
+        database that cannot be read, which simply makes the teardown as
+        thorough as it was before — the safe direction for a first download and
+        the only one available with no rows to trust.
+        """
+        on_disk = [target for target in self.split_part_paths if os.path.exists(target)]
+        if not on_disk:
+            return set()
+        tracked = {os.path.realpath(path) for path in _tracked_part_paths(self.asin)}
+        return {target for target in on_disk if os.path.realpath(target) in tracked}
 
     def _remove_promoted_parts(self, promoted, targets):
         """
@@ -3324,8 +3485,17 @@ class BookProcessor:
         landed, plus any ".part" staging file the interrupted move left behind,
         and then the book's folder if that emptied it. Shared by the cancel and
         the error branch of _promote_split_parts so the two can't drift apart.
+
+        Targets the previous download already owned are skipped — see
+        `preexisting_part_targets`. Whether such a target was reached before the
+        interruption or not, it holds a complete chapter file either way (this
+        run's or the last one's), and the `book_files` rows name it; deleting it
+        would turn a cancelled re-download into missing audio. The folder prune
+        below then no-ops on its own, since the folder is not empty.
         """
         for path in promoted + [f"{target}.part" for target in targets]:
+            if path in self.preexisting_part_targets:
+                continue
             try:
                 os.remove(path)
             except OSError:
@@ -3403,7 +3573,10 @@ class BookProcessor:
 
     def _discard_timed_out_output(self):
         """
-        Best-effort removal of an output produced after the run already timed out.
+        Best-effort removal of an output this run placed in /data that nothing
+        will ever refer to: the post-timeout case it is named for, and the split
+        finalize whose database write raised (that transaction rolls back whole,
+        so the parts it just promoted are as unreferenced as a timed-out set).
 
         The MP3 encoder promotes its ".part" onto the final path before returning
         success, so by the time the guard above sees `_timed_out` the file is
@@ -3411,6 +3584,13 @@ class BookProcessor:
         but perfectly readable, so a later deep sync would adopt it. Failing to
         delete it is not worth failing anything over: the run is already recorded
         as failed.
+
+        What it does NOT touch is the previous download's own chapter files
+        (`preexisting_part_targets`): an in-place re-download overwrote them, so
+        those paths hold a complete file and the `book_files` rows still name it.
+        Removing them would take the user's existing copy away on behalf of a run
+        that failed — the same rule the promotion rollback follows, in the same
+        currency.
 
         A split book is the same story with N files, so this walks whatever the
         run actually produced rather than the single final path (which a split
@@ -3423,6 +3603,8 @@ class BookProcessor:
         Finally the book's folder goes if removing the parts emptied it.
         """
         for path in self._produced_output_paths():
+            if path in self.preexisting_part_targets:
+                continue
             if not os.path.exists(path):
                 continue
             try:
@@ -3473,9 +3655,10 @@ class BookProcessor:
         BEFORE the two early returns above precisely because a cancel and a
         post-timeout echo leave the same empty directory a plain failure does,
         and it is safe on every path into here: parts only ever enter that folder
-        during promotion, and a promotion that failed part-way has already put
-        them back (_remove_promoted_parts). A folder holding anything at all is
-        left alone by _cleanup_empty_dirs regardless.
+        during promotion, and a promotion that failed part-way has already taken
+        back the ones it placed (_remove_promoted_parts). A folder still holding
+        anything — the previous download's parts, which that rollback deliberately
+        spares — is left exactly as it is: the prune is a single rmdir.
         """
         self._prune_empty_split_dir()
         if self.stop_event is not None and self.stop_event.is_set():

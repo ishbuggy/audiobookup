@@ -224,9 +224,10 @@
                                 <small style="display: block; font-weight: normal; color: #6c757d">
                                     When a re-download lands at a different location (because the output format or
                                     naming template changed), delete the previous audio file (or a split book's chapter
-                                    files) along with its companion files (PDF, cover, cue sheet, metadata, annotations,
-                                    and any retained original AAX/AAXC files and their vouchers) automatically instead
-                                    of asking each time.
+                                    files) along with its companion files — PDF, cover, metadata, annotations, any
+                                    retained original AAX/AAXC files and their vouchers, and, for a single-file book,
+                                    its cue sheet (a split book never has one) — automatically instead of asking each
+                                    time.
                                 </small>
                             </label>
                             <label class="switch">
@@ -265,12 +266,12 @@
                                 <small style="display: block; font-weight: normal; color: #6c757d">
                                     What we encode locally — separate from Download Quality (what we request from
                                     Audible) in the Downloading section. <strong>Original</strong> strips DRM only and
-                                    keeps Audible's audio untouched (fastest, no quality loss); with
-                                    <strong>Split by Chapter</strong> on, that usually holds per chapter too — but a
-                                    small number of titles need a compatibility decoding step during decryption, and
-                                    those are split into re-encoded AAC parts instead.
-                                    <strong>AAC (.m4b)</strong> re-encodes at the quality below.
-                                    <strong>MP3</strong> re-encodes to MP3 with chapters, using the LAME options below.
+                                    keeps Audible's audio untouched (fastest, no quality loss) for the great majority of
+                                    titles; a small minority need a compatibility decoding step during decryption
+                                    instead, and those get re-encoded to AAC rather than remuxed untouched, whether or
+                                    not <strong>Split by Chapter</strong> is on. <strong>AAC (.m4b)</strong> re-encodes
+                                    at the quality below. <strong>MP3</strong> re-encodes to MP3 with chapters, using
+                                    the LAME options below.
                                 </small>
                             </label>
                             <!-- prettier-ignore -->

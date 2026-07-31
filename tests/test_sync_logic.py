@@ -77,7 +77,7 @@ def db(tmp_path, monkeypatch):
     con = sqlite3.connect(db_path)
     con.execute(
         "CREATE TABLE audiobooks (asin TEXT PRIMARY KEY, title TEXT, status TEXT NOT NULL DEFAULT 'NEW', "
-        "filepath TEXT, retry_count INTEGER DEFAULT 0)"
+        "filepath TEXT, error_message TEXT, retry_count INTEGER DEFAULT 0)"
     )
     con.execute(BOOK_FILES_DDL)
     con.commit()
@@ -86,11 +86,11 @@ def db(tmp_path, monkeypatch):
     return db_path
 
 
-def _seed_book(db, asin, status, filepath, parts=(), retry_count=0):
+def _seed_book(db, asin, status, filepath, parts=(), retry_count=0, error_message=""):
     con = sqlite3.connect(db)
     con.execute(
-        "INSERT INTO audiobooks (asin, title, status, filepath, retry_count) VALUES (?, ?, ?, ?, ?)",
-        (asin, f"Book {asin}", status, filepath, retry_count),
+        "INSERT INTO audiobooks (asin, title, status, filepath, error_message, retry_count) VALUES (?, ?, ?, ?, ?, ?)",
+        (asin, f"Book {asin}", status, filepath, error_message, retry_count),
     )
     for index, part in enumerate(parts):
         con.execute("INSERT INTO book_files (asin, part_index, filepath) VALUES (?, ?, ?)", (asin, index, part))
@@ -360,6 +360,25 @@ class TestReconcileRestoresMovedSplitBooks:
         assert row["status"] == "DOWNLOADED"
         assert row["filepath"] == new_folder  # the new folder, never a part
         assert _parts(db, "B0SPLIT123") == found
+
+    def test_the_restore_clears_the_error_that_flagged_the_book(self, db, tmp_path):
+        # The exact flow this restore exists for: the integrity check writes ERROR
+        # plus "N of M parts missing from disk", the user moves the folder, and the
+        # restore heals the book. The modal renders its red error block on any
+        # non-empty error_message whatever the status, so leaving the old text
+        # behind would keep a permanent "parts missing" banner on a healthy book.
+        old_folder = tmp_path / "data" / "Old Place" / "Book"
+        new_folder = tmp_path / "data" / "New Place" / "Book"
+        names = ["01.m4b", "02.m4b"]
+        tracked = [str(old_folder / name) for name in names]
+        found = [_make_audio(new_folder / name) for name in names]
+        _seed_book(db, "B0SPLIT123", "ERROR", "", parts=tracked, error_message="2 of 2 parts missing from disk")
+
+        _drain(sync_logic._reconcile_database(1, {"B0SPLIT123": found}))
+
+        row = _book(db, "B0SPLIT123")
+        assert row["status"] == "DOWNLOADED"
+        assert row["error_message"] == ""
 
     def test_the_restore_maps_parts_by_name_so_playback_order_survives(self, db, tmp_path):
         # part_index order (03, 01, 02) deliberately differs from alphabetical

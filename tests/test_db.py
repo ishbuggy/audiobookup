@@ -339,6 +339,18 @@ class TestGetAllBooksFileCount:
         assert by_asin["B001"]["file_count"] == 0
         assert by_asin["B003"]["file_count"] == 0
 
+    def test_a_missing_book_files_table_does_not_break_the_library(self, full_library_db):
+        # A hand-restored library.db predating the split feature has no child
+        # table, which would make the grid query's correlated subquery raise and
+        # turn /api/library into a 500. Every other `book_files` reader tolerates
+        # this; so does the grid query.
+        con = sqlite3.connect(full_library_db)
+        con.execute("DROP TABLE book_files")
+        con.commit()
+        con.close()
+
+        assert db_module.get_all_books() == []
+
     def test_existing_row_shape_is_unchanged(self, full_library_db):
         # file_count is purely additive: every key existing consumers read is
         # still present, so routes and the frontend keep working untouched.

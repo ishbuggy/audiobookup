@@ -61,20 +61,27 @@ def get_all_books():
     if not os.path.exists(DB_FILE):
         return []
     con = get_db_connection()
-    cur = con.cursor()
-    # Select only the columns needed for the main library grid to be efficient.
-    # `file_count` is a correlated count of the book's `book_files` rows: 0 for a
-    # single-file (or legacy) book, N for a book split into N chapter files. The
-    # table is created unconditionally by bin/start.sh before the app ever starts,
-    # so the subquery is always resolvable.
-    cur.execute(
-        "SELECT a.author, a.title, a.custom_title, a.custom_author, a.status, a.asin, a.series, a.narrator, "
-        "a.runtime_min, a.release_date, a.date_added, a.source, a.is_duplicate, "
-        "(SELECT COUNT(*) FROM book_files bf WHERE bf.asin = a.asin) AS file_count "
-        "FROM audiobooks a ORDER BY a.author, a.title"
-    )
-    books_from_db = cur.fetchall()
-    con.close()
+    try:
+        cur = con.cursor()
+        # Select only the columns needed for the main library grid to be efficient.
+        # `file_count` is a correlated count of the book's `book_files` rows: 0 for
+        # a single-file (or legacy) book, N for a book split into N chapter files.
+        # bin/start.sh creates the table unconditionally before the app starts, but
+        # a hand-restored library.db is a real thing and a missing child table must
+        # not turn the whole library page into a 500 — same tolerance every other
+        # `book_files` reader carries.
+        cur.execute(
+            "SELECT a.author, a.title, a.custom_title, a.custom_author, a.status, a.asin, a.series, a.narrator, "
+            "a.runtime_min, a.release_date, a.date_added, a.source, a.is_duplicate, "
+            "(SELECT COUNT(*) FROM book_files bf WHERE bf.asin = a.asin) AS file_count "
+            "FROM audiobooks a ORDER BY a.author, a.title"
+        )
+        books_from_db = cur.fetchall()
+    except sqlite3.Error as e:
+        log.error(f"Database error while fetching the library: {e}", exc_info=True)
+        return []
+    finally:
+        con.close()
     books_with_covers = []
     # Append the cover URL, which is not stored in the DB but follows a known pattern
     for book in books_from_db:

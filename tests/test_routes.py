@@ -1,5 +1,6 @@
 # tests/test_routes.py
 
+import errno
 import json
 import os
 import sqlite3
@@ -1377,6 +1378,33 @@ class TestGetBookDetailsSplit:
         # The total covers only the parts still on disk (1024 + 4096 bytes).
         assert data["file_size_hr"] == "5.0 KB"
         assert data["file_mtime_hr"] != "N/A"
+
+    def test_unreadable_part_is_not_reported_as_missing(self, client, completed_setup, details_db, monkeypatch):
+        # Review M3: only ENOENT means "gone". A part that cannot be statted for
+        # any other reason — a permissions failure on a mounted share is the
+        # realistic one — reads as "Unreadable" instead, and the frontend counts
+        # the two kinds separately by comparing this exact string, so it is
+        # asserted verbatim rather than through a helper.
+        blocked = str(details_db["one_missing"][0])
+        real_stat = os.stat
+
+        def fake_stat(path, *args, **kwargs):
+            if str(path) == blocked:
+                raise PermissionError(errno.EACCES, "Permission denied")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", fake_stat)
+
+        _login_session(client)
+        response = client.get("/api/book/B003")
+        assert response.status_code == 200
+        data = response.get_json()
+        # Part 1 is unreadable, part 2 is genuinely gone, part 3 reports normally.
+        assert data["files"][0]["size_hr"] == "Unreadable"
+        assert data["files"][1]["size_hr"] == "Missing"
+        assert data["files"][2]["size_hr"] == "4.0 KB"
+        # The total counts only the part that could actually be measured.
+        assert data["file_size_hr"] == "4.0 KB"
 
     def test_blanked_filepath_falls_back_to_the_parts_folder(self, client, completed_setup, details_db):
         # Review W3: the deep-sync reconcile blanks a demoted split book's

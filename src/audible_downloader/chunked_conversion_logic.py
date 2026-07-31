@@ -889,10 +889,14 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             # past the top end every chapter merges forward into the next until
             # the ">= 2 parts" gate quietly converts the book single-file with
             # the toggle still showing on.
+            # OverflowError is in the tuple for the non-finite family: `float()`
+            # happily returns inf for `Infinity` or `1e999` (both of which
+            # json.loads accepts, so Import from JSON can deliver one), and
+            # `int(inf)` raises. NaN raises ValueError and is already covered.
             try:
                 seconds = int(float(chapter_settings.get("minimum_file_duration", 0) or 0))
                 min_ms = min(_MAX_MIN_FILE_DURATION_SEC, max(0, seconds)) * 1000
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 min_ms = 0
             merged_chapters = merge_short_chapters(chapters_list, min_ms)
             if len(merged_chapters) >= 2:

@@ -22,7 +22,7 @@ Every converted file keeps its chapters, cover art, and metadata intact, and lan
 
 - **Library management** — a searchable, sortable, filterable dashboard, with grid, list, and table views plus a detailed per-book view for overriding a book's title and author and uploading your own cover art.
 
-- **DRM-free conversion in three formats** — a re-encoded AAC `.m4b` (frame-perfect chapters, universal player compatibility), a lossless "Original" remux (no re-encoding, least processing time), or a single-pass `.mp3`.
+- **DRM-free conversion in three formats** — a re-encoded AAC `.m4b` (frame-perfect chapters, universal player compatibility), a lossless "Original" remux (no re-encoding, least processing time), or an `.mp3`.
 
 - **Smart download & decrypt fallbacks** — resilient fallback chains for fetching and decrypting Audible's AAX/AAXC formats, so a hiccup in one path doesn't sink the download.
 

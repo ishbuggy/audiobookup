@@ -494,8 +494,13 @@ def _reconcile_database(job_id, found_files):
             # count behind would put a book that failed twice before being supplied
             # by hand permanently past the `retry_count <= 1` auto-retry gate the
             # moment a later Verify flags it ERROR again.
+            # error_message is cleared for the same reason: the modal renders its
+            # red block on any non-empty message regardless of status, so a book
+            # healed back to DOWNLOADED would otherwise keep the "N of M parts
+            # missing from disk" banner that flagged it in the first place.
             cur.execute(
-                "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, retry_count = 0 WHERE asin = ?",
+                "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, error_message = '', "
+                "retry_count = 0 WHERE asin = ?",
                 (correct_filepath, asin_from_file),
             )
             fixed_untracked += 1
