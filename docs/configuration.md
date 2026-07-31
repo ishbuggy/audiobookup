@@ -2,21 +2,21 @@
 
 # Settings & Configuration
 
-This page documents every setting on the **Settings** page (the gear icon on the dashboard, or `/settings` directly), section by section. Within each section the standard options come first and the advanced ones after — which is close to, but not always exactly, the on-screen order, since a couple of sections put an advanced control at the top.
+This page documents every setting on the **Settings** page (the gear icon on the dashboard, or `/settings` directly), section by section. Within each section the standard options come first and the advanced ones after. That's close to, but not always exactly, the on-screen order, since a couple of sections put an advanced control at the top.
 
 ## Before you start
 
-**Advanced Mode.** A single toggle in the page header, next to the theme switcher, reveals a larger set of expert options throughout the page — things like MP3 encoder tuning, chapter cleanups, and cron scheduling. It's off by default so first-time users see a short, approachable list; flip it on whenever you want the full set. Every option documented below as "advanced" is hidden until you turn this on. The toggle is itself a saved setting, so it sticks across page reloads — but only once you've clicked **Save Changes**; flipping it and leaving the page without saving won't persist.
+**Advanced Mode.** A single toggle in the page header, next to the theme switcher, reveals a larger set of expert options throughout the page: things like MP3 encoder tuning, chapter cleanups, and cron scheduling. It's off by default so first-time users see a short, approachable list; flip it on whenever you want the full set. Every option documented below as "advanced" is hidden until you turn this on. The toggle is itself a saved setting, so it sticks across page reloads, but only once you've clicked **Save Changes**; flipping it and leaving the page without saving won't persist.
 Default: `Off`.
-`settings.json: advanced_mode_enabled — default false`
+`settings.json: advanced_mode_enabled, default false`
 
 ![The Advanced Mode toggle in the Settings page header, next to the theme switcher](images/settings-advanced-toggle.png)
 
-**Export as JSON / Import from JSON.** At the bottom of the page, these two buttons let you download your entire configuration as a `.json` file, or load one back in. Useful for backing up your setup before experimenting, or copying your configuration to a fresh install. Importing merges the file over your current settings — every key the file contains replaces your current value, and anything it doesn't mention is left alone — then reloads the page. The exported file no longer contains your (hashed) web-UI login credential, so it's safe to share — for backup, migration, or asking for help — without handing anyone something crackable. Historical note: exports taken from older versions did include that credential, so treat any older export file as private — but it's safe to import: AudioBookup strips your login password and setup-status flag out of every import, old or new, so loading a settings file — however old — never changes your login password or resets your setup status.
+**Export as JSON / Import from JSON.** At the bottom of the page, these two buttons let you download your entire configuration as a `.json` file, or load one back in. Useful for backing up your setup before experimenting, or copying your configuration to a fresh install. Importing merges the file over your current settings: every key the file contains replaces your current value, and anything it doesn't mention is left alone. Then it reloads the page. The exported file no longer contains your (hashed) web-UI login credential, so it's safe to share (for backup, migration, or asking for help) without handing anyone something crackable. Historical note: exports taken from older versions did include that credential, so treat any older export file as private. It's still safe to import, though: AudioBookup strips your login password and setup-status flag out of every import, old or new, so loading a settings file, however old, never changes your login password or resets your setup status.
 
-**Save Changes.** Nothing you change on this page takes effect until you click **Save Changes** at the bottom. Most changes apply immediately after saving; changing your username or password is the one exception — see [Authentication Settings](#authentication-settings) below.
+**Save Changes.** Nothing you change on this page takes effect until you click **Save Changes** at the bottom. Most changes apply immediately after saving; changing your username or password is the one exception; see [Authentication Settings](#authentication-settings) below.
 
-**Where this all lives.** Every setting on this page is a value inside a single file, `settings.json`, stored in the `/config` volume on your host (by default `./appdata/config/settings.json`). The Settings page is really just a friendly editor for that file — you *can* hand-edit it directly (each option below lists its exact key), but the UI is safer: it always writes a well-formed file with the keys in the shape the app expects. What it doesn't do is vet the values themselves — the ranges listed below are guidance the input fields offer, not limits enforced when you save.
+**Where this all lives.** Every setting on this page is a value inside a single file, `settings.json`, stored in the `/config` volume on your host (by default `./appdata/config/settings.json`). The Settings page is really just a friendly editor for that file. You *can* hand-edit it directly (each option below lists its exact key), but the UI is safer: it always writes a well-formed file with the keys in the shape the app expects. What it doesn't do is vet the values themselves: the ranges listed below are guidance the input fields offer, not limits enforced when you save.
 
 Screenshots for each section below are placeholders for now and will be filled in over time.
 
@@ -25,17 +25,17 @@ Screenshots for each section below are placeholders for now and will be filled i
 ![The Job Settings section, showing Total Processing Cores with the Auto-detect button](images/settings-01-jobs.png)
 
 **Total Processing Cores**
-Sets the global ceiling on how many CPU-intensive tasks (audio encoding, decryption) can run at once across the whole app. A good starting point is your system's total CPU core count minus one, leaving a core free for the OS and the web UI — capped at this setting's maximum of 16 on machines with more cores than that. Click **Auto-detect** to have the app measure your system's hardware and fill in a suggested value for you (never more than 16).
-Range: 1–16. Default: `2`.
-`settings.json: job.download.total_processing_cores — default 2`
+Sets the global ceiling on how many CPU-intensive tasks (audio encoding, decryption) can run at once across the whole app. A good starting point is your system's total CPU core count minus one, leaving a core free for the OS and the web UI, capped at this setting's maximum of 16 on machines with more cores than that. Click **Auto-detect** to have the app measure your system's hardware and fill in a suggested value for you (never more than 16).
+Range: 1-16. Default: `2`.
+`settings.json: job.download.total_processing_cores, default 2`
 
 <details>
-<summary><b>Advanced options — Job Settings</b> (visible when Advanced Mode is on)</summary>
+<summary><b>Advanced options: Job Settings</b> (visible when Advanced Mode is on)</summary>
 
 **Max Parallel Downloads**
-Limits how many books can be downloaded from Audible's servers at the same time. This is separate from Total Processing Cores above — that setting governs local CPU work (encoding), while this one governs concurrent network requests to Audible.
-Range: 1–5. Default: `2`.
-`settings.json: job.download.max_parallel_downloads — default 2`
+Limits how many books can be downloaded from Audible's servers at the same time. This is separate from Total Processing Cores above: that setting governs local CPU work (encoding), while this one governs concurrent network requests to Audible.
+Range: 1-5. Default: `2`.
+`settings.json: job.download.max_parallel_downloads, default 2`
 
 </details>
 
@@ -44,27 +44,27 @@ Range: 1–5. Default: `2`.
 ![The Downloading section, showing the Download Companion PDF toggle](images/settings-02-downloading.png)
 
 **Download Companion PDF**
-When Audible ships a booklet or other supplementary PDF alongside a title, save it next to the finished audiobook. On by default — not every book has one, so most of the time it changes nothing; turn it off if you'd rather never have the extra file.
+When Audible ships a booklet or other supplementary PDF alongside a title, save it next to the finished audiobook. On by default. Not every book has one, so most of the time it changes nothing; turn it off if you'd rather never have the extra file.
 Default: `On`.
-`settings.json: conversion.download_supplementary_pdf — default true`
+`settings.json: conversion.download_supplementary_pdf, default true`
 
 <details>
-<summary><b>Advanced options — Downloading</b> (visible when Advanced Mode is on)</summary>
+<summary><b>Advanced options: Downloading</b> (visible when Advanced Mode is on)</summary>
 
 **Download Quality**
-Controls what AudioBookup *requests* from Audible when fetching the source file — a distinct axis from the output quality below, which controls what AudioBookup *produces* locally after downloading. "Best" asks for the highest-quality tier Audible offers for that title; "High" and "Normal" request smaller source files, which download faster and use less bandwidth but start from a lower-quality source. This setting has no effect on the AAC/MP3 encode settings elsewhere on this page — those act on whatever source file this setting fetched.
+Controls what AudioBookup *requests* from Audible when fetching the source file, a distinct axis from the output quality below, which controls what AudioBookup *produces* locally after downloading. "Best" asks for the highest-quality tier Audible offers for that title; "High" and "Normal" request smaller source files, which download faster and use less bandwidth but start from a lower-quality source. This setting has no effect on the AAC/MP3 encode settings elsewhere on this page: those act on whatever source file this setting fetched.
 Choices: Best (highest available) / High / Normal (smallest). Default: `best`.
-`settings.json: conversion.download_quality — default "best"`
+`settings.json: conversion.download_quality, default "best"`
 
 **Keep Raw Download (AAX/AAXC)**
-Normally, the encrypted source file Audible sends (an `.aax` or `.aaxc`) is deleted once conversion finishes successfully. Turn this on to keep it next to the finished audiobook instead — for `.aaxc` downloads this also keeps the accompanying `.voucher` file, which is required to decrypt it again later. Useful if you want a permanent backup of the original Audible-format file, but it roughly doubles the disk space used per book, since you're keeping both the source and the converted output.
+Normally, the encrypted source file Audible sends (an `.aax` or `.aaxc`) is deleted once conversion finishes successfully. Turn this on to keep it next to the finished audiobook instead. For `.aaxc` downloads this also keeps the accompanying `.voucher` file, which is required to decrypt it again later. Useful if you want a permanent backup of the original Audible-format file, but it roughly doubles the disk space used per book, since you're keeping both the source and the converted output.
 Default: `Off`.
-`settings.json: conversion.retain_aax — default false`
+`settings.json: conversion.retain_aax, default false`
 
 **Clean up Replaced Files**
-A Force Re-download always asks whether AudioBookup should also delete the previous audio file (or, for a split book, its previous chapter files) and its companion files — PDF, cover, metadata, annotations, any retained original AAX/AAXC files and their vouchers, and, for a single-file book, its cue sheet (a split book never has one) — once the new one is safely in place — but files are only actually deleted if the re-download genuinely lands at a new location (for example because your output format or naming template changed); if it just overwrites the old file in place, there's nothing to clean up. Turning this setting on skips the question and answers "yes" automatically, including for re-downloads that run on their own through scheduled processing, where no one is there to ask. Declining the question always leaves the old files in place, even if the setting gets turned on elsewhere afterward. Deletion only ever touches files still on disk inside your library folder, so nothing outside AudioBookup's own output is ever touched.
+A Force Re-download always asks whether AudioBookup should also delete the previous audio file (or, for a split book, its previous chapter files) and its companion files (PDF, cover, metadata, annotations, any retained original AAX/AAXC files and their vouchers, and, for a single-file book, its cue sheet, since a split book never has one) once the new one is safely in place. Files are only actually deleted if the re-download genuinely lands at a new location (for example because your output format or naming template changed); if it just overwrites the old file in place, there's nothing to clean up. Turning this setting on skips the question and answers "yes" automatically, including for re-downloads that run on their own through scheduled processing, where no one is there to ask. Declining the question always leaves the old files in place, even if the setting gets turned on elsewhere afterward. Deletion only ever touches files still on disk inside your library folder, so nothing outside AudioBookup's own output is ever touched.
 Default: `Off`.
-`settings.json: job.download.cleanup_stale_files — default false`
+`settings.json: job.download.cleanup_stale_files, default false`
 
 </details>
 
@@ -73,24 +73,24 @@ Default: `Off`.
 ![The Audio & Output Format section, with the Output Format dropdown set to AAC](images/settings-03-audio.png)
 
 **Output Format**
-The single most consequential setting on this page — it decides what kind of file AudioBookup produces locally, separate from Download Quality above (which only affects what's requested from Audible).
+The single most consequential setting on this page: it decides what kind of file AudioBookup produces locally, separate from Download Quality above (which only affects what's requested from Audible).
 
-- **Original (remux, no re-encode):** Strips Audible's DRM and re-packages the decrypted audio untouched — chapters, metadata, and cover art get muxed in, but the audio itself is never re-encoded, for the great majority of titles. This is the fastest option and involves zero quality loss, since nothing is recompressed. Trade-off: file sizes match whatever Audible originally shipped, and the "Strip Audible Branding" and MP3-only options below don't apply to it. A small minority of titles need a compatibility decoding step during decryption instead of the usual fast path; for those, Original quality is re-encoded to AAC rather than remuxed untouched, whether or not Split by Chapter is on. With **Split by Chapter** on, this format's chapters are otherwise cut straight out of the downloaded audio too, so splitting costs almost nothing extra.
-- **AAC (.m4b):** Re-encodes the audio to AAC at the quality level chosen just below, producing a standard `.m4b` audiobook file — the most broadly compatible option across audiobook and podcast apps.
-- **MP3:** Encodes to MP3 (with embedded chapters) using the LAME encoder options in the advanced block below — one file for the whole book. The most universally playable format, at the cost of losing some of the chapter/format niceties dedicated audiobook players offer for `.m4b`.
+- **Original (remux, no re-encode):** Strips Audible's DRM and re-packages the decrypted audio untouched: chapters, metadata, and cover art get muxed in, but the audio itself is never re-encoded, for the great majority of titles. This is the fastest option and involves zero quality loss, since nothing is recompressed. Trade-off: file sizes match whatever Audible originally shipped, and the "Strip Audible Branding" and MP3-only options below don't apply to it. A small minority of titles need a compatibility decoding step during decryption instead of the usual fast path; for those, Original quality is re-encoded to AAC rather than remuxed untouched, whether or not Split by Chapter is on. With **Split by Chapter** on, this format's chapters are otherwise cut straight out of the downloaded audio too, so splitting costs almost nothing extra.
+- **AAC (.m4b):** Re-encodes the audio to AAC at the quality level chosen just below, producing a standard `.m4b` audiobook file, the most broadly compatible option across audiobook and podcast apps.
+- **MP3:** Encodes to MP3 (with embedded chapters) using the LAME encoder options in the advanced block below, one file for the whole book. The most universally playable format, at the cost of losing some of the chapter/format niceties dedicated audiobook players offer for `.m4b`.
 
 With **Split by Chapter** on (below, in Chapters & Metadata), every format saves one file per chapter instead of one file for the whole book.
 
 Choices: Original / AAC (.m4b) / MP3. Default: `m4b` (AAC).
-`settings.json: conversion.output_format — default "m4b"`
+`settings.json: conversion.output_format, default "m4b"`
 
 **AAC Quality** *(shown only when Output Format is AAC (.m4b))*
-The bitrate AudioBookup encodes to when producing an AAC `.m4b`. Higher settings produce larger files with more headroom for the source material's detail — but re-encoding can never recover detail the downloaded source doesn't already have, so there's no benefit to picking a quality higher than what Download Quality actually fetched.
+The bitrate AudioBookup encodes to when producing an AAC `.m4b`. Higher settings produce larger files with more headroom for the source material's detail, but re-encoding can never recover detail the downloaded source doesn't already have, so there's no benefit to picking a quality higher than what Download Quality actually fetched.
 Choices: High (~128 kbps) / Standard (~96 kbps) / Low (~64 kbps). Default: `High`.
-`settings.json: conversion.quality — default "High"`
+`settings.json: conversion.quality, default "High"`
 
 <details>
-<summary><b>Advanced options — Audio & Output Format</b> (visible when Advanced Mode is on)</summary>
+<summary><b>Advanced options: Audio & Output Format</b> (visible when Advanced Mode is on)</summary>
 
 ![The MP3 encoder options block, shown only when Output Format is set to MP3](images/settings-03-audio-advanced.png)
 
@@ -99,42 +99,42 @@ The following options only appear, and only apply, when **Output Format** is set
 **MP3 Target**
 Chooses which of the two options below actually controls the encode: **Quality (VBR)** uses the VBR Quality slider; **Bitrate** uses the Bitrate field (and the CBR/Match Source options that go with it).
 Choices: Quality (VBR) / Bitrate. Default: `quality`.
-`settings.json: conversion.mp3.target — default "quality"`
+`settings.json: conversion.mp3.target, default "quality"`
 
 **VBR Quality**
-A 0–9 slider used when MP3 Target is "Quality (VBR)". `0` targets the best quality (largest files); `9` targets the smallest files (lowest quality). The live number next to the slider updates as you drag it.
-Range: 0–9. Default: `2`.
-`settings.json: conversion.mp3.vbr_quality — default 2`
+A 0-9 slider used when MP3 Target is "Quality (VBR)". `0` targets the best quality (largest files); `9` targets the smallest files (lowest quality). The live number next to the slider updates as you drag it.
+Range: 0-9. Default: `2`.
+`settings.json: conversion.mp3.vbr_quality, default 2`
 
 **Bitrate (kbps)**
 The constant/average bitrate target used when MP3 Target is "Bitrate".
-Range: 32–320. Default: `128`.
-`settings.json: conversion.mp3.bitrate_kbps — default 128`
+Range: 32-320. Default: `128`.
+`settings.json: conversion.mp3.bitrate_kbps, default 128`
 
 **Constant Bitrate (CBR)**
-When Target is "Bitrate", this decides whether the encode is true CBR (fixed bitrate throughout, this toggle on) or ABR — average bitrate, which lets simpler passages use fewer bits (this toggle off).
+When Target is "Bitrate", this decides whether the encode is true CBR (fixed bitrate throughout, this toggle on) or ABR, average bitrate, which lets simpler passages use fewer bits (this toggle off).
 Default: `Off` (ABR).
-`settings.json: conversion.mp3.constant_bitrate — default false`
+`settings.json: conversion.mp3.constant_bitrate, default false`
 
 **Match Source Bitrate**
-Also only relevant when Target is "Bitrate". When on, the encoder derives its bitrate from the source file's own bitrate instead of the fixed Bitrate value above, rounding up to the nearest standard MP3 bitrate — so a high-quality source doesn't get needlessly downgraded to a generic default. If the source's bitrate can't be determined, the fixed Bitrate field above is used as a fallback.
+Also only relevant when Target is "Bitrate". When on, the encoder derives its bitrate from the source file's own bitrate instead of the fixed Bitrate value above, rounding up to the nearest standard MP3 bitrate, so a high-quality source doesn't get needlessly downgraded to a generic default. If the source's bitrate can't be determined, the fixed Bitrate field above is used as a fallback.
 Default: `On`.
-`settings.json: conversion.mp3.match_source_bitrate — default true`
+`settings.json: conversion.mp3.match_source_bitrate, default true`
 
 **Downsample to Mono**
 Mixes the audio down to a single channel before encoding. Spoken-word audiobooks rarely benefit from stereo, so this is a straightforward way to shrink file size with no perceptible quality loss for most listeners.
 Default: `Off`.
-`settings.json: conversion.mp3.downsample_mono — default false`
+`settings.json: conversion.mp3.downsample_mono, default false`
 
 **Max Sample Rate (Hz)**
-Caps the output sample rate. Only takes effect when the source file's sample rate is actually higher than this value — a source that's already at or below the cap passes through unchanged.
-Range: 8000–48000 (step 50). Default: `44100`.
-`settings.json: conversion.mp3.max_sample_rate — default 44100`
+Caps the output sample rate. Only takes effect when the source file's sample rate is actually higher than this value; a source that's already at or below the cap passes through unchanged.
+Range: 8000-48000 (step 50). Default: `44100`.
+`settings.json: conversion.mp3.max_sample_rate, default 44100`
 
 **Encoder Quality**
-The LAME encoder's internal effort level — a speed/quality trade-off for the encoding algorithm itself, distinct from VBR Quality or Bitrate above. "High" is the slowest and most thorough; "Fast" trades some encoding precision for speed.
+The LAME encoder's internal effort level, a speed/quality trade-off for the encoding algorithm itself, distinct from VBR Quality or Bitrate above. "High" is the slowest and most thorough; "Fast" trades some encoding precision for speed.
 Choices: High / Standard / Fast. Default: `High`.
-`settings.json: conversion.mp3.encoder_quality — default "High"`
+`settings.json: conversion.mp3.encoder_quality, default "High"`
 
 </details>
 
@@ -142,44 +142,44 @@ Choices: High / Standard / Fast. Default: `High`.
 
 ![The Chapters & Metadata section, showing the Strip (Unabridged) toggle and the new Split by Chapter toggle](images/settings-04-chapters.png)
 
-> **Automatic, not a setting:** if a re-encoded book arrives from Audible as one single chapter longer than 30 minutes, AudioBookup splits it into evenly spaced 15-minute "Part N" chapters so playback navigation still works. This always happens for such books (an "Original" lossless remux is never touched) and has no toggle here — mentioned so the extra chapters don't come as a surprise.
+> **Automatic, not a setting:** if a re-encoded book arrives from Audible as one single chapter longer than 30 minutes, AudioBookup splits it into evenly spaced 15-minute "Part N" chapters so playback navigation still works. This always happens for such books (an "Original" lossless remux is never touched) and has no toggle here; it's mentioned so the extra chapters don't come as a surprise.
 
 **Strip "(Unabridged)"**
-Removes the "(Unabridged)" marker that Audible appends to many titles, from the title and album tags and from the titles in the optional `.metadata.json` and `.cue` companion files. Purely cosmetic — has no effect on the audio itself. A title you've customized yourself (via Edit Metadata) is never altered.
+Removes the "(Unabridged)" marker that Audible appends to many titles, from the title and album tags and from the titles in the optional `.metadata.json` and `.cue` companion files. Purely cosmetic; it has no effect on the audio itself. A title you've customized yourself (via Edit Metadata) is never altered.
 Default: `Off`.
-`settings.json: conversion.chapters.strip_unabridged — default false`
+`settings.json: conversion.chapters.strip_unabridged, default false`
 
 **Split by Chapter**
-Saves each chapter of a book as its own file inside a folder, instead of one single audiobook file — works with all three output formats above. The folder is normally whatever the last folder level of your naming template below would produce; a fully flat template with no folder level at all still gets one, invented automatically from the book's own name so files aren't dumped loose into your library root, and a template whose last folder level is shared across books (for example, grouping only by author, with no per-book level) means every split book at that level shares one folder together. Off by default, so today's single-file output is unchanged. A book needs at least two chapters left after the cleanups on this page and after the Minimum Chapter File Length merge below to actually split; if only one chapter survives, it's saved as a single file exactly as before. Separately, a book auto-chunked into the automatic 15-minute "Part N" chapters described above never splits regardless of this setting, even though the chunking leaves it with plenty of chapters. Applies to books converted from now on; an already-downloaded book keeps its current shape until you Force Re-download it.
+Saves each chapter of a book as its own file inside a folder, instead of one single audiobook file. Works with all three output formats above. The folder is normally whatever the last folder level of your naming template below would produce; a fully flat template with no folder level at all still gets one, invented automatically from the book's own name so files aren't dumped loose into your library root, and a template whose last folder level is shared across books (for example, grouping only by author, with no per-book level) means every split book at that level shares one folder together. Off by default, so today's single-file output is unchanged. A book needs at least two chapters left after the cleanups on this page and after the Minimum Chapter File Length merge below to actually split; if only one chapter survives, it's saved as a single file exactly as before. Separately, a book auto-chunked into the automatic 15-minute "Part N" chapters described above never splits regardless of this setting, even though the chunking leaves it with plenty of chapters. Applies to books converted from now on; an already-downloaded book keeps its current shape until you Force Re-download it.
 Default: `Off`.
-`settings.json: conversion.chapters.split_by_chapter — default false`
+`settings.json: conversion.chapters.split_by_chapter, default false`
 
-> **Two honest caveats before you turn this on.** Audible's own chapter markers can be off by a few seconds on some titles — normally that's buried inside one long file and you'd never notice, but with Split by Chapter on it lands right at a file boundary, so you might occasionally hear a word clipped at the very start or end of a chapter file. That's a quirk in Audible's chapter data, not something splitting introduces. Separately, splitting to **MP3** specifically adds a few milliseconds of encoder padding at each chapter boundary — an inherent property of how MP3 encoding works, not a bug.
+> **Two honest caveats before you turn this on.** Audible's own chapter markers can be off by a few seconds on some titles. Normally that's buried inside one long file and you'd never notice, but with Split by Chapter on it lands right at a file boundary, so you might occasionally hear a word clipped at the very start or end of a chapter file. That's a quirk in Audible's chapter data, not something splitting introduces. Separately, splitting to **MP3** specifically adds a few milliseconds of encoder padding at each chapter boundary, an inherent property of how MP3 encoding works, not a bug.
 
 <details>
-<summary><b>Advanced options — Chapters & Metadata</b> (visible when Advanced Mode is on)</summary>
+<summary><b>Advanced options: Chapters & Metadata</b> (visible when Advanced Mode is on)</summary>
 
 **Minimum Chapter File Length (seconds)** *(only used while Split by Chapter is on)*
-A chapter shorter than this many seconds is merged into the chapter that follows it, instead of becoming its own tiny file — useful for the very short "stub" chapters (like a bare "Chapter 1" announcement) some Audible titles ship. If several short chapters land next to each other, they keep folding forward until the combined length clears the threshold or there's nothing left to merge into. The last chapter in a book is never merged away, even if it's short. The merged chapter's title is built by joining the short chapter's title and the one it merges into with a single space (e.g. "Chapter 19" and "The Heist" become "Chapter 19 The Heist") — worth knowing since that title feeds directly into filenames via `{ch_title}`. Set to `0` to disable merging entirely and get one file per original chapter.
-Range: 0–3600. Default: `3`.
-`settings.json: conversion.chapters.minimum_file_duration — default 3` (seconds)
+A chapter shorter than this many seconds is merged into the chapter that follows it, instead of becoming its own tiny file. This is useful for the very short "stub" chapters (like a bare "Chapter 1" announcement) some Audible titles ship. If several short chapters land next to each other, they keep folding forward until the combined length clears the threshold or there's nothing left to merge into. The last chapter in a book is never merged away, even if it's short. The merged chapter's title is built by joining the short chapter's title and the one it merges into with a single space (e.g. "Chapter 19" and "The Heist" become "Chapter 19 The Heist"), worth knowing since that title feeds directly into filenames via `{ch_title}`. Set to `0` to disable merging entirely and get one file per original chapter.
+Range: 0-3600. Default: `3`.
+`settings.json: conversion.chapters.minimum_file_duration, default 3` (seconds)
 
 **Combine Nested Chapter Titles**
-Some audiobooks ship a nested chapter tree (for example, a "Part" chapter containing several "Chapter" children). This flattens that tree into one single-level list of chapters, and joins each child's title to its parent's with `": "` — so "Part One" containing "Chapter 1" becomes a single chapter titled "Part One: Chapter 1". Leaving this off keeps today's behavior: only the top-level chapters are used, and any nested children are ignored.
+Some audiobooks ship a nested chapter tree (for example, a "Part" chapter containing several "Chapter" children). This flattens that tree into one single-level list of chapters, and joins each child's title to its parent's with `": "`, so "Part One" containing "Chapter 1" becomes a single chapter titled "Part One: Chapter 1". Leaving this off keeps today's behavior: only the top-level chapters are used, and any nested children are ignored.
 Default: `Off`.
-`settings.json: conversion.chapters.combine_nested_titles — default false`
+`settings.json: conversion.chapters.combine_nested_titles, default false`
 
 **Merge Credit Chapters**
-Folds "Opening Credits" and "End Credits" chapters into their neighbors instead of leaving them as separate, often very short, chapter entries — Opening Credits gets absorbed into the chapter that follows it, End Credits into the one before it.
+Folds "Opening Credits" and "End Credits" chapters into their neighbors instead of leaving them as separate, often very short, chapter entries. Opening Credits gets absorbed into the chapter that follows it, End Credits into the one before it.
 Default: `Off`.
-`settings.json: conversion.chapters.merge_credit_chapters — default false`
+`settings.json: conversion.chapters.merge_credit_chapters, default false`
 
-> **Interaction with Combine Nested Chapter Titles:** when both are enabled, Combine Nested Chapter Titles runs first and Merge Credit Chapters runs second, on the now-flattened list. Merge Credit Chapters only recognizes a chapter whose title is "Opening Credits" or "End Credits" and nothing else — capitalization and surrounding whitespace don't matter, but any extra words mean no match. It checks every chapter in the book, not just the first and last. For the common case — credits chapters sitting at the top level of the chapter tree — flattening doesn't change their titles, so the merge still finds and folds them normally. But if a book nests its credits chapters *underneath* a parent chapter, flattening prefixes their titles with the parent's name (e.g. "Part One: Opening Credits"), and the merge step no longer matches that exact string — so that credits chapter is left in place rather than merged. This is a corner case rather than the norm, since credits chapters are almost always top-level.
+> **Interaction with Combine Nested Chapter Titles:** when both are enabled, Combine Nested Chapter Titles runs first and Merge Credit Chapters runs second, on the now-flattened list. Merge Credit Chapters only recognizes a chapter whose title is "Opening Credits" or "End Credits" and nothing else: capitalization and surrounding whitespace don't matter, but any extra words mean no match. It checks every chapter in the book, not just the first and last. For the common case (credits chapters sitting at the top level of the chapter tree), flattening doesn't change their titles, so the merge still finds and folds them normally. But if a book nests its credits chapters *underneath* a parent chapter, flattening prefixes their titles with the parent's name (e.g. "Part One: Opening Credits"), and the merge step no longer matches that exact string, so that credits chapter is left in place rather than merged. This is a corner case rather than the norm, since credits chapters are almost always top-level.
 
 **Strip Audible Branding**
-Trims Audible's "This is Audible" spoken intro and matching outro from the finished file. This only applies when re-encoding — **AAC** and **MP3** output — because trimming requires an encode pass to cut into; the **Original** remux format is never trimmed, regardless of this setting.
+Trims Audible's "This is Audible" spoken intro and matching outro from the finished file. This only applies when re-encoding (**AAC** and **MP3** output), because trimming requires an encode pass to cut into; the **Original** remux format is never trimmed, regardless of this setting.
 Default: `Off`.
-`settings.json: conversion.chapters.strip_audible_branding — default false`
+`settings.json: conversion.chapters.strip_audible_branding, default false`
 
 **Chapter Title Template**
 A template string used to render every chapter's title, with these placeholders:
@@ -192,7 +192,7 @@ A template string used to render every chapter's title, with these placeholders:
 | `{title}` | The book's title |
 
 The default, `{ch_title}`, reproduces each chapter's original title exactly, unchanged.
-`settings.json: conversion.chapters.chapter_title_template — default "{ch_title}"`
+`settings.json: conversion.chapters.chapter_title_template, default "{ch_title}"`
 
 </details>
 
@@ -200,30 +200,30 @@ The default, `{ch_title}`, reproduces each chapter's original title exactly, unc
 
 ![The Sidecar Files section, showing the Save Cover Alongside toggle](images/settings-05-sidecar.png)
 
-This section covers four of the extra files that can land next to a finished audiobook: the cover image, a `metadata.json`, a `.cue` sheet, and an annotations file. Two others live elsewhere — the companion PDF and the raw AAX/AAXC download are both controlled from the **Downloading** section above.
+This section covers four of the extra files that can land next to a finished audiobook: the cover image, a `metadata.json`, a `.cue` sheet, and an annotations file. Two others live elsewhere: the companion PDF and the raw AAX/AAXC download are both controlled from the **Downloading** section above.
 
 **Save Cover Alongside**
 Saves the book's cover image as its own file next to the finished audiobook, in addition to the copy already embedded inside the audio file itself.
 Default: `Off`.
-`settings.json: conversion.save_cover_alongside — default false`
+`settings.json: conversion.save_cover_alongside, default false`
 
 <details>
-<summary><b>Advanced options — Sidecar Files</b> (visible when Advanced Mode is on)</summary>
+<summary><b>Advanced options: Sidecar Files</b> (visible when Advanced Mode is on)</summary>
 
 **Save metadata.json**
-Writes a curated `.metadata.json` file next to the audiobook, containing the book's details (title, author, narrator, series, and so on) in a plain, machine-readable format — handy for scripting or feeding other tools.
+Writes a curated `.metadata.json` file next to the audiobook, containing the book's details (title, author, narrator, series, and so on) in a plain, machine-readable format, handy for scripting or feeding other tools.
 Default: `Off`.
-`settings.json: conversion.save_metadata_json — default false`
+`settings.json: conversion.save_metadata_json, default false`
 
 **Create .cue Sheet**
-Writes a `.cue` chapter sheet next to the audiobook, listing each chapter's start time — a format some media players and burning tools can read directly. Not written for a book saved with **Split by Chapter** on — with one file per chapter already, a cue sheet listing chapter start times inside a single file has nothing to add.
+Writes a `.cue` chapter sheet next to the audiobook, listing each chapter's start time, a format some media players and burning tools can read directly. Not written for a book saved with **Split by Chapter** on: with one file per chapter already, a cue sheet listing chapter start times inside a single file has nothing to add.
 Default: `Off`.
-`settings.json: conversion.create_cue_sheet — default false`
+`settings.json: conversion.create_cue_sheet, default false`
 
 **Save Annotations**
-Writes your clips, notes, and bookmarks for the book — the ones you made in the Audible app — to an `.annotations.json` sidecar next to the audiobook, in Audible's own raw format. Fetched with a separate request during download, so turning this on adds a small amount of extra time per book. A book you never annotated simply produces no file, which is the normal case, not an error. You don't have to turn this on ahead of time to get annotations for a book you've already downloaded — see the **Download Annotations** button in that book's detail view, covered in [usage.md](usage.md#book-details).
+Writes your clips, notes, and bookmarks for the book (the ones you made in the Audible app) to an `.annotations.json` sidecar next to the audiobook, in Audible's own raw format. Fetched with a separate request during download, so turning this on adds a small amount of extra time per book. A book you never annotated just produces no file, which is the normal case, not an error. You don't have to turn this on ahead of time to get annotations for a book you've already downloaded; see the **Download Annotations** button in that book's detail view, covered in [usage.md](usage.md#book-details).
 Default: `Off`.
-`settings.json: conversion.save_annotations — default false`
+`settings.json: conversion.save_annotations, default false`
 
 </details>
 
@@ -246,49 +246,49 @@ The template that builds the output path for every book, combining folder levels
 | `{year}` | The release year |
 | `{language}` | The book's language |
 
-If a placeholder resolves to nothing — most commonly `{series}`/`{series_part}` for a standalone book — that entire folder level is dropped cleanly rather than leaving behind an empty or "N/A" folder.
+If a placeholder resolves to nothing (most commonly `{series}`/`{series_part}` for a standalone book), that entire folder level is dropped cleanly rather than leaving behind an empty or "N/A" folder.
 
-Default: `{author}/{title}/{author} - {title}` — which produces, for example, `Brandon Sanderson/Mistborn/Brandon Sanderson - Mistborn.m4b`.
-`settings.json: naming.template — default "{author}/{title}/{author} - {title}"`
+Default: `{author}/{title}/{author} - {title}`, which produces, for example, `Brandon Sanderson/Mistborn/Brandon Sanderson - Mistborn.m4b`.
+`settings.json: naming.template, default "{author}/{title}/{author} - {title}"`
 
-> **`{series_part}` can render blank right after upgrading, then fix itself.** The series-position value behind this placeholder is only populated by a library sync. A book already in your library from before that data was tracked shows a blank `{series_part}` (and any folder level built from it is dropped, per the rule above) until the next Fast or Deep Sync refreshes its record from Audible — at which point it fills in on its own. No action is needed; new downloads and newly-synced books are unaffected.
+> **`{series_part}` can render blank right after upgrading, then fix itself.** The series-position value behind this placeholder is only populated by a library sync. A book already in your library from before that data was tracked shows a blank `{series_part}` (and any folder level built from it is dropped, per the rule above) until the next Fast or Deep Sync refreshes its record from Audible, at which point it fills in on its own. No action is needed; new downloads and newly-synced books are unaffected.
 
 **Truncate Subtitle in Filenames**
-Some Audible titles carry a long subtitle after a colon (e.g. "Project Hail Mary: A Novel"). When on, only the part before the first `": "` is used when building the filename — so the example above becomes just "Project Hail Mary" on disk. This only affects the on-disk filename; the full, untruncated title is still written into the file's embedded metadata.
+Some Audible titles carry a long subtitle after a colon (e.g. "Project Hail Mary: A Novel"). When on, only the part before the first `": "` is used when building the filename, so the example above becomes just "Project Hail Mary" on disk. This only affects the on-disk filename; the full, untruncated title is still written into the file's embedded metadata.
 Default: `Off`.
-`settings.json: naming.truncate_subtitle — default false`
+`settings.json: naming.truncate_subtitle, default false`
 
 <details>
-<summary><b>Advanced options — File & Folder Naming</b> (visible when Advanced Mode is on)</summary>
+<summary><b>Advanced options: File & Folder Naming</b> (visible when Advanced Mode is on)</summary>
 
 **Apply Custom Metadata to Filenames**
-When you manually override a book's title or author (from its detail view), this decides whether that override also renames the file/folder on disk to match. Off (the default) means an override only changes what's displayed in the UI and what's embedded in the file's tags — the on-disk name stays as it was. On means new downloads are named from your override, and editing an existing book's metadata renames its file to match.
+When you manually override a book's title or author (from its detail view), this decides whether that override also renames the file/folder on disk to match. Off (the default) means an override only changes what's displayed in the UI and what's embedded in the file's tags; the on-disk name stays as it was. On means new downloads are named from your override, and editing an existing book's metadata renames its file to match.
 Default: `Off`.
-`settings.json: naming.apply_custom_to_filenames — default false`
+`settings.json: naming.apply_custom_to_filenames, default false`
 
 **Folder Template (optional)** and **File Template (optional)**
 An alternative to the single Folder/File Name Template above, for when you want the folder structure and the filename to follow genuinely different rules. When *both* fields are non-empty, they compose as `<folder_template>/<file_template>` and override the single template above entirely; leaving either one blank falls back to using the single template. Both use the same placeholders listed above.
 Default: both empty (the single template above is authoritative).
-`settings.json: naming.folder_template — default ""` / `naming.file_template — default ""`
+`settings.json: naming.folder_template, default ""` / `naming.file_template, default ""`
 
 **Chapter File Name Template** *(only used while [Split by Chapter](#chapters--metadata) is on)*
-Names the individual files a split book produces — the folder they land in still comes from the templates above, with the same flat-template fallback and shared-folder behavior described under [Split by Chapter](#chapters--metadata). Available placeholders are the book placeholders listed above, plus three chapter-specific ones:
+Names the individual files a split book produces. The folder they land in still comes from the templates above, with the same flat-template fallback and shared-folder behavior described under [Split by Chapter](#chapters--metadata). Available placeholders are the book placeholders listed above, plus three chapter-specific ones:
 
 | Placeholder | Meaning |
 | --- | --- |
-| `{ch}` | The part's number (1-based), zero-padded to the width of the final part count *after* the Minimum Chapter File Length merge above — not the book's original chapter count (e.g. a 12-chapter book merged down to 9 parts pads to `01`…`09`, not `12`) |
+| `{ch}` | The part's number (1-based), zero-padded to the width of the final part count *after* the Minimum Chapter File Length merge above, not the book's original chapter count (e.g. a 12-chapter book merged down to 9 parts pads to `01`…`09`, not `12`) |
 | `{ch_total}` | The total number of chapter files the book produces |
 | `{ch_title}` | The chapter's own title |
 
-This names the file only, not any folder level — a template containing a `/` doesn't create a subfolder; everything up through the last `/` is silently discarded, and only the text after it is used as the filename. A template that leaves out `{ch}` gets ` - {ch}` appended automatically, since every part needs a name that's actually unique.
+This names the file only, not any folder level. A template containing a `/` doesn't create a subfolder; everything up through the last `/` is silently discarded, and only the text after it is used as the filename. A template that leaves out `{ch}` gets ` - {ch}` appended automatically, since every part needs a name that's actually unique.
 Default: `{title} - {ch} - {ch_title}`.
-`settings.json: naming.chapter_file_template — default "{title} - {ch} - {ch_title}"`
+`settings.json: naming.chapter_file_template, default "{title} - {ch} - {ch_title}"`
 
 **File Timestamp Source**
-Sets the finished audiobook's file "modified" date (and that of any sidecar files saved alongside it) to a meaningful date instead of the moment it happened to be downloaded — useful for sorting a library by release date or by when you bought it, in a file browser or media server that sorts by modified time.
-Choices: Don't change (default) / Book release date / Purchase date. Only applies to books downloaded from the point you enable it forward — it does not retroactively re-stamp files you already have.
+Sets the finished audiobook's file "modified" date (and that of any sidecar files saved alongside it) to a meaningful date instead of the moment it happened to be downloaded, useful for sorting a library by release date or by when you bought it, in a file browser or media server that sorts by modified time.
+Choices: Don't change (default) / Book release date / Purchase date. Only applies to books downloaded from the point you enable it forward; it does not retroactively re-stamp files you already have.
 Default: `none`.
-`settings.json: conversion.file_timestamp_source — default "none"`
+`settings.json: conversion.file_timestamp_source, default "none"`
 
 </details>
 
@@ -296,78 +296,78 @@ Default: `none`.
 
 ![The Audible Connection section, showing the Run Connection Check button](images/settings-07-connection.png)
 
-This section holds no saved settings of its own — it's four on-demand actions for managing your link to Audible and your local library data. Full step-by-step procedures for each are in [troubleshooting.md](troubleshooting.md).
+This section holds no saved settings of its own; it's four on-demand actions for managing your link to Audible and your local library data. Full step-by-step procedures for each are in [troubleshooting.md](troubleshooting.md).
 
-**Run Connection Check** — Immediately tests whether AudioBookup's stored Audible login is still valid, without waiting for the next scheduled check. Useful right after changing your Audible password, to confirm whether you need to reconnect.
+**Run Connection Check**: Immediately tests whether AudioBookup's stored Audible login is still valid, without waiting for the next scheduled check. Useful right after changing your Audible password, to confirm whether you need to reconnect.
 
-**Clear Image Cache** (button labeled **Clear Cache**) — Deletes every cached cover image. They're re-downloaded automatically the next time a sync runs. Handy for fixing corrupted or stuck cover art.
+**Clear Image Cache** (button labeled **Clear Cache**): Deletes every cached cover image. They're re-downloaded automatically the next time a sync runs. Handy for fixing corrupted or stuck cover art.
 
-**Verify Library Integrity** (button labeled **Verify Files**) — Scans every downloaded book on disk and flags any that are missing or noticeably shorter than expected (a sign of a truncated download) by marking them **ERROR**, so they show up for an easy retry from the dashboard.
+**Verify Library Integrity** (button labeled **Verify Files**): Scans every downloaded book on disk and flags any that are missing or noticeably shorter than expected (a sign of a truncated download) by marking them **ERROR**, so they show up for an easy retry from the dashboard.
 
-**Reset Audible Connection** — Deletes your stored Audible login credentials entirely and restarts the app, dropping you back into the setup wizard to reconnect. This is a destructive action with its own confirmation prompt; it does not touch your web-UI username or password.
+**Reset Audible Connection**: Deletes your stored Audible login credentials entirely and restarts the app, dropping you back into the setup wizard to reconnect. This is a destructive action with its own confirmation prompt; it does not touch your web-UI username or password.
 
 ## Scheduled Tasks
 
 ![The Scheduled Tasks section, showing the timezone dropdown and the three automation blocks](images/settings-08-tasks.png)
 
-> This is also where the dashboard's automation banner sends you — following that banner's link lands you directly on this section via `/settings#tasks`.
+> This is also where the dashboard's automation banner sends you: following that banner's link lands you directly on this section via `/settings#tasks`.
 
 **Scheduler Timezone**
-The timezone used to interpret every daily and cron schedule configured below (e.g. "run at 03:00" means 03:00 in *this* timezone). This is deliberately separate from the container's own `TZ` environment variable, which sets the container's system clock — see [installation.md](installation.md) for that setting.
+The timezone used to interpret every daily and cron schedule configured below (e.g. "run at 03:00" means 03:00 in *this* timezone). This is deliberately separate from the container's own `TZ` environment variable, which sets the container's system clock; see [installation.md](installation.md) for that setting.
 Choices: a fixed dropdown list of common IANA zones (UTC, Europe/London, Europe/Berlin, America/New_York, America/Chicago, America/Denver, America/Los_Angeles, Australia/Sydney, Asia/Tokyo). Default: `UTC`.
-`settings.json: tasks.timezone — default "UTC"`
+`settings.json: tasks.timezone, default "UTC"`
 
 **Audible Connection Check Interval (hours)**
 How often AudioBookup automatically checks that its stored Audible login is still valid, in the background.
-Range: 1–24. Default: `6`.
-`settings.json: tasks.audible_auth_check_interval_hours — default 6`
+Range: 1-24. Default: `6`.
+`settings.json: tasks.audible_auth_check_interval_hours, default 6`
 
-> **Each block hides its own settings until it's switched on.** The three automation blocks below (Fast Sync, Deep Sync, Automatic Processing) keep everything except their **Enable** toggle collapsed out of view while that toggle is off — schedule type, times, and in Automatic Processing's case the status checkboxes and the trigger toggle too. If a block looks like it holds nothing but a switch, turn the switch on and its options appear.
+> **Each block hides its own settings until it's switched on.** The three automation blocks below (Fast Sync, Deep Sync, Automatic Processing) keep everything except their **Enable** toggle collapsed out of view while that toggle is off: schedule type, times, and in Automatic Processing's case the status checkboxes and the trigger toggle too. If a block looks like it holds nothing but a switch, turn the switch on and its options appear.
 
 ### Automatic Fast Sync (API Only)
 
-Checks Audible for new or changed books via the API only — quick, and doesn't touch the filesystem.
+Checks Audible for new or changed books via the API only: quick, and doesn't touch the filesystem.
 
-- **Enable toggle:** turns the schedule on/off. `settings.json: tasks.is_auto_fast_sync_enabled — default false`
-- **Schedule Type:** **Interval** (run every N hours, 1–168) or **Daily** (run at a specific time). Default schedule: every 4 hours; switch to Daily and the time field starts at 02:00.
-- Stored as a single cron string: `settings.json: tasks.fast_sync_schedule.cron — default "0 */4 * * *"`
+- **Enable toggle:** turns the schedule on/off. `settings.json: tasks.is_auto_fast_sync_enabled, default false`
+- **Schedule Type:** **Interval** (run every N hours, 1-168) or **Daily** (run at a specific time). Default schedule: every 4 hours; switch to Daily and the time field starts at 02:00.
+- Stored as a single cron string: `settings.json: tasks.fast_sync_schedule.cron, default "0 */4 * * *"`
 
 ### Automatic Deep Sync (Full Scan)
 
-Runs everything Fast Sync does, then also scans your local files on disk — heavier, so it's meant to run less often.
+Runs everything Fast Sync does, then also scans your local files on disk: heavier, so it's meant to run less often.
 
-- **Enable toggle:** `settings.json: tasks.is_auto_deep_sync_enabled — default false`
-- **Schedule Type:** Interval (every N hours, 2–168) or Daily. Default schedule: once daily at 03:00; switch to Interval and the field starts at 24 hours.
-- `settings.json: tasks.deep_sync_schedule.cron — default "0 3 * * *"`
+- **Enable toggle:** `settings.json: tasks.is_auto_deep_sync_enabled, default false`
+- **Schedule Type:** Interval (every N hours, 2-168) or Daily. Default schedule: once daily at 03:00; switch to Interval and the field starts at 24 hours.
+- `settings.json: tasks.deep_sync_schedule.cron, default "0 3 * * *"`
 
 ### Automatic Processing
 
 Automatically downloads and converts books matching the statuses you select below, on its own schedule.
 
-- **Enable toggle:** `settings.json: tasks.is_auto_process_enabled — default false`
-- **Schedule Type:** Interval (every N hours, 2–168) or Daily. Default schedule: once daily at 04:00; switch to Interval and the field starts at 24 hours.
-- `settings.json: tasks.process_schedule.cron — default "0 4 * * *"`
+- **Enable toggle:** `settings.json: tasks.is_auto_process_enabled, default false`
+- **Schedule Type:** Interval (every N hours, 2-168) or Daily. Default schedule: once daily at 04:00; switch to Interval and the field starts at 24 hours.
+- `settings.json: tasks.process_schedule.cron, default "0 4 * * *"`
 
 **Automatically process books with these statuses:** three checkboxes controlling which library statuses automatic processing acts on:
 
-- **NEW** — books not yet downloaded. `settings.json: tasks.auto_process_new — default true`
-- **MISSING** — previously-downloaded books whose file can no longer be found. `settings.json: tasks.auto_process_missing — default true`
-- **ERROR** — books whose last attempt failed. `settings.json: tasks.auto_process_error — default false`. Checking this box pops up a warning worth reading carefully: with ERROR ticked, a failed book gets exactly **one** further automatic retry on a later scheduled run — if that retry fails too, automatic processing leaves the book alone from then on, so a permanently-broken title doesn't get hammered against Audible's API forever. That's exactly what you want for a transient failure — a dropped connection, a temporary Audible hiccup. Retrying the book yourself at any time (its own Download button, or selecting it in Process Downloads) re-arms one more automatic attempt, even if that manual attempt also fails.
+- **NEW**: books not yet downloaded. `settings.json: tasks.auto_process_new, default true`
+- **MISSING**: previously-downloaded books whose file can no longer be found. `settings.json: tasks.auto_process_missing, default true`
+- **ERROR**: books whose last attempt failed. `settings.json: tasks.auto_process_error, default false`. Checking this box pops up a warning worth reading carefully: with ERROR ticked, a failed book gets exactly **one** further automatic retry on a later scheduled run. If that retry fails too, automatic processing leaves the book alone from then on, so a permanently-broken title doesn't get hammered against Audible's API forever. That's exactly what you want for a transient failure: a dropped connection, a temporary Audible hiccup. Retrying the book yourself at any time (its own Download button, or selecting it in Process Downloads) re-arms one more automatic attempt, even if that manual attempt also fails.
 
 **Trigger immediate processing when new books are found by a sync**
-Lives inside the Automatic Processing block and only works as part of it: **Automatic Processing must be enabled too**, and while it's off this toggle is hidden entirely. With both on, a successful Fast or Deep Sync kicks off a processing run right away instead of waiting for the schedule above to come around — whether or not the sync actually turned up anything new. That run processes everything matching the status checkboxes above, not only newly-discovered books.
+Lives inside the Automatic Processing block and only works as part of it: **Automatic Processing must be enabled too**, and while it's off this toggle is hidden entirely. With both on, a successful Fast or Deep Sync kicks off a processing run right away instead of waiting for the schedule above to come around, whether or not the sync actually turned up anything new. That run processes everything matching the status checkboxes above, not only newly-discovered books.
 Default: `On`.
-`settings.json: tasks.process_new_on_sync — default true`
+`settings.json: tasks.process_new_on_sync, default true`
 
-> **A note on very frequent schedules.** Whenever you save, each of the three schedules is checked for running more often than every 5 minutes — only really reachable via the cron option below. If one is, a warning dialog flags it, but the save still goes through: over-frequent schedules aren't blocked, just strongly discouraged, since they can overlap with themselves and hammer Audible's API.
+> **A note on very frequent schedules.** Whenever you save, each of the three schedules is checked for running more often than every 5 minutes (only really reachable via the cron option below). If one is, a warning dialog flags it, but the save still goes through: over-frequent schedules aren't blocked, just strongly discouraged, since they can overlap with themselves and hammer Audible's API.
 
 <details>
-<summary><b>Advanced options — Scheduled Tasks</b> (visible when Advanced Mode is on)</summary>
+<summary><b>Advanced options: Scheduled Tasks</b> (visible when Advanced Mode is on)</summary>
 
 ![The Cron schedule-type fields for one of the automation blocks](images/settings-08-tasks-advanced.png)
 
 **Run-now buttons (▶)**
-Each of the three automation blocks above gets a small play-button next to its enable toggle, letting you fire that job immediately without waiting for its schedule — useful for testing a new schedule or config right after saving. Each button is only enabled while its corresponding schedule is turned on.
+Each of the three automation blocks above gets a small play-button next to its enable toggle, letting you fire that job immediately without waiting for its schedule, useful for testing a new schedule or config right after saving. Each button is only enabled while its corresponding schedule is turned on.
 
 **Cron schedule type**
 A fourth **Schedule Type** option, alongside Interval and Daily, for expressing a schedule as a standard 5-field cron string: **M**inute, **H**our, **D**ay of **M**onth, **M**on**th**, **D**ay of **W**eek. Paste a full cron string (e.g. `0 */4 * * *`) into the first (Minute) field and all five fields auto-populate from it. See [crontab.guru](https://crontab.guru/) for help constructing cron expressions.
@@ -381,22 +381,22 @@ A fourth **Schedule Type** option, alongside Interval and Daily, for expressing 
 **Username**
 Your web-UI login username. The current value is shown just above the field.
 Default: `admin`.
-`settings.json: username — default "admin"`
+`settings.json: username, default "admin"`
 
 **New Password** / **Confirm New Password**
 Sets a new web-UI login password. Leave both fields blank to keep your current password unchanged. If the two fields don't match, saving is blocked with an error and nothing is changed, so a mistyped confirmation can't silently set a password you didn't intend. If you're ever unsure what actually got stored, the password-reset procedure in [troubleshooting.md](troubleshooting.md#resetting-your-local-web-ui-password) puts you back to a known password.
 Minimum length: 8 characters.
-`settings.json: password_hash` — your password is only ever stored hashed; the plain text you type into these fields is never written to the file.
+`settings.json: password_hash`. Your password is only ever stored hashed; the plain text you type into these fields is never written to the file.
 
-> **Saving either of these logs you out immediately.** Changing your username or password takes effect right away. AudioBookup asks you to confirm first — a dialog warning you that you're about to be logged out — then saves, shows a success message, and after about three seconds sends you to the login page to sign back in with the new credentials. Everything else on this page saves without logging you out.
+> **Saving either of these logs you out immediately.** Changing your username or password takes effect right away. AudioBookup asks you to confirm first (a dialog warning you that you're about to be logged out), then saves, shows a success message, and after about three seconds sends you to the login page to sign back in with the new credentials. Everything else on this page saves without logging you out.
 
 ## Hidden and expert settings
 
-Some keys in `settings.json` have no corresponding control anywhere on the Settings page — either because they're too rarely needed to deserve UI real estate, or because they're purely internal bookkeeping. The ones worth knowing about are below. You can still set most of them by hand-editing `settings.json`, or by including them in a JSON file used with **Import from JSON** — the two exceptions are `password_hash` and `initial_setup_complete`, described below, which **Import from JSON** never changes even if the imported file contains them.
+Some keys in `settings.json` have no corresponding control anywhere on the Settings page, either because they're too rarely needed to deserve UI real estate, or because they're purely internal bookkeeping. The ones worth knowing about are below. You can still set most of them by hand-editing `settings.json`, or by including them in a JSON file used with **Import from JSON**. The two exceptions are `password_hash` and `initial_setup_complete`, described below, which **Import from JSON** never changes even if the imported file contains them.
 
-**`import.max_upload_gb`** — caps the size, in gigabytes, of a single file accepted by the manual-import upload feature. There's no UI control for this; change it only by editing `settings.json` directly or importing a settings file that sets it.
+**`import.max_upload_gb`**: caps the size, in gigabytes, of a single file accepted by the manual-import upload feature. There's no UI control for this; change it only by editing `settings.json` directly or importing a settings file that sets it.
 Default: `2`.
 
-**`conversion.no_reencode`** — a legacy flag from before the **Output Format** setting existed. It's kept around purely so that older `settings.json` files (saved before this option existed) keep working — `conversion.output_format` now supersedes it entirely, and the app derives one from the other automatically when it detects an old-style file. You should not need to touch this directly; use **Output Format** instead.
+**`conversion.no_reencode`**: a legacy flag from before the **Output Format** setting existed. It's kept around purely so that older `settings.json` files (saved before this option existed) keep working. `conversion.output_format` now supersedes it entirely, and the app derives one from the other automatically when it detects an old-style file. You should not need to touch this directly; use **Output Format** instead.
 
-**`initial_setup_complete`** and **`password_hash`** — internal bookkeeping the app manages itself: whether you've been through the first-time setup wizard, and your hashed (never plaintext) login password. Don't hand-edit these except as part of the password-reset procedure described in [troubleshooting.md](troubleshooting.md), which involves deleting the `password_hash` line to fall back to the default password. **Import from JSON** ignores both keys even if a settings file contains them, so importing a backup — yours or someone else's — can never change your login password or your setup status.
+**`initial_setup_complete`** and **`password_hash`**: internal bookkeeping the app manages itself, namely whether you've been through the first-time setup wizard, and your hashed (never plaintext) login password. Don't hand-edit these except as part of the password-reset procedure described in [troubleshooting.md](troubleshooting.md), which involves deleting the `password_hash` line to fall back to the default password. **Import from JSON** ignores both keys even if a settings file contains them, so importing a backup, yours or someone else's, can never change your login password or your setup status.

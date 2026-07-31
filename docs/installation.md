@@ -7,8 +7,8 @@ AudioBookup ships as a single Docker container, and **Docker Compose is the supp
 ## Prerequisites
 
 - Docker and Docker Compose installed on your system (Docker Desktop on macOS/Windows, or `docker` + the `compose` plugin on Linux).
-- An Audible account — this is what the app authenticates against to find and download your books.
-- Enough free disk space, in two places. Your `/data` volume needs room for the finished library — audiobooks are large. Separately, while a book is being processed its download and intermediate audio files are written under the `/config` volume, so `/config` needs a few books' worth of working headroom on top of its small settings and log files. If those two volumes live on different disks, don't leave `/config` on a nearly-full one.
+- An Audible account: this is what the app authenticates against to find and download your books.
+- Enough free disk space, in two places. Your `/data` volume needs room for the finished library, since audiobooks are large. Separately, while a book is being processed its download and intermediate audio files are written under the `/config` volume, so `/config` needs a few books' worth of working headroom on top of its small settings and log files. If those two volumes live on different disks, don't leave `/config` on a nearly-full one.
 
 ## Install with Docker Compose
 
@@ -19,7 +19,7 @@ AudioBookup ships as a single Docker container, and **Docker Compose is the supp
    cd audiobookup
    ```
 
-2. **Get the compose file.** Download the project's [`docker-compose.yml`](../docker-compose.yml) into that folder, keeping the same filename. Use the real file rather than retyping it — it carries the three volume mappings the app needs, and a container started without them loses all of your data the next time it's recreated.
+2. **Get the compose file.** Download the project's [`docker-compose.yml`](../docker-compose.yml) into that folder, keeping the same filename. Use the real file rather than retyping it. It carries the three volume mappings the app needs, and a container started without them loses all of your data the next time it's recreated.
 
    For orientation, the file's shape is:
 
@@ -54,7 +54,7 @@ AudioBookup ships as a single Docker container, and **Docker Compose is the supp
    docker compose up -d
    ```
 
-5. **Open the web UI** at `http://<your-server-ip>:13300`. The first launch walks you through a one-time setup wizard — see [First-time setup](setup.md).
+5. **Open the web UI** at `http://<your-server-ip>:13300`. The first launch walks you through a one-time setup wizard. See [First-time setup](setup.md).
 
 ## Configuration reference
 
@@ -64,7 +64,7 @@ AudioBookup ships as a single Docker container, and **Docker Compose is the supp
 |---|---|
 | `PUID` | The user ID that owns files the app creates. Match your host user by running `id` in a terminal on your server. |
 | `PGID` | The group ID that owns files the app creates. Also found via `id`. |
-| `TZ` | The container's timezone, as an IANA name (e.g. `America/New_York`). This sets the *container's* clock — it's separate from the in-app **Scheduler Timezone** setting used for cron schedules; see [configuration.md#scheduled-tasks](configuration.md#scheduled-tasks). |
+| `TZ` | The container's timezone, as an IANA name (e.g. `America/New_York`). This sets the *container's* clock, separate from the in-app **Scheduler Timezone** setting used for cron schedules; see [configuration.md#scheduled-tasks](configuration.md#scheduled-tasks). |
 | `UMASK` | File-permission mask for files the app creates. Default `0002` (group-writable: `664` files, `775` directories). Set to `0000` for world-writable output, which some NAS/SMB share setups require. |
 | `SKIP_DATA_PERMS` | Set to `true` to skip the startup permission fix-up on `/data`. Recommended on macOS (Docker file sharing makes this scan slow) or for libraries with 1000+ books, where it can otherwise delay startup by several minutes. |
 
@@ -72,15 +72,15 @@ AudioBookup ships as a single Docker container, and **Docker Compose is the supp
 
 | Path | Contents |
 |---|---|
-| `/config` | Application settings, logs, and temporary processing files. Regenerable — safe to delete if you're starting over, but you'll lose your saved settings. |
-| `/database` | The library database and your Audible login. **Critical and irreplaceable** — back this up. |
+| `/config` | Application settings, logs, and temporary processing files. Regenerable: safe to delete if you're starting over, but you'll lose your saved settings. |
+| `/database` | The library database and your Audible login. **Critical and irreplaceable**: back this up. |
 | `/data` | Your finished, converted audiobooks. |
 
 The example compose file maps all three to relative folders (`./appdata/...`, `./audiobooks`) next to the compose file itself. Unraid users, and anyone who might move the compose file later, should change these to absolute paths instead (e.g. `/mnt/user/appdata/audiobookup/config:/config`) so the container always finds the same data.
 
 ## Deployment notes
 
-AudioBookup is built as a **single-user** application — one account, a handful of browser tabs on a private network, not a multi-tenant service. Each open dashboard tab holds a live connection for real-time job updates, so a few tabs are fine, but the app isn't designed for many concurrent users.
+AudioBookup is built as a **single-user** application: one account, a handful of browser tabs on a private network, not a multi-tenant service. Each open dashboard tab holds a live connection for real-time job updates, so a few tabs are fine, but the app isn't designed for many concurrent users.
 
 If you put a reverse proxy (nginx, Caddy, Traefik, etc.) in front of the app, it **must forward the `Host` header** correctly. The app's CSRF protection compares each write request's origin against that host, and a mismatch will cause logins and other actions to fail.
 

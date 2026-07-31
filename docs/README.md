@@ -9,7 +9,7 @@ New here? Start with the **[Overview](overview.md)** to see what AudioBookup doe
 | [First-Time Setup](setup.md) | How do I log in for the first time, set my password, and connect AudioBookup to Audible? |
 | [Using AudioBookup](usage.md) | How do I sync, browse, download, and manage my library day to day? |
 | [Settings & Configuration](configuration.md) | What does every setting on the Settings page do, including the advanced options? |
-| [Troubleshooting & Maintenance](troubleshooting.md) | Something isn't working — how do I fix it? How do I do routine upkeep? |
+| [Troubleshooting & Maintenance](troubleshooting.md) | Something isn't working: how do I fix it? How do I do routine upkeep? |
 
 ### For developers
 
