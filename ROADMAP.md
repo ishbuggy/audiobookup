@@ -18,12 +18,15 @@ High-level direction for the project: what's planned, why, and roughly when. Thi
 | v0.21.0 | Image hardening (Debian trixie base, GPG-verified gosu, apt upgrade) | Shipped (2026-07-22) |
 | v0.22.0 | Libation-parity download & processing options + settings IA | Shipped (2026-07-29) |
 | v0.23.0 | Quality release: full backlog sweep + clips/notes/bookmarks export | Shipped (2026-07-30) |
-| v0.24.0 | Split books into per-chapter files | Planned |
+| v0.24.0 | Split books into per-chapter files | Shipped (2026-07-31) |
 | v0.25.0 | Full Libation `<tag>` naming engine + chapter-timestamp parity | Planned |
 | v0.26.0 | Multiple Audible accounts / profiles | Planned |
 | v0.27.0 | Faster / event-driven library sync | Planned |
 
-The v0.19 backend and v0.20 frontend tracks were developed backend-first and released together as **v0.20.0**; **v0.21.0** followed with container-image hardening. **v0.22.0** shipped 2026-07-29, driven by a settings-parity review of Libation (see `ref-docs/reports/v0.22.0/` and `ref-docs/libation/`). A **documentation pass** followed on 2026-07-30 (no version bump; it ships with the next release's notes): the README was split into a screenshot-illustrated `docs/` folder, and a docs sweep is now a standing part of every release plan. **v0.23.0** shipped 2026-07-30 (plan and reports archived in `ref-docs/reports/v0.23.0/`); the headline sequence through v0.27.0 was laid out the same day it was scoped — see "Planned headline features" below. **v0.24.0** (per-chapter file splitting) is next up.
+The v0.19 backend and v0.20 frontend tracks were developed backend-first and released together as **v0.20.0**; **v0.21.0** followed with container-image hardening. **v0.22.0** shipped 2026-07-29, driven by a settings-parity review of Libation (see `ref-docs/reports/v0.22.0/` and `ref-docs/libation/`). A **documentation pass** followed on 2026-07-30 (no version bump; it ships with the next release's notes): the README was split into a screenshot-illustrated `docs/` folder, and a docs sweep is now a standing part of every release plan. **v0.23.0** shipped 2026-07-30 (plan and reports archived in `ref-docs/reports/v0.23.0/`); the headline sequence through v0.27.0 was laid out the same day it was scoped — see "Planned headline features" below. **v0.24.0** shipped 2026-07-31 (per-chapter file
+splitting; plan, per-phase reports, and the double release review are archived in
+`ref-docs/reports/v0.24.0/`). **v0.25.0** (the Libation `<tag>` naming engine + chapter-timestamp
+parity) is next up.
 
 ---
 
@@ -73,15 +76,25 @@ review (Fable + adversarial multi-provider) are archived in `ref-docs/reports/v0
 
 ---
 
-## Planned headline features (v0.24.0+)
+## v0.24.0 — Split books into per-chapter files (shipped 2026-07-31)
+
+Libation's "split my books into multiple files by chapter" (+ minimum-file-duration merge), in all
+three output formats — chunked AAC `.m4b`, per-part MP3, and lossless copy-cuts for Original
+quality (gated on a pre-registered accuracy spike that passed at ~8 ms worst-case boundary error).
+The big one: it broke the load-bearing one-book/one-`filepath` model, adding the `book_files`
+child table and making the collision allocators, rename/cleanup lifecycle, sync/verify/import
+scanners, and every library view part-set-aware. Also swept twelve backlog items (five interlocking
+lifecycle fixes folded into the machinery rewrite, seven independent ride-alongs). Plan, per-phase
+reports, and the double release review (Fable + adversarial multi-provider) are archived in
+`ref-docs/reports/v0.24.0/`.
+
+---
+
+## Planned headline features (v0.25.0+)
 
 Sequence decided 2026-07-30 — one headline per release. Still context, not commitment: each release
 gets its own detailed `PLAN.md` when it opens, and priorities can shift.
 
-- **v0.24.0 — Split books into per-chapter files.** Libation's "split my books into multiple files
-  by chapter" (+ minimum-file-duration merge). The big one: it breaks the load-bearing
-  one-book/one-`filepath` model — rippling through the DB schema, collision handling, output
-  verification, and every library view — which is why it gets its own dedicated release.
 - **v0.25.0 — Full Libation `<tag>` naming engine + chapter-timestamp parity.** The complete
   formatter + conditional DSL (`<title short[U]>`, `<if series->…<-if series>`, name/date/number
   formatters) — a large parser to build and support; v0.22.0 only extended the simpler `{tag}`
