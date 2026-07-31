@@ -334,23 +334,44 @@ def adopt_file(filepath, *, allow_reconcile=True, key=None, job_id=None):
 
 def _first_free_output_path(base_path, suffix):
     """
-    Return the first path in the collision sequence that does NOT already exist on
-    disk, so a file placed there can never overwrite another: `base_path`, then
+    Return the first path in the collision sequence whose extension-stripped BASE
+    is free on disk, so a file placed there can never overwrite another book's
+    file *or* end up sharing another book's sidecars: `base_path`, then
     `<root>_<suffix><ext>`, then `<root>_<suffix>_2<ext>`, `_3`, ... `suffix` is the
     (already-sanitized) adoption key, mirroring the download/rename ASIN-suffix
     convention. In practice the first or second candidate is free; the loop only
     guards the pathological case where both the template name and the key-suffixed
     name are taken (e.g. a duplicate that was itself already downloaded there).
+
+    Freeness is judged on the base rather than on the full filename because the
+    sidecars (cover, PDF, cue, metadata) hang off the extension-stripped base: an
+    existing book at "<root>.m4b" makes "<root>.m4a" unusable for a *different*
+    book even though that exact filename is free, since the two would then write
+    and delete the same sidecar set. This is the same currency processing_logic's
+    reservation and rename allocators use.
     """
-    if not os.path.exists(base_path):
-        return base_path
+    # Imported here (not at module top) for the same reason adopt_upload does it:
+    # keep the cross-module dependency lazy so import order stays unconstrained.
+    from .processing_logic import _sibling_audio_paths
+
     root, ext = os.path.splitext(base_path)
-    candidate = f"{root}_{suffix}{ext}"
+
+    def _base_is_free(candidate_root):
+        # A base is free only when NOTHING occupies it — neither the extension we
+        # are about to write nor any sibling audio extension (_AUDIO_EXTENSIONS),
+        # each of which would share this base's sidecars.
+        if os.path.exists(f"{candidate_root}{ext}"):
+            return False
+        return not any(os.path.exists(sibling) for sibling in _sibling_audio_paths(candidate_root, ext))
+
+    if _base_is_free(root):
+        return base_path
+    candidate_root = f"{root}_{suffix}"
     n = 2
-    while os.path.exists(candidate):
-        candidate = f"{root}_{suffix}_{n}{ext}"
+    while not _base_is_free(candidate_root):
+        candidate_root = f"{root}_{suffix}_{n}"
         n += 1
-    return candidate
+    return f"{candidate_root}{ext}"
 
 
 def adopt_upload(staging_path, original_filename, settings):

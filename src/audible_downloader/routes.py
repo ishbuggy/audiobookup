@@ -899,6 +899,7 @@ def download_book_annotations(asin):
         annotations_command,
         find_annotations_file,
     )
+    from audible_downloader.processing_logic import _tracked_part_paths, sidecar_base_for_tracked_book
 
     con = get_db_connection()
     try:
@@ -979,7 +980,25 @@ def download_book_annotations(asin):
             log.info(f"No annotations found for {asin}.")
             return jsonify(success=True, annotations=False)
 
-        target = os.path.splitext(filepath)[0] + ".annotations.json"
+        # Where the sidecar goes is not simply "next to filepath": a book split
+        # into per-chapter files tracks its FOLDER there, and its sidecars keep
+        # the single-file-equivalent name inside that folder (D9). The processor
+        # decides that base at conversion time; this asks the same question of a
+        # book that finished long ago.
+        base = sidecar_base_for_tracked_book(asin)
+        if base is None:
+            # The "next to the audio file" fallback is right for a single-file
+            # book and WRONG for the only shape that can get here otherwise: a
+            # split book's filepath is its folder, so stripping an extension off
+            # it puts the dump beside the folder — and truncates at any dot in
+            # the folder's name ("Book Vol. 2" -> "Book Vol.annotations.json").
+            # Better to report the failure than to write the file somewhere the
+            # user will never find it.
+            if _tracked_part_paths(asin):
+                log.error(f"Could not work out where {asin}'s sidecars live; not saving its annotations.")
+                return jsonify(error="Could not determine where to save the annotations for this book."), 500
+            base = os.path.splitext(filepath)[0]
+        target = base + ".annotations.json"
         shutil.move(source, target)
         log.info(f"Saved annotations for {asin} to {target}")
         return jsonify(success=True, annotations=True, path=target)

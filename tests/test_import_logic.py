@@ -375,6 +375,35 @@ class TestAdoptUpload:
         assert result["key"] in result["filepath"]
         assert target.read_bytes() == b"existing"
 
+    def test_collision_with_a_sibling_extension_walks_to_the_next_candidate(self, db, tmp_path):
+        # Backlog #17 regression: the template name is free *as a filename* (the
+        # upload is an .m4a and the existing book is an .m4b) but NOT as a base —
+        # both would hang their cover/PDF/cue/metadata off "lib/Great Book". The
+        # allocator must treat the occupied base as a collision and suffix the key,
+        # exactly as it would for a same-extension clash.
+        existing = tmp_path / "lib" / "Great Book.m4b"
+        existing.parent.mkdir(parents=True)
+        existing.write_bytes(b"other-book")
+        target = tmp_path / "lib" / "Great Book.m4a"
+
+        staging = tmp_path / "stage.m4a"
+        staging.write_bytes(b"uploaded")
+        m_meta, m_cover = _patch_meta(title="Great Book", author="Jane Doe")
+        with (
+            m_meta,
+            m_cover,
+            mock.patch("audible_downloader.processing_logic.build_base_output_path", return_value=str(target)),
+        ):
+            result = import_logic.adopt_upload(str(staging), "orig.m4a", {})
+
+        # Landed at a suffixed path, so the two books no longer share a base...
+        assert result["filepath"] != str(target)
+        assert result["key"] in result["filepath"]
+        assert result["filepath"].endswith(".m4a")  # container extension preserved
+        # ...and nothing was placed at the contested base under either extension.
+        assert not target.exists()
+        assert existing.read_bytes() == b"other-book"
+
     def test_upload_does_not_overwrite_a_linked_duplicate_at_the_suffixed_path(self, db, tmp_path):
         # H1 (blocking regression): the "_<ASIN>" name is exactly where a duplicate's
         # own prior download lives. Uploading a file carrying that ASIN when BOTH the
@@ -517,6 +546,35 @@ class TestAdoptUpload:
 
         assert captured["ext"] == ".m4a"
         assert result["filepath"] == target
+
+
+class TestFirstFreeOutputPath:
+    """The upload allocator's collision walk (backlog #17): candidates are judged
+    on the extension-stripped base, since that base owns the sidecar set."""
+
+    def test_untouched_base_is_returned_unchanged(self, tmp_path):
+        target = str(tmp_path / "Book.m4b")
+        assert import_logic._first_free_output_path(target, "B0KEY12345") == target
+
+    def test_same_extension_collision_appends_the_key(self, tmp_path):
+        (tmp_path / "Book.m4b").write_bytes(b"x")
+        target = str(tmp_path / "Book.m4b")
+        assert import_logic._first_free_output_path(target, "B0KEY12345") == str(tmp_path / "Book_B0KEY12345.m4b")
+
+    def test_sibling_extension_collision_appends_the_key(self, tmp_path):
+        # The .mp3 is a different file name but the same base — a collision.
+        (tmp_path / "Book.mp3").write_bytes(b"x")
+        target = str(tmp_path / "Book.m4b")
+        assert import_logic._first_free_output_path(target, "B0KEY12345") == str(tmp_path / "Book_B0KEY12345.m4b")
+
+    def test_walk_skips_suffixed_candidates_occupied_by_a_sibling_extension(self, tmp_path):
+        # Both the template base and the key-suffixed base are occupied, each by a
+        # *different* extension than the one being written, so the walk has to run
+        # past them rather than stopping at the first free-looking filename.
+        (tmp_path / "Book.m4a").write_bytes(b"x")
+        (tmp_path / "Book_B0KEY12345.mp3").write_bytes(b"x")
+        target = str(tmp_path / "Book.m4b")
+        assert import_logic._first_free_output_path(target, "B0KEY12345") == str(tmp_path / "Book_B0KEY12345_2.m4b")
 
 
 class TestScanUntracked:

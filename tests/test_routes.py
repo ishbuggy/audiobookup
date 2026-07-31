@@ -904,6 +904,23 @@ class TestDownloadBookAnnotations:
             "INSERT INTO audiobooks (asin, title, status, filepath) VALUES (?, ?, ?, ?)",
             ("B003", "Ghost", "DOWNLOADED", str(tmp_path / "library" / "Ghost.m4b")),
         )
+        # v0.24.0: a book split into per-chapter files tracks its FOLDER, and its
+        # sidecars keep the single-file-equivalent name INSIDE that folder (D9).
+        con.execute("CREATE TABLE book_files (asin TEXT, part_index INTEGER, filepath TEXT)")
+        split_dir = tmp_path / "library" / "Dracula"
+        split_dir.mkdir()
+        parts = [split_dir / "Dracula - 1 - One.m4b", split_dir / "Dracula - 2 - Two.m4b"]
+        for part in parts:
+            part.write_bytes(b"audio")
+        (split_dir / "Bram Stoker - Dracula.jpg").write_bytes(b"cover")
+        con.execute(
+            "INSERT INTO audiobooks (asin, title, status, filepath) VALUES (?, ?, ?, ?)",
+            ("B004", "Dracula", "DOWNLOADED", str(split_dir)),
+        )
+        con.executemany(
+            "INSERT INTO book_files (asin, part_index, filepath) VALUES (?, ?, ?)",
+            [("B004", index, str(part)) for index, part in enumerate(parts)],
+        )
         con.commit()
         con.close()
         monkeypatch.setattr(db_module, "DB_FILE", str(db_path))
@@ -1015,3 +1032,52 @@ class TestDownloadBookAnnotations:
         _login_session(client)
         response = client.post("/api/book/NOPE/annotations")
         assert response.status_code == 404
+
+    def test_split_book_saves_inside_its_folder_at_the_sidecar_base(self, client, completed_setup, annotated_db):
+        # v0.24.0 (D9): the row's filepath is the book's FOLDER, so splitting the
+        # extension off it would drop the sidecar NEXT to the folder under the
+        # folder's own name. It belongs inside, at the base the cover already uses.
+        _login_session(client)
+        split_dir = annotated_db.parent / "Dracula"
+        with mock.patch("audible_downloader.routes.subprocess.run", side_effect=self._fake_run(writes_file=True)):
+            response = client.post("/api/book/B004/annotations")
+        assert response.status_code == 200
+        assert response.get_json()["annotations"] is True
+        assert (split_dir / "Bram Stoker - Dracula.annotations.json").exists()
+        assert not (annotated_db.parent / "Dracula.annotations.json").exists()
+
+    def test_single_file_book_is_unaffected(self, client, completed_setup, annotated_db):
+        # The control: a normal book still saves next to its own audio file.
+        _login_session(client)
+        with mock.patch("audible_downloader.routes.subprocess.run", side_effect=self._fake_run(writes_file=True)):
+            client.post("/api/book/B001/annotations")
+        assert annotated_db.with_name("Dracula.annotations.json").exists()
+
+    def test_an_unanswerable_split_base_is_an_error_not_a_guess(self, client, completed_setup, annotated_db):
+        # M6: the "next to the audio file" fallback is wrong for exactly the
+        # shape that can reach it — a split book's filepath is its FOLDER, so
+        # the dump would land beside the folder (and be truncated at any dot in
+        # the folder's name). Report the failure instead of hiding the file.
+        _login_session(client)
+        split_dir = annotated_db.parent / "Dracula"
+        with (
+            mock.patch("audible_downloader.processing_logic.sidecar_base_for_tracked_book", return_value=None),
+            mock.patch("audible_downloader.routes.subprocess.run", side_effect=self._fake_run(writes_file=True)),
+        ):
+            response = client.post("/api/book/B004/annotations")
+        assert response.status_code == 500
+        assert "error" in response.get_json()
+        assert not (annotated_db.parent / "Dracula.annotations.json").exists()
+        assert not list(split_dir.glob("*.annotations.json"))
+
+    def test_an_unanswerable_single_file_base_still_uses_the_fallback(self, client, completed_setup, annotated_db):
+        # The control for the guard above: a book with no chapter-file rows has
+        # a real audio path to hang the sidecar off, so the fallback stands.
+        _login_session(client)
+        with (
+            mock.patch("audible_downloader.processing_logic.sidecar_base_for_tracked_book", return_value=None),
+            mock.patch("audible_downloader.routes.subprocess.run", side_effect=self._fake_run(writes_file=True)),
+        ):
+            response = client.post("/api/book/B001/annotations")
+        assert response.status_code == 200
+        assert annotated_db.with_name("Dracula.annotations.json").exists()

@@ -106,6 +106,19 @@ _SIDECAR_SUFFIXES = (
 # books, and rename_book_to_match_metadata preserves whatever it finds on disk.
 _AUDIO_EXTENSIONS = (".m4b", ".mp3", ".m4a")
 
+# How many ASIN-suffixed candidates an allocator will try before giving up and
+# using the last one it built. The first candidate is free in every realistic
+# library; the walk exists only so a taken suffixed name is never assumed free
+# (backlog #28), and the cap is there so a pathological directory can't spin.
+_SUFFIX_WALK_LIMIT = 100
+
+# The sidecar suffixes, longest first. Reading a file NAME back to the base it
+# hangs off has to match the longest suffix that fits, or "Title.metadata.json"
+# would be read as a base of "Title.metadata" under a ".json" that isn't even in
+# the list. Only used by _unique_sidecar_base; the forward direction (base ->
+# suffixes) has no such ambiguity.
+_SIDECAR_SUFFIXES_LONGEST_FIRST = tuple(sorted(_SIDECAR_SUFFIXES, key=len, reverse=True))
+
 
 def _sibling_audio_paths(base, ext):
     """
@@ -151,6 +164,184 @@ def _existing_sidecar_suffixes(base):
             found.add(suffix)
 
     return sorted(found)
+
+
+def _unique_sidecar_base(folder):
+    """
+    The one extension-stripped base inside `folder` that existing sidecar files
+    hang off, or None when there is nothing to go on.
+
+    A split book's sidecars keep the single-file-EQUIVALENT name (D9) inside the
+    book's folder, and that name is stored nowhere: `audiobooks.filepath` holds
+    the folder and `book_files` holds the parts, whose names come from a
+    different template entirely. Reading it back off the sidecars themselves is
+    what lets a rename move them and the annotations button find them.
+
+    None is returned both when the folder holds no sidecar at all and when it
+    holds sidecars under MORE than one base — two books sharing a folder is
+    exactly the ambiguity #20's shared-base guard exists for, and guessing which
+    base is ours would move (or delete) the other book's cover.
+
+    Only the exact suffixes in _SIDECAR_SUFFIXES count, so a chapter PART file is
+    never read as a sidecar however closely its name resembles the base.
+    """
+    try:
+        entries = os.listdir(folder)
+    except OSError:
+        return None
+
+    bases = set()
+    for entry in entries:
+        for suffix in _SIDECAR_SUFFIXES_LONGEST_FIRST:
+            # `len(entry) > len(suffix)` keeps a file that is ONLY a suffix
+            # (".pdf" with no name in front of it) from claiming an empty base.
+            if len(entry) > len(suffix) and entry.lower().endswith(suffix):
+                bases.add(os.path.join(folder, entry[: -len(suffix)]))
+                break
+
+    if len(bases) == 1:
+        return bases.pop()
+    if bases:
+        log.info(
+            f"SIDECARS: '{folder}' holds sidecar files under {len(bases)} different names; "
+            f"not guessing which of them belongs to the book."
+        )
+    return None
+
+
+def _tracked_part_paths(asin):
+    """
+    A book's split-part file paths in playback order, or an empty list when the
+    book isn't split. Reads through this module's own `get_db_connection` (rather
+    than db.get_book_files) so it follows the same connection the rest of the
+    file uses, and tolerates a database with no `book_files` table at all — a
+    hand-restored library.db is a real thing, and a missing child table must
+    never break a rename or a cleanup.
+    """
+    try:
+        with get_db_connection() as con:
+            rows = con.execute("SELECT filepath FROM book_files WHERE asin = ? ORDER BY part_index", (asin,)).fetchall()
+        return [row["filepath"] for row in rows if row["filepath"]]
+    except sqlite3.Error as e:
+        log.warning(f"Could not read the per-chapter file rows for {asin}: {e}")
+        return []
+
+
+def _tracked_path_owners():
+    """
+    Every audio path the database tracks, as `realpath -> {owning ASINs}`: the
+    `audiobooks.filepath` of each book PLUS every split book's part rows.
+
+    One book can now own many files, so "is this file still claimed by someone"
+    can no longer be answered from the parent table alone — the stale-file
+    cleanup consults this before deleting anything (#30), and the split-folder
+    allocator consults it before planning parts into a folder.
+
+    A SET of owners per path, not one owner, because the whole reason this exists
+    is the case where two rows name one file: an arbitrary last-one-wins answer
+    could name the asking book itself and wave the delete through.
+
+    Realpath-keyed so a symlinked alias of the output tree compares equal, and
+    read in one pass because libraries are small (the same reasoning as
+    _output_base_is_shared's row scan).
+    """
+    owners = {}
+    with get_db_connection() as con:
+        rows = list(con.execute("SELECT asin, filepath FROM audiobooks WHERE filepath IS NOT NULL").fetchall())
+        try:
+            rows += list(con.execute("SELECT asin, filepath FROM book_files").fetchall())
+        except sqlite3.Error as e:
+            log.warning(f"Could not read the per-chapter file rows while checking path ownership: {e}")
+    for row in rows:
+        if row["filepath"]:
+            owners.setdefault(os.path.realpath(row["filepath"]), set()).add(row["asin"])
+    return owners
+
+
+def _base_claimed_by_another_book(base, asin):
+    """
+    True when an audio file already sits at the extension-stripped `base` and is
+    not this book's own — the re-validation an ASIN-suffixed collision candidate
+    never used to get (#28): "<base>_<asin>" was built and used on the assumption
+    that nothing could possibly be there.
+
+    Deliberately cheap: filesystem existence plus one ownership lookup per file
+    that IS there, and no ffprobe. Callers hold the global reservation lock while
+    walking candidates, and the untracked case is judged conservatively (an
+    untracked file occupying the candidate counts as taken) rather than by
+    spawning a subprocess under that lock.
+    """
+    for ext in _AUDIO_EXTENSIONS:
+        candidate = f"{base}{ext}"
+        if not os.path.exists(candidate):
+            continue
+        if _path_owner(candidate) != asin:
+            return True
+    return False
+
+
+def _path_owner(path):
+    """
+    Which book tracks `path` — the `audiobooks` row first, then the split-part
+    rows — or None when nothing does. Compared by the stored path, not realpath:
+    this answers "is the row that names this exact file ours", which is how the
+    existing collision checks have always asked it.
+    """
+    try:
+        with get_db_connection() as con:
+            row = con.execute("SELECT asin FROM audiobooks WHERE filepath = ?", (path,)).fetchone()
+            if row:
+                return row["asin"]
+            row = con.execute("SELECT asin FROM book_files WHERE filepath = ?", (path,)).fetchone()
+        return row["asin"] if row else None
+    except sqlite3.Error as e:
+        log.warning(f"Could not check which book owns '{path}': {e}")
+        return None
+
+
+def _output_base_is_shared(asin, old_base, previous_reals):
+    """
+    True when something OTHER than this book's previous download still occupies
+    `old_base`, which makes the sidecars there jointly owned and unsafe to
+    delete or move. Libraries created before same-base collisions were prevented
+    can hold two books at one base under different audio extensions.
+
+    Three independent signals, any of which is enough:
+      1. Another audio file is still on disk at the base — anything from
+         _AUDIO_EXTENSIONS other than the previous file(s) this book just left.
+      2. Another audiobooks row is tracked at the same base, even if its file
+         is temporarily absent (a MISSING book still owns its cover/PDF).
+      3. Another book's split PART sits at that exact base — a chapter file can
+         legitimately render to the single-file-equivalent name, and it is as
+         much a claim on the base as a whole-book file is.
+
+    `previous_reals` is the realpath (or realpaths, for a split book's part set)
+    of the files this book itself had there, which are not a second owner.
+
+    The DB halves read every non-null filepath and compare bases in Python
+    rather than with a LIKE pattern: libraries are small, and a base name can
+    contain LIKE wildcards that would need escaping.
+    """
+    previous_reals = set(previous_reals or ())
+    for ext in _AUDIO_EXTENSIONS:
+        candidate = f"{old_base}{ext}"
+        if os.path.realpath(candidate) in previous_reals:
+            continue  # The previous download's own file, not a second book.
+        if os.path.exists(candidate):
+            return True
+
+    with get_db_connection() as con:
+        rows = con.execute("SELECT asin, filepath FROM audiobooks WHERE filepath IS NOT NULL").fetchall()
+        try:
+            rows = list(rows) + list(con.execute("SELECT asin, filepath FROM book_files").fetchall())
+        except sqlite3.Error as e:
+            log.warning(f"Could not read the per-chapter file rows while checking '{old_base}': {e}")
+    for row in rows:
+        if row["asin"] == asin or not row["filepath"]:
+            continue
+        if os.path.splitext(os.path.realpath(row["filepath"]))[0] == old_base:
+            return True
+    return False
 
 
 def _probe_duration_seconds(filepath, job_id=None):
@@ -565,6 +756,161 @@ def render_chapter_filename(
     return filename
 
 
+def _effective_naming_names(row, settings):
+    """
+    The (author, title) the naming templates render for a book: the user's custom
+    overrides when `naming.apply_custom_to_filenames` is on, the native Audible
+    values otherwise, each with its "Unknown ..." fallback.
+
+    One definition, three callers — PREPARE choosing the download's path, the
+    rename that reconciles a metadata edit, and the sidecar-base lookup that has
+    to re-derive a split book's single-file-equivalent name. They must agree, or
+    a rename would move a book onto a name the downloader would never have
+    chosen.
+    """
+    author = row["author"] or "Unknown Author"
+    title = row["title"] or "Unknown Title"
+    if settings.get("naming", {}).get("apply_custom_to_filenames", False):
+        author = row["custom_author"] or author
+        title = row["custom_title"] or title
+    return author, title
+
+
+def _split_folder_and_stem(base_root, collision_suffix, asin, quiet=False):
+    """
+    Where a split book's parts and sidecars go, from the extension-stripped root
+    of its single-file-equivalent path. Returns `(folder, stem)` — the folder
+    BEFORE any collision suffix is applied, and the single-file-equivalent stem
+    the sidecars use (D9).
+
+    Two rules, in this order:
+
+    1. **D5 flat-template guard.** The parts normally share the folder the book
+       naming template already produced, next to the sidecars. When that folder
+       is the bare output root, a 40-chapter book would dump 40 files into
+       /data, so it gets a subfolder named from the rendered single-file base.
+    2. **D12 currency.** A split book reserves (and its sidecars use) the same
+       single-file-equivalent base as an unsplit one, but it disambiguates a
+       collision on its FOLDER rather than its filename: part names are rendered
+       from the chapter template and carry none of the book base, so two
+       same-title books splitting into one folder would collide file-for-file no
+       matter what the reserved filename says. `collision_suffix` — the
+       "_<asin>" the reservation appended, if any — is therefore stripped back
+       off the stem here and applied to the folder by the caller, which is also
+       the only place that can walk to the next candidate.
+
+    `quiet` silences the guard's log line for callers that are only ASKING where
+    a book's files would go rather than placing any: the annotations button's
+    sidecar-base lookup runs this on every press, and announcing a placement
+    that isn't happening into a user-downloadable app.log is just noise.
+
+    Pure: no filesystem, no database, no settings.
+    """
+    stem = os.path.basename(base_root)
+    folder = os.path.dirname(base_root)
+
+    if collision_suffix and stem.endswith(collision_suffix):
+        unsuffixed = stem[: -len(collision_suffix)]
+        # A stem that is ONLY the suffix would leave the book nameless; keep the
+        # suffixed spelling in that (unreachable in practice) case.
+        if unsuffixed:
+            stem = unsuffixed
+
+    if os.path.abspath(folder) == os.path.abspath("/data"):
+        folder = os.path.join(folder, stem)
+        if not quiet:
+            log.info(
+                f"NAMING ({asin}): The naming template puts this book in the output root; "
+                f"placing its chapter files in the '{stem}' subfolder instead."
+            )
+
+    return folder, stem
+
+
+def sidecar_base_for_tracked_book(asin):
+    """
+    Where a tracked book's sidecars live, answered from the database and the
+    disk rather than from a running conversion. Returns the extension-stripped
+    base, or None when the book has no tracked path at all.
+
+    The processor's own `_sidecar_base` can read this off the path it just
+    reserved; anything that meets a book later (the on-demand annotations
+    button) has only the DB row, where a split book's `filepath` is its FOLDER
+    (D3) and the single-file-equivalent stem is not recorded anywhere. So for a
+    split book the stem is recovered in two steps: the sidecars already in the
+    folder decide it when they are unambiguous, and otherwise it is re-rendered
+    from the naming template exactly as the download would have rendered it.
+
+    A single-file book is answered from its own path alone — no naming columns
+    are even read — so the common case stays one narrow query.
+    """
+    with get_db_connection() as con:
+        row = con.execute("SELECT filepath FROM audiobooks WHERE asin = ?", (asin,)).fetchone()
+    if not row or not row["filepath"]:
+        return None
+
+    filepath = row["filepath"]
+    parts = _tracked_part_paths(asin)
+    if not parts:
+        return os.path.splitext(filepath)[0]
+
+    existing_base = _unique_sidecar_base(filepath)
+    if existing_base:
+        return existing_base
+    return _rendered_split_sidecar_base(asin, filepath, parts)
+
+
+def _rendered_split_sidecar_base(asin, folder, part_paths):
+    """
+    The single-file-equivalent base for a split book with no sidecar on disk to
+    read it off: re-render the book naming template exactly as the download
+    would have, and take the stem into the folder the book is tracked at today
+    (which is authoritative even if the template has changed since).
+
+    Returns None if the book's metadata can't be read, leaving the caller to
+    decide its own fallback — a cosmetic placement question must not raise.
+    """
+    settings = load_settings()
+    try:
+        with get_db_connection() as con:
+            row = con.execute(
+                "SELECT author, title, narrator, publisher, custom_title, custom_author, "
+                "series, series_sequence, release_date, language "
+                "FROM audiobooks WHERE asin = ?",
+                (asin,),
+            ).fetchone()
+    except sqlite3.Error as e:
+        log.warning(f"Could not read the naming metadata for {asin}: {e}")
+        return None
+    if not row:
+        return None
+
+    # The parts' own extension is the book's real format (an MP3 split book must
+    # not be re-rendered as ".m4b" — the extension changes nothing about the stem
+    # today, but it is what the template was rendered with).
+    ext = os.path.splitext(part_paths[0])[1] or ".m4b"
+    author, title = _effective_naming_names(row, settings)
+    base_root = os.path.splitext(
+        build_base_output_path(
+            settings,
+            asin,
+            author,
+            title,
+            row["narrator"],
+            row["publisher"],
+            ext=ext,
+            series=row["series"],
+            series_sequence=row["series_sequence"],
+            release_date=row["release_date"],
+            language=row["language"],
+        )
+    )[0]
+    # quiet: this is a read-only lookup — it throws the folder away and keeps
+    # only the stem, so the flat-template guard has nothing to announce.
+    _folder, stem = _split_folder_and_stem(base_root, "", asin, quiet=True)
+    return os.path.join(folder, stem)
+
+
 def _cleanup_empty_dirs(directory):
     """Remove `directory` and any now-empty parents up to (not including)
     /data. Best-effort: stops at the first non-empty or unremovable dir."""
@@ -578,6 +924,71 @@ def _cleanup_empty_dirs(directory):
         directory = os.path.dirname(directory)
 
 
+def _first_free_suffixed_base(base, safe_asin, asin, own_base=None):
+    """
+    The first name in the collision sequence that nothing else holds:
+    "<base>_<asin>", then "<base>_<asin>_2", "_3", ... — the same shape
+    `import_logic._first_free_output_path` uses for uploads, in the
+    extension-stripped currency the download/rename allocators reserve in.
+
+    This is backlog #28: both allocators used to build "<base>_<asin>" and use it
+    without re-checking anything, on the reasoning that an ASIN is unique. It
+    isn't a name: a hand-crafted custom title, a second collision, or simply an
+    existing file at that name would have been silently overwritten.
+
+    "Held" means an in-flight reservation or an audio file on disk that belongs
+    to another book. `own_base` is this book's current base, which never blocks
+    it — a book already sitting at its suffixed name must re-derive that same
+    name so the caller can recognize the no-op.
+
+    MUST be called with `_reservation_lock` held (it reads the reservation set),
+    which is also why the on-disk half never probes: see
+    `_base_claimed_by_another_book`.
+    """
+    for attempt in range(1, _SUFFIX_WALK_LIMIT + 1):
+        candidate = f"{base}_{safe_asin}" if attempt == 1 else f"{base}_{safe_asin}_{attempt}"
+        if candidate == own_base:
+            return candidate
+        if candidate in _reserved_output_paths:
+            continue
+        if _base_claimed_by_another_book(candidate, asin):
+            continue
+        return candidate
+
+    # Only reachable with 100 occupied "<base>_<asin>_N" names, i.e. a
+    # deliberately hostile directory. Be honest about what this fallback is:
+    # the FIRST candidate the walk rejected, handed back unprotected. Nothing
+    # downstream re-checks it — `_reserve_output_path` ran `_existing_file_is_
+    # foreign` against the UNsuffixed path before taking the lock and never
+    # re-runs it here, and the promotion's `os.replace` is atomic but
+    # destructive, not a refusal. So writing to this name can overwrite whatever
+    # holds it, and the warning below is the only signal that happened.
+    log.warning(
+        f"NAMING ({asin}): Could not find a free name after {_SUFFIX_WALK_LIMIT} attempts at '{base}'; "
+        f"falling back to the plain ASIN-suffixed name."
+    )
+    return f"{base}_{safe_asin}"
+
+
+def _undo_moves(asin, moves):
+    """
+    Put a rename's moves back, best-effort: `moves` is the (source, destination)
+    pairs that actually happened, and each is moved destination -> source again.
+
+    Only used when the database write FAILS after the files have already moved.
+    Leaving them where they landed would point the row at a location holding
+    nothing, with no later step to reconcile it — the book reads as MISSING while
+    its files sit intact somewhere else. So the files follow the database rather
+    than the other way round. A put-back that itself fails is logged at ERROR and
+    the remaining ones are still attempted: one stranded file beats all of them.
+    """
+    for source, destination in moves:
+        try:
+            shutil.move(destination, source)
+        except OSError as e:
+            log.error(f"RENAME ({asin}): Could not put '{destination}' back to '{source}': {e}")
+
+
 def rename_book_to_match_metadata(asin):
     """
     When the apply_custom_to_filenames setting is on, rename a downloaded book's
@@ -586,6 +997,9 @@ def rename_book_to_match_metadata(asin):
     Returns the new path if a rename happened, else None. Collision-safe (never
     overwrites a different book — it appends the ASIN instead), and best-effort:
     any problem is logged rather than raised, so the metadata edit still stands.
+
+    A book split into per-chapter files has no single file to rename, so it is
+    handed to `_rename_split_book`, which moves the whole set.
     """
     settings = load_settings()
     if not settings.get("naming", {}).get("apply_custom_to_filenames", False):
@@ -601,13 +1015,16 @@ def rename_book_to_match_metadata(asin):
     if not row or row["status"] != "DOWNLOADED" or not row["filepath"]:
         return None
 
+    part_paths = _tracked_part_paths(asin)
+    if part_paths:
+        return _rename_split_book(asin, row, settings, part_paths)
+
     current_path = row["filepath"]
     if not os.path.exists(current_path):
         log.warning(f"RENAME ({asin}): Tracked file '{current_path}' is missing; skipping rename.")
         return None
 
-    author = row["custom_author"] or row["author"] or "Unknown Author"
-    title = row["custom_title"] or row["title"] or "Unknown Title"
+    author, title = _effective_naming_names(row, settings)
     # Preserve the file's real extension (an MP3 book must stay ".mp3", not be
     # relabeled ".m4b" by build_base_output_path's default).
     ext = os.path.splitext(current_path)[1] or ".m4b"
@@ -642,9 +1059,7 @@ def rename_book_to_match_metadata(asin):
     for candidate in occupied_candidates:
         if not os.path.exists(candidate):
             continue
-        with get_db_connection() as con:
-            other = con.execute("SELECT asin FROM audiobooks WHERE filepath = ?", (candidate,)).fetchone()
-        if not other or other["asin"] != asin:
+        if _path_owner(candidate) != asin:
             collision = True
             break
 
@@ -659,8 +1074,14 @@ def rename_book_to_match_metadata(asin):
             log.info(f"RENAME ({asin}): Target name is claimed by an in-flight book. Appending unique ID.")
             collision = True
         if collision:
-            target = f"{target_root}_{_sanitize_filename(asin)}{target_ext}"
-            target_root = os.path.splitext(target)[0]
+            # #28: the suffixed name is re-validated rather than assumed free —
+            # "<base>_<asin>" can itself be taken (by a reservation, or by a file
+            # on disk under any audio extension), in which case the walk moves on
+            # to "_2", "_3", ... The book's OWN current path never blocks it.
+            target_root = _first_free_suffixed_base(
+                target_root, _sanitize_filename(asin), asin, own_base=os.path.splitext(current_path)[0]
+            )
+            target = f"{target_root}{target_ext}"
         reserved_base = target_root
         # Only release in the `finally` what this call actually claimed. The
         # suffixed target can already be reserved — by this same book's in-flight
@@ -694,30 +1115,59 @@ def rename_book_to_match_metadata(asin):
         # uppercase); only the base name changes.
         old_base = os.path.splitext(current_path)[0]
         new_base = os.path.splitext(target)[0]
-        for suffix in _existing_sidecar_suffixes(old_base):
-            old_sidecar = f"{old_base}{suffix}"
-            try:
-                shutil.move(old_sidecar, f"{new_base}{suffix}")
-            except OSError as e:
-                log.warning(f"RENAME ({asin}): Could not move sidecar '{old_sidecar}': {e}")
-        with get_db_connection() as con:
-            # is_duplicate is written explicitly, exactly as the download path's
-            # _finalize_success writes it: `collision` is the live answer to "did
-            # this name need the ASIN suffix", so a rename onto a taken name flags
-            # the book and a rename onto a free one clears a stale flag.
-            con.execute(
-                "UPDATE audiobooks SET filepath = ?, is_duplicate = ? WHERE asin = ?",
-                (target, int(collision), asin),
+        # ...but only when nothing ELSE still lives at the old base (#20). This is
+        # the guard the stale-file cleanup has always had and this path never did:
+        # two books can legitimately share one extension-stripped base under
+        # different audio extensions (pre-existing libraries, or an upload), and
+        # those sidecars may be the other book's ONLY cover/PDF/cue — walking off
+        # with them is as destructive as deleting them.
+        moved_sidecars = []
+        if _output_base_is_shared(asin, os.path.realpath(old_base), {os.path.realpath(current_path)}):
+            log.info(
+                f"RENAME ({asin}): Left the sidecars at '{old_base}' where they are — "
+                f"the base is still in use by another book."
             )
-            con.commit()
+        else:
+            for suffix in _existing_sidecar_suffixes(old_base):
+                old_sidecar = f"{old_base}{suffix}"
+                try:
+                    shutil.move(old_sidecar, f"{new_base}{suffix}")
+                    moved_sidecars.append((old_sidecar, f"{new_base}{suffix}"))
+                except OSError as e:
+                    log.warning(f"RENAME ({asin}): Could not move sidecar '{old_sidecar}': {e}")
+        try:
+            with get_db_connection() as con:
+                # is_duplicate is written explicitly, exactly as the download path's
+                # _finalize_success writes it: `collision` is the live answer to "did
+                # this name need the ASIN suffix", so a rename onto a taken name flags
+                # the book and a rename onto a free one clears a stale flag.
+                con.execute(
+                    "UPDATE audiobooks SET filepath = ?, is_duplicate = ? WHERE asin = ?",
+                    (target, int(collision), asin),
+                )
+                con.commit()
+        except sqlite3.Error as e:
+            # The files are already at their new home and the row still names the
+            # old one — the one state this function must never leave behind, since
+            # nothing later reconciles it: the book reads as MISSING on the next
+            # Verify while its files sit intact one directory away. Put the move
+            # back so the database stays true, and say so at ERROR: unlike every
+            # other warning here, this one describes work that was undone.
+            log.error(
+                f"RENAME ({asin}): Could not record the rename in the database: {e}. "
+                f"Putting the file(s) back where the database says they are."
+            )
+            _undo_moves(asin, [(current_path, target), *moved_sidecars])
+            return None
         log.info(f"RENAME ({asin}): Moved file to '{target}'.")
         _cleanup_empty_dirs(os.path.dirname(current_path))
         return target
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, sqlite3.Error) as e:
         # ValueError as well as OSError: a control character (a NUL byte in a
         # custom title survives _sanitize_filename) makes os.makedirs raise
         # "embedded null byte", and this is called after the metadata edit has
-        # already been committed — it must never escape as a 500.
+        # already been committed — it must never escape as a 500. A database
+        # error (a locked library.db) is caught for the same reason.
         log.warning(f"RENAME ({asin}): Could not rename file(s): {e}")
         return None
     finally:
@@ -727,6 +1177,252 @@ def rename_book_to_match_metadata(asin):
         if claimed_reservation:
             with _reservation_lock:
                 _reserved_output_paths.discard(reserved_base)
+
+
+def _split_paths_are_claimed(paths, asin, owners, is_foreign=None):
+    """
+    True when any of `paths` is claimed by a book other than `asin`.
+
+    `owners` is a `_tracked_path_owners()` map, so a path tracked under another
+    ASIN — as that book's own file OR as one of its chapter parts — settles it
+    immediately. An UNTRACKED file sitting exactly where one of these paths would
+    go is judged by `is_foreign(path)` when the caller supplies one (the
+    downloader can afford to read the embedded ASIN tag and recognize its own
+    orphaned output); with no callable, an untracked occupant counts as claimed,
+    which is the safe answer for a request thread that must not spawn ffprobe.
+    """
+    for path in paths:
+        claimants = owners.get(os.path.realpath(path))
+        if claimants:
+            if claimants - {asin}:
+                return True
+            continue  # Our own file; not a claim against us.
+        if not os.path.exists(path):
+            continue
+        if is_foreign is None or is_foreign(path):
+            return True
+    return False
+
+
+def _rename_split_book(asin, row, settings, part_paths):
+    """
+    The multi-file form of `rename_book_to_match_metadata`: move a split book's
+    whole set — folder, chapter files and sidecars — to match its current
+    effective metadata, and update `audiobooks.filepath` and the `book_files`
+    rows in ONE transaction so the two can never disagree.
+
+    What is recomputed and what is not:
+
+    - The **folder** and the **sidecar stem** are re-rendered from the naming
+      template, exactly as a fresh download would render them (D5's flat-template
+      guard included).
+    - The **part filenames are kept as they are.** They were rendered from
+      `naming.chapter_file_template` against each chapter's own title, and
+      chapter titles are not persisted anywhere (D3 records paths, not chapters)
+      — re-rendering them here would mean re-fetching the title's chapter list
+      from Audible inside a metadata-edit request. Keeping the names is lossless:
+      the book stays coherent, and a re-download re-renders everything.
+
+    Collision handling follows D12: the reservation currency is still the
+    single-file-equivalent base, but the disambiguating ASIN suffix goes on the
+    FOLDER, because the part filenames carry none of that base and two same-title
+    books would otherwise collide file-for-file.
+
+    Best-effort like the single-file path: a failed move is rolled back, and a
+    move that succeeds only for the database write to fail is rolled back too,
+    so the rows and the files never end up describing different places.
+    """
+    current_folder = row["filepath"]
+    if not os.path.isdir(current_folder):
+        log.warning(f"RENAME ({asin}): Tracked folder '{current_folder}' is missing; skipping rename.")
+        return None
+    if not any(os.path.exists(path) for path in part_paths):
+        log.warning(f"RENAME ({asin}): None of the tracked chapter files are on disk; skipping rename.")
+        return None
+
+    author, title = _effective_naming_names(row, settings)
+    # The parts' own extension is the book's real format; build_base_output_path
+    # would otherwise relabel an MP3 split book ".m4b".
+    ext = os.path.splitext(part_paths[0])[1] or ".m4b"
+    target = build_base_output_path(
+        settings,
+        asin,
+        author,
+        title,
+        row["narrator"],
+        row["publisher"],
+        ext=ext,
+        series=row["series"],
+        series_sequence=row["series_sequence"],
+        release_date=row["release_date"],
+        language=row["language"],
+    )
+    target_root, target_ext = os.path.splitext(target)
+    folder_root, stem = _split_folder_and_stem(target_root, "", asin)
+
+    # "Taken" is judged on the extension-stripped base for the same reason the
+    # single-file path judges it there: that base is where this book's sidecars
+    # will go, so a foreign book holding it under any audio extension collides.
+    collision = False
+    for candidate in [target] + _sibling_audio_paths(target_root, target_ext):
+        if os.path.exists(candidate) and _path_owner(candidate) != asin:
+            collision = True
+            break
+
+    owners = _tracked_path_owners()
+    with _reservation_lock:
+        if target_root in _reserved_output_paths:
+            log.info(f"RENAME ({asin}): Target name is claimed by an in-flight book. Appending unique ID.")
+            collision = True
+
+        # D12: walk the FOLDER, not the filename. Attempt 0 is the plain folder,
+        # which is skipped outright when the base already collided; every later
+        # attempt is re-validated against the part paths it would produce (#28).
+        safe_asin = _sanitize_filename(asin)
+        new_folder = None
+        for attempt in range(1 if collision else 0, _SUFFIX_WALK_LIMIT + 1):
+            if attempt == 0:
+                candidate_folder = folder_root
+            elif attempt == 1:
+                candidate_folder = f"{folder_root}_{safe_asin}"
+            else:
+                candidate_folder = f"{folder_root}_{safe_asin}_{attempt}"
+            if os.path.abspath(candidate_folder) == os.path.abspath(current_folder):
+                new_folder = candidate_folder  # Where the book already is.
+                break
+            # A folder an in-flight DOWNLOAD has already claimed is taken even
+            # though nothing is on disk or in `book_files` yet. This is the
+            # currency both allocators share: the download's own folder walk
+            # (`_first_free_split_folder`) claims and checks the FOLDER path
+            # too, because the filename base each of them reserves alongside it
+            # spells a collision differently ("<folder>/<stem>_<asin>" during a
+            # download, "<folder>_<asin>/<stem>" here) and so can never match.
+            if candidate_folder in _reserved_output_paths:
+                log.info(f"RENAME ({asin}): Folder '{candidate_folder}' is claimed by an in-flight book.")
+                continue
+            candidate_parts = [os.path.join(candidate_folder, os.path.basename(p)) for p in part_paths]
+            if not _split_paths_are_claimed(candidate_parts, asin, owners):
+                new_folder = candidate_folder
+                if attempt:
+                    collision = True
+                break
+        if new_folder is None:
+            log.warning(f"RENAME ({asin}): Could not find a free folder for the chapter files; skipping rename.")
+            return None
+
+        # Two claims, released together: the FOLDER (the shared currency above)
+        # and the single-file-equivalent base inside it, which is where this
+        # book's sidecars land and what an unsplit book's reservation collides
+        # with. Same rule as the single-file path — only release what we
+        # actually took, since either can already be held by this book's own
+        # in-flight re-download and a set add is silently a no-op there.
+        reserved_base = os.path.join(new_folder, stem)
+        claimed_reservations = [claim for claim in (new_folder, reserved_base) if claim not in _reserved_output_paths]
+        _reserved_output_paths.update(claimed_reservations)
+
+    try:
+        old_base = _unique_sidecar_base(current_folder)
+        new_base = os.path.join(new_folder, stem)
+        folder_moved = os.path.abspath(new_folder) != os.path.abspath(current_folder)
+        base_moved = old_base is not None and os.path.abspath(old_base) != os.path.abspath(new_base)
+        if not folder_moved and not base_moved:
+            return None  # Everything is already where the current metadata wants it.
+
+        new_parts = list(part_paths)
+        if folder_moved:
+            os.makedirs(new_folder, exist_ok=True)
+            new_parts = _move_split_parts(asin, part_paths, new_folder)
+            if new_parts is None:
+                return None  # The move failed and was rolled back; nothing changed.
+
+        moved_sidecars = []
+        if base_moved:
+            # The #20 guard, same as the single-file path: another book's
+            # sidecars may share this base, and they are not ours to move.
+            if _output_base_is_shared(asin, os.path.realpath(old_base), {os.path.realpath(p) for p in part_paths}):
+                log.info(
+                    f"RENAME ({asin}): Left the sidecars at '{old_base}' where they are — "
+                    f"the base is still in use by another book."
+                )
+            else:
+                for suffix in _existing_sidecar_suffixes(old_base):
+                    old_sidecar = f"{old_base}{suffix}"
+                    try:
+                        shutil.move(old_sidecar, f"{new_base}{suffix}")
+                        moved_sidecars.append((old_sidecar, f"{new_base}{suffix}"))
+                    except OSError as e:
+                        log.warning(f"RENAME ({asin}): Could not move sidecar '{old_sidecar}': {e}")
+
+        try:
+            with get_db_connection() as con:
+                # One transaction for the folder and the part rows (D3): a reader must
+                # never see the book pointing at the new folder while its parts still
+                # name the old one.
+                con.execute(
+                    "UPDATE audiobooks SET filepath = ?, is_duplicate = ? WHERE asin = ?",
+                    (new_folder, int(collision), asin),
+                )
+                replace_book_files(asin, new_parts, con=con)
+                con.commit()
+        except sqlite3.Error as e:
+            # Everything has already moved and the rows still name the old folder
+            # — the divergence nothing downstream repairs (the book reads as
+            # MISSING on the next Verify while N intact chapter files sit one
+            # directory away). Undo the move so the database stays true; ERROR
+            # rather than WARNING because this describes work being taken back.
+            log.error(
+                f"RENAME ({asin}): Could not record the move in the database: {e}. "
+                f"Putting the chapter files and sidecars back where the database says they are."
+            )
+            _undo_moves(asin, moved_sidecars)
+            if folder_moved:
+                # The same rollback the move half already uses, run in reverse:
+                # every part keeps its own name, so moving the new set back into
+                # the old folder restores exactly what was there.
+                _move_split_parts(asin, new_parts, current_folder)
+                _cleanup_empty_dirs(new_folder)
+            return None
+
+        log.info(f"RENAME ({asin}): Moved {len(new_parts)} chapter file(s) to '{new_folder}'.")
+        if folder_moved:
+            _cleanup_empty_dirs(current_folder)
+        return new_folder
+    except (OSError, ValueError, sqlite3.Error) as e:
+        log.warning(f"RENAME ({asin}): Could not rename the chapter files: {e}")
+        return None
+    finally:
+        if claimed_reservations:
+            with _reservation_lock:
+                _reserved_output_paths.difference_update(claimed_reservations)
+
+
+def _move_split_parts(asin, part_paths, new_folder):
+    """
+    Move every chapter file into `new_folder`, keeping each file's own name.
+    Returns the new paths, or None when a move failed — in which case everything
+    already moved is put back, so a partly-renamed book never reaches the
+    database. A part that is missing from disk is carried over to the new list
+    without a move: the row keeps pointing where the file WOULD be, which is
+    where a repair download will write it.
+    """
+    moved = []
+    new_parts = []
+    try:
+        for old_path in part_paths:
+            new_path = os.path.join(new_folder, os.path.basename(old_path))
+            if os.path.exists(old_path):
+                shutil.move(old_path, new_path)
+                moved.append((old_path, new_path))
+            new_parts.append(new_path)
+        return new_parts
+    except OSError as e:
+        log.warning(f"RENAME ({asin}): Could not move chapter file: {e}. Putting the moved files back.")
+        for old_path, new_path in moved:
+            try:
+                shutil.move(new_path, old_path)
+            except OSError as undo_error:
+                log.error(f"RENAME ({asin}): Could not put '{new_path}' back to '{old_path}': {undo_error}")
+        return None
 
 
 def build_metadata_json(book_info, title_override=None):
@@ -861,9 +1557,25 @@ class BookProcessor:
         # is the folder holding them, and what `audiobooks.filepath` records.
         self.split_part_paths = []
         self.split_output_dir = None
+        # The single-file-equivalent base a split book's sidecars hang off (D9),
+        # decided with the folder in _plan_split_output. Only the planner can
+        # know it: a collision moves the ASIN suffix onto the folder, so the
+        # reserved filename's stem is no longer the sidecar stem.
+        self.split_sidecar_base = None
+        # The folder claim this book took in `_reserved_output_paths` (D12/W3),
+        # or None when it took none. A split book's parts are disambiguated by
+        # their FOLDER, so the folder — not just the reserved filename base — is
+        # what two concurrent allocators have to be able to see each other take;
+        # recorded here so `run`'s release discards exactly what was added.
+        self.split_folder_reservation = None
         # Set True when a same-author+title collision forced an ASIN suffix onto
         # our filename; persisted to the DB on success so the UI can flag it.
         self.is_duplicate = False
+        # The suffix that collision actually appended ("_B00XYZ", or "_B00XYZ_2"
+        # if even that was taken), empty when the name came out clean. A split
+        # book moves it from the filename to the FOLDER (D12), which is the only
+        # place a per-chapter set can be disambiguated.
+        self.collision_suffix = ""
         # The user's custom title for this book, read once during PREPARE. The
         # sidecar writers need it to match the embedded tags, which always
         # prefer it over the Audible title.
@@ -1001,11 +1713,21 @@ class BookProcessor:
                 collision = True
 
             if collision:
-                final_path = f"{base}_{safe_asin}{ext}"
+                # #28: the suffixed name is re-validated instead of assumed free.
+                # "<base>_<asin>" can be reserved by this book's own in-flight run
+                # or occupied on disk by something that isn't ours, in which case
+                # the walk moves on to "_2", "_3", ...
+                final_base = _first_free_suffixed_base(base, safe_asin, self.asin)
+                final_path = f"{final_base}{ext}"
+                # What the suffix actually is, for _plan_split_output: a SPLIT
+                # book disambiguates on its folder, not its filename (D12), so it
+                # has to be able to take this back off the stem.
+                self.collision_suffix = final_base[len(base) :]
             else:
                 final_path = base_output_path
+                final_base = base
 
-            _reserved_output_paths.add(os.path.splitext(final_path)[0])
+            _reserved_output_paths.add(final_base)
 
         self.is_duplicate = collision
         return final_path
@@ -1140,10 +1862,15 @@ class BookProcessor:
         finally:
             # Release our claimed output name so it is available again (e.g. for
             # a later re-download of this same book). Reservations are keyed by
-            # the extension-stripped base, so release the same way.
-            if self.final_output_path:
-                with _reservation_lock:
+            # the extension-stripped base, so release the same way — plus the
+            # split book's folder claim, which is a second entry in the same set
+            # and would otherwise keep every re-download of this book walking to
+            # a suffixed folder for the life of the process.
+            with _reservation_lock:
+                if self.final_output_path:
                     _reserved_output_paths.discard(os.path.splitext(self.final_output_path)[0])
+                if self.split_folder_reservation:
+                    _reserved_output_paths.discard(self.split_folder_reservation)
             log.info(f"PROCESSOR ({self.asin}): Finished run method.")
 
     def _prepare_and_spawn_encode_tasks(self):
@@ -1176,12 +1903,10 @@ class BookProcessor:
             self.custom_title = book_details["custom_title"]
 
             # The custom title/author drive the filename only when the user has
-            # opted in; otherwise names come from the native Audible values.
-            author = book_details["author"] or "Unknown Author"
-            title = book_details["title"] or "Unknown Title"
-            if settings.get("naming", {}).get("apply_custom_to_filenames", False):
-                author = book_details["custom_author"] or author
-                title = book_details["custom_title"] or title
+            # opted in; otherwise names come from the native Audible values. The
+            # rule lives in _effective_naming_names so the rename path (and the
+            # sidecar-base lookup) can never decide it differently.
+            author, title = _effective_naming_names(book_details, settings)
 
             # The output format is the single axis that decides the container:
             # "mp3" writes a .mp3, everything else ("original" remux / "m4b"
@@ -1371,6 +2096,15 @@ class BookProcessor:
         guard logs a warning, and rendering N parts from a raw template would log
         it N times (backlog #37).
 
+        Collisions (D12): the reserved single-file path may already carry an ASIN
+        suffix on its FILENAME, which does nothing for a split book — the parts
+        are named from the chapter template and carry none of that base, so two
+        same-title books would still write the identical part names into the
+        identical folder. `_split_folder_and_stem` therefore takes the suffix
+        back off the stem, and the folder walk below puts it on the folder,
+        re-validating each candidate against the part paths it would produce
+        (#28) rather than assuming the first one is free.
+
         Note the two index bases in the loop below: `{ch}` is 1-based (part 1 of
         12 renders "01"), while the list position that becomes
         `book_files.part_index` is 0-based. They are deliberately not the same
@@ -1398,17 +2132,10 @@ class BookProcessor:
         # off the chunk extension) stays correct in both flip directions.
         base_root = os.path.splitext(self.final_output_path)[0]
         ext = ".mp3" if (self.context.get("split_encode_mode") or "aac") == "mp3" else ".m4b"
-        folder = os.path.dirname(base_root)
-        base_stem = os.path.basename(base_root)
-        if os.path.abspath(folder) == os.path.abspath("/data"):
-            folder = os.path.join(folder, base_stem)
-            log.info(
-                f"TASK-PREPARE ({self.asin}): The naming template puts this book in the output root; "
-                f"placing its chapter files in the '{base_stem}' subfolder instead."
-            )
+        folder_root, base_stem = _split_folder_and_stem(base_root, self.collision_suffix, self.asin)
 
         total = len(chapters)
-        paths = []
+        part_stems = []
         for index, chapter in enumerate(chapters):
             stem = render_chapter_filename(
                 template,
@@ -1426,12 +2153,125 @@ class BookProcessor:
                 language=book_details["language"],
                 truncate_subtitle=naming.get("truncate_subtitle", False),
             )
-            paths.append(os.path.join(folder, f"{stem}{ext}"))
+            part_stems.append(stem)
+
+        folder = self._first_free_split_folder(folder_root, part_stems, ext)
+        paths = [os.path.join(folder, f"{stem}{ext}") for stem in part_stems]
 
         os.makedirs(folder, exist_ok=True)
         self.split_output_dir = folder
         self.split_part_paths = paths
+        # The sidecars follow the parts into whichever folder was free, keeping
+        # the single-file-equivalent stem (D9). Held on the processor because
+        # nothing else can re-derive it: the folder may carry a collision suffix
+        # the stem does not.
+        self.split_sidecar_base = os.path.join(folder, base_stem)
         log.info(f"TASK-PREPARE ({self.asin}): Will write {total} chapter file(s) into '{folder}'.")
+
+    def _first_free_split_folder(self, folder_root, part_stems, ext):
+        """
+        The folder this book's chapter files can safely be written into:
+        `folder_root`, and if another book already claims the part paths that
+        would produce, "<folder_root>_<asin>", "<folder_root>_<asin>_2", ...
+        (D12 — a split book disambiguates on its folder).
+
+        The walk starts one step in when the reservation already found a
+        collision on the single-file-equivalent base, because that suffix is
+        exactly what this is applying; otherwise the plain folder is tried first,
+        which is what every ordinary book gets.
+
+        "Claimed" is judged per planned part path, not per folder: a naming
+        template that gives every book of an author the same folder is normal,
+        and the parts of two DIFFERENT titles sitting in it collide with nothing.
+
+        ...but "claimed" also means an in-flight reservation, and the FOLDER is
+        the only currency that can carry it. Two books whose naming template
+        renders different single-file bases can still render the SAME folder
+        ("{author}/{title}/{title} - {narrator}" and two editions of one title),
+        so neither one's filename reservation sees the other while their
+        identically-named parts would land on top of each other. The chosen
+        folder is therefore claimed in `_reserved_output_paths` alongside the
+        filename base, in the same spelling `_rename_split_book` checks and
+        claims — one currency, both allocators.
+        """
+        owners = _tracked_path_owners()
+        safe_asin = _sanitize_filename(self.asin)
+        # This book's OWN filename reservation, which is never a claim against
+        # it. The two are the same string whenever D5's flat guard fires: the
+        # reserved base is "/data/Dracula" and the invented folder is
+        # "/data/Dracula" too, so without this every flat-template split book
+        # would collide with itself and walk straight to a suffixed folder.
+        own_reservation = os.path.splitext(self.final_output_path)[0]
+        for attempt in range(1 if self.collision_suffix else 0, _SUFFIX_WALK_LIMIT + 1):
+            if attempt == 0:
+                candidate = folder_root
+            elif attempt == 1:
+                candidate = f"{folder_root}_{safe_asin}"
+            else:
+                candidate = f"{folder_root}_{safe_asin}_{attempt}"
+            ours_already = candidate == own_reservation
+            # The cheap test first, and on its own: `_split_paths_are_claimed`
+            # below may run an ffprobe per untracked occupant, and holding the
+            # global reservation lock across a subprocess would serialize every
+            # other book's PREPARE (the same reasoning `_reserve_output_path`
+            # states for doing its disk/DB work outside the lock).
+            with _reservation_lock:
+                already_claimed = not ours_already and candidate in _reserved_output_paths
+            if already_claimed:
+                log.info(
+                    f"TASK-PREPARE ({self.asin}): Folder '{candidate}' is claimed by another in-flight "
+                    f"book; trying the next folder name."
+                )
+                continue
+            paths = [os.path.join(candidate, f"{stem}{ext}") for stem in part_stems]
+            if _split_paths_are_claimed(paths, self.asin, owners, is_foreign=self._existing_file_is_foreign):
+                log.info(
+                    f"TASK-PREPARE ({self.asin}): Chapter files would collide with another book's in "
+                    f"'{candidate}'; trying the next folder name."
+                )
+                continue
+            # Nothing to take when the folder IS our filename reservation —
+            # `run` already releases that one, and claiming it again would
+            # record a second copy of the same string.
+            if not ours_already and not self._claim_split_folder(candidate):
+                # Another book took it while we were probing — the check above
+                # is a fast path, this is the atomic one.
+                log.info(
+                    f"TASK-PREPARE ({self.asin}): Folder '{candidate}' was claimed while it was being "
+                    f"checked; trying the next folder name."
+                )
+                continue
+            if attempt:
+                # The book needed a unique name after all, whatever the filename
+                # reservation concluded — the UI's duplicate badge follows this.
+                self.is_duplicate = True
+            return candidate
+
+        log.warning(
+            f"TASK-PREPARE ({self.asin}): Could not find a free folder for the chapter files after "
+            f"{_SUFFIX_WALK_LIMIT} attempts; using '{folder_root}_{safe_asin}'."
+        )
+        self.is_duplicate = True
+        fallback = f"{folder_root}_{safe_asin}"
+        # Best-effort: if the fallback is already someone's claim there is
+        # nothing left to fall back TO, and this book writes there regardless.
+        self._claim_split_folder(fallback)
+        return fallback
+
+    def _claim_split_folder(self, folder):
+        """
+        Take `folder` in the shared reservation set, atomically. True when the
+        claim is now ours (and recorded for `run` to release), False when
+        another book already held it — membership is tested before the add,
+        because `set.add` on an existing entry is a silent no-op that would read
+        as success and hand us someone else's folder.
+        """
+        with _reservation_lock:
+            if folder in _reserved_output_paths:
+                return False
+            _reserved_output_paths.add(folder)
+        self.split_folder_reservation = folder
+        return True
 
     def _encode_and_track_chunk(self, chunk_info):
         """The actual function for the ENCODE_CHAPTER task."""
@@ -1520,11 +2360,16 @@ class BookProcessor:
         For a single-file book that is the audiobook's own path without its
         extension — today's behavior, unchanged. A split book has no such file,
         so its sidecars keep the single-file-EQUIVALENT name (D9) and sit inside
-        the book's folder. That only differs from the plain answer when D5's
-        flat-template guard invented a subfolder: without it the folder already
-        IS the directory the single-file path pointed into, and the two agree.
+        the book's folder. That differs from the plain answer in two cases: D5's
+        flat-template guard invents a subfolder, and D12 moves a collision's ASIN
+        suffix from the filename onto the folder. `_plan_split_output` settles
+        both when it settles the folder, so its answer is used verbatim when it
+        is there; the fallback keeps working for a processor whose parts were set
+        directly (the finalize tests do exactly that).
         """
         base = os.path.splitext(self.final_output_path)[0]
+        if self.split_part_paths and self.split_sidecar_base:
+            return self.split_sidecar_base
         if self.split_part_paths and self.split_output_dir:
             return os.path.join(self.split_output_dir, os.path.basename(base))
         return base
@@ -1880,6 +2725,23 @@ class BookProcessor:
         with get_db_connection() as con:
             previous_row = con.execute("SELECT filepath FROM audiobooks WHERE asin = ?", (self.asin,)).fetchone()
             previous_path = previous_row["filepath"] if previous_row else None
+            # ...and the same for the previous download's PART list, which the
+            # replace below is about to overwrite. For a split book those rows
+            # are the only record of the individual files; `previous_path` names
+            # only their folder, which the cleanup must never delete as a file.
+            try:
+                previous_parts = [
+                    row["filepath"]
+                    for row in con.execute(
+                        "SELECT filepath FROM book_files WHERE asin = ? ORDER BY part_index", (self.asin,)
+                    ).fetchall()
+                    if row["filepath"]
+                ]
+            except sqlite3.Error as e:
+                # A database with no child table (a hand-restored library.db)
+                # must not fail a finished download; it simply has no part rows.
+                log.warning(f"PROCESSOR ({self.asin}): Could not read the previous per-chapter file rows: {e}")
+                previous_parts = []
             con.execute(
                 "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, "
                 "error_message = '', retry_count = 0, is_duplicate = ? WHERE asin = ?",
@@ -1904,29 +2766,66 @@ class BookProcessor:
                     replace_book_files(self.asin, [], con=con)
                 except sqlite3.Error as e:
                     log.warning(f"PROCESSOR ({self.asin}): Could not clear stale per-chapter file rows: {e}")
+        # Everything below this line is housekeeping around a book that is
+        # ALREADY a success: the output is verified and the DOWNLOADED row is
+        # committed. So each step is independently non-fatal (#29) — an exception
+        # escaping here used to leave the completion event unset, `run` waiting
+        # out its full timeout, and the book finally recorded ERROR with its
+        # perfectly good files sitting on disk (and, worse, the previous download
+        # already deleted).
+        #
         # Place any companion PDF and optional sidecars before the temp dir is
         # torn down (the raw master, cover, and metadata all live there).
-        self._place_supplementary_pdf()
-        self._place_sidecar_files()
+        self._post_success_step("saving the companion PDF", self._place_supplementary_pdf)
+        self._post_success_step("saving the sidecar files", self._place_sidecar_files)
         # Stamp timestamps last, once every file that shares the base name exists.
-        self._apply_file_timestamps()
+        self._post_success_step("stamping the file timestamps", self._apply_file_timestamps)
         # Only now that this run's own output is fully in place is it safe to
         # remove what the previous download left somewhere else.
-        self._cleanup_stale_files(previous_path)
+        self._post_success_step(
+            "cleaning up the previous download", self._cleanup_stale_files, previous_path, previous_parts
+        )
         _yield_progress(self.asin, "Complete!", 100, self.job_id)
 
-    def _cleanup_stale_files(self, previous_path):
+    def _post_success_step(self, description, step, *args):
         """
-        Remove the file a re-download left behind. A re-download re-derives its
+        Run one post-success housekeeping step, swallowing anything it raises.
+
+        Every step below the DOWNLOADED write is optional decoration around a
+        book that already succeeded — sidecars, timestamps, cleanup of the
+        previous download. `Exception` deliberately, not a curated tuple: the
+        point is that NOTHING here can undo a success, and the realistic causes
+        are exactly the ones a tuple would miss (a sqlite3 error from a locked
+        database inside the cleanup's ownership checks was #29's actual trigger).
+        """
+        try:
+            step(*args)
+        except Exception as e:
+            log.error(
+                f"PROCESSOR ({self.asin}): {description} failed after the book was already recorded as downloaded: {e}",
+                exc_info=True,
+            )
+
+    def _cleanup_stale_files(self, previous_path, previous_parts=None):
+        """
+        Remove the files a re-download left behind. A re-download re-derives its
         output path from the *current* settings, so a changed output format or
-        naming template writes the new file somewhere else entirely and the old
+        naming template writes the new output somewhere else entirely and the old
         one stops being referenced by anything — it just sits in /data forever.
+
+        The "previous download" is a SET, not a file: `previous_parts` is the old
+        `book_files` list (captured before finalize overwrote it) and
+        `previous_path` is the row's own filepath — which for a split book is the
+        FOLDER those parts lived in, never a file to delete. That set-wise shape
+        is what makes every shape transition work: single -> split, split ->
+        single, and split -> split with a different format or naming (where the
+        old parts sit right beside the new ones under other names).
 
         Gated on this job's answer to the UI prompt OR the saved setting, since a
         scheduled job carries no params and the setting is the only thing that can
         speak for it. Every guard below is load-bearing: this is the finalizer's
-        only destructive step, so it refuses to act unless the tracked previous
-        path is a real, different file inside the output root. Each unlink is
+        only destructive step, so it refuses to touch anything that is not a real,
+        different, unclaimed file inside the output root. Each unlink is
         independently best-effort — a finished book is never failed over cleanup.
         """
         # Tri-state per-job flag: an explicit False is the user DECLINING the
@@ -1939,79 +2838,138 @@ class BookProcessor:
         if not consented:
             return
 
-        if not previous_path:
+        previous_parts = [path for path in (previous_parts or []) if path]
+        if previous_parts:
+            # The previous download was SPLIT (D3): its audio is the part set, and
+            # `previous_path` names only the folder they sat in. The stem those
+            # sidecars used is recorded nowhere, so it is read back off the folder
+            # — and an ambiguous folder answers None, which skips the sweep.
+            stale_audio = previous_parts
+            stale_dirs = {os.path.dirname(path) for path in previous_parts}
+            if previous_path:
+                stale_dirs.add(previous_path)
+            old_sidecar_base = _unique_sidecar_base(previous_path) if previous_path else None
+            old_base = os.path.realpath(old_sidecar_base) if old_sidecar_base else None
+        elif previous_path:
+            stale_audio = [previous_path]
+            stale_dirs = {os.path.dirname(previous_path)}
+            # Every destructive comparison below resolves symlinks: os.path.abspath
+            # only collapses "."/".." , so a symlinked alias of the output tree (say
+            # /data/Author -> /data/library/Author) makes the old and new paths
+            # compare unequal even when they are the same file, and this run's own
+            # freshly written output would be deleted.
+            old_base = os.path.splitext(os.path.realpath(previous_path))[0]
+        else:
             return
-        # Every destructive comparison below resolves symlinks: os.path.abspath only
-        # collapses "."/".." , so a symlinked alias of the output tree (say
-        # /data/Author -> /data/library/Author) makes the old and new paths compare
-        # unequal even when they are the same file, and this run's own freshly
-        # written output would be deleted.
-        previous_real = os.path.realpath(previous_path)
-        new_real = os.path.realpath(self.final_output_path)
+
         # "Did we overwrite our own file?" is a question about what this run
         # actually WROTE, which for a split book is its N parts — not
         # final_output_path, which a split book only ever reserves and never
         # writes. Comparing against the reserved path instead would make the
         # single-file -> split re-download (the first thing anyone does with this
-        # feature) return here and strand the old whole-book file on disk beside
-        # the new parts, untracked. For an unsplit run the set is exactly
-        # {new_real}, so this is the same test it always was.
+        # feature) skip the old whole-book file and strand it on disk beside the
+        # new parts, untracked. For an unsplit run the set is exactly the one
+        # output file, so this is the same test it always was.
         produced_real = {os.path.realpath(path) for path in self._produced_output_paths()}
-        if previous_real in produced_real:
-            return  # The re-download overwrote its own file; nothing was left behind.
-        # This exists() guard is also what implements the plan's "never for a
-        # MISSING book" rule: a MISSING row's tracked file is gone from disk, so
-        # cleanup returns here before touching anything.
-        if not os.path.exists(previous_path):
-            return
-        # Belt-and-braces on top of the realpath comparison — a hard link (or a
-        # symlink realpath could not resolve) still makes two different-looking
-        # paths the same inode. An OSError means the stat failed, so we cannot
-        # prove they are the same file and fall through to the remaining guards.
-        # Walked over the produced set for the same reason as above; for an
-        # unsplit run that is the single output file, exactly as before.
-        for produced_path in self._produced_output_paths():
-            try:
-                if os.path.exists(produced_path) and os.path.samefile(previous_path, produced_path):
-                    return
-            except OSError:
-                continue
-        # Whatever the DB row claims, never delete outside the output directory.
-        # Both sides are resolved so a symlinked /data still compares as inside it.
         data_root = os.path.realpath("/data")
-        if not previous_real.startswith(data_root + os.sep):
-            log.warning(f"PROCESSOR ({self.asin}): Refusing to clean up '{previous_path}' — it is outside {data_root}.")
-            return
+        # Read lazily: the ownership map is only needed once something has passed
+        # every other guard, and the whole point of #30 is that this question is
+        # asked BEFORE the delete, not after it.
+        owners = None
+        deleted_anything = False
 
-        try:
-            os.remove(previous_path)
-            log.info(f"PROCESSOR ({self.asin}): Removed stale file from the previous download: {previous_path}")
-        except OSError as e:
-            log.warning(f"PROCESSOR ({self.asin}): Could not remove stale file '{previous_path}': {e}")
+        for stale_path in stale_audio:
+            stale_real = os.path.realpath(stale_path)
+            if stale_real in produced_real:
+                continue  # The re-download overwrote this file; nothing was left behind.
+            # This exists() guard is also what implements the plan's "never for a
+            # MISSING book" rule: a MISSING row's tracked file is gone from disk,
+            # so cleanup skips it before touching anything.
+            if not os.path.exists(stale_path):
+                continue
+            # A tracked path that is a DIRECTORY is a split book's folder, not a
+            # file this step deletes — reachable when the part rows are gone (a
+            # hand-restored library.db) and `previous_path` is all that is left.
+            # The empty-folder sweep at the end is what removes such a folder, and
+            # only if it is genuinely empty.
+            if os.path.isdir(stale_path):
+                log.info(f"PROCESSOR ({self.asin}): '{stale_path}' is a folder, not a stale file; leaving it alone.")
+                continue
+            # Belt-and-braces on top of the realpath comparison — a hard link (or
+            # a symlink realpath could not resolve) still makes two
+            # different-looking paths the same inode. An OSError means the stat
+            # failed, so we cannot prove they are the same file and fall through
+            # to the remaining guards.
+            if self._is_one_of_our_produced_files(stale_path):
+                continue
+            # Whatever the DB row claims, never delete outside the output
+            # directory. Both sides are resolved so a symlinked /data still
+            # compares as inside it.
+            if not stale_real.startswith(data_root + os.sep):
+                log.warning(
+                    f"PROCESSOR ({self.asin}): Refusing to clean up '{stale_path}' — it is outside {data_root}."
+                )
+                continue
+            # #30: co-ownership BEFORE the delete. Two rows tracking the identical
+            # file is reachable in libraries created before same-base collisions
+            # were prevented (and still via a manual upload), and one book's
+            # re-download must not delete the file another row still points at.
+            if owners is None:
+                owners = _tracked_path_owners()
+            claimants = sorted(owners.get(stale_real, set()) - {self.asin})
+            if claimants:
+                log.info(
+                    f"PROCESSOR ({self.asin}): Left '{stale_path}' in place — "
+                    f"book {claimants[0]} still tracks that file."
+                )
+                continue
+
+            deleted_anything = True
+            try:
+                os.remove(stale_path)
+                log.info(f"PROCESSOR ({self.asin}): Removed stale file from the previous download: {stale_path}")
+            except OSError as e:
+                log.warning(f"PROCESSOR ({self.asin}): Could not remove stale file '{stale_path}': {e}")
+
+        # Nothing of the old output actually went, so nothing around it is stale
+        # either: the previous download is either still the current one (an
+        # in-place overwrite), gone already, or deliberately left alone.
+        if not deleted_anything:
+            return
 
         # Sidecars come off only when the extension-stripped BASE actually moved.
         # On a format-only change ("Title.m4b" -> "Title.mp3") the old base IS the
         # new base, so the "old" sidecars are the ones _place_sidecar_files wrote
         # moments ago for this very run — deleting them would destroy this
         # download's own output.
-        old_base = os.path.splitext(previous_real)[0]
-        new_base = os.path.splitext(new_real)[0]
+        new_base = os.path.splitext(os.path.realpath(self.final_output_path))[0]
         # ...and the same trap once more for a split book, whose sidecars do NOT
         # hang off final_output_path when D5's flat-template guard invented a
-        # subfolder: they sit at _sidecar_base() inside it. A previous single-file
-        # download living at that very base (an old "{author} - {title}/{author} -
-        # {title}" layout re-downloaded flat and split) leaves old_base equal to
-        # the base _place_sidecar_files wrote to moments ago, while new_base
-        # points one level up — so the "did the base move" test alone would sweep
-        # away this run's own cover, PDF and metadata. For every other run
-        # _sidecar_base() IS new_base and this extra term changes nothing.
+        # subfolder (or D12 put a collision suffix on the folder): they sit at
+        # _sidecar_base() inside it. A previous single-file download living at
+        # that very base (an old "{author} - {title}/{author} - {title}" layout
+        # re-downloaded flat and split) leaves old_base equal to the base
+        # _place_sidecar_files wrote to moments ago, while new_base points one
+        # level up — so the "did the base move" test alone would sweep away this
+        # run's own cover, PDF and metadata. For every other run _sidecar_base()
+        # IS new_base and this extra term changes nothing.
         sidecar_base = os.path.realpath(self._sidecar_base())
-        if old_base != new_base and old_base != sidecar_base:
+        # A SPLIT run never writes final_output_path — it only reserves it — so
+        # for a split book the new_base term protects nothing and can only do
+        # harm: under a flat "{title}" template the reserved base
+        # ("/data/Dracula") is exactly the base the PREVIOUS single-file
+        # download used, while this run's sidecars went to "/data/Dracula/
+        # Dracula". Consulting new_base there skips the sweep and strands the old
+        # cover, PDF, cue and metadata.json in the output root forever, referenced
+        # by nothing. The only base a split run wrote is `sidecar_base`, which the
+        # second term already covers.
+        old_base_is_ours = old_base == sidecar_base or (not self.split_part_paths and old_base == new_base)
+        if old_base and not old_base_is_ours:
             # ...and only when nothing ELSE still lives at the old base. Sidecars
             # are keyed by the base while audio files are not, so a second book
             # sitting there under a different audio extension shares these exact
             # files — they may be its only cover/PDF/cue/metadata/raw master.
-            if self._output_base_is_shared(old_base, previous_real):
+            if _output_base_is_shared(self.asin, old_base, {os.path.realpath(path) for path in stale_audio}):
                 log.info(
                     f"PROCESSOR ({self.asin}): Skipped the stale-sidecar sweep at '{old_base}' — "
                     f"the base is still in use by another book."
@@ -2019,6 +2977,8 @@ class BookProcessor:
             else:
                 # Matched however they are spelled on disk, same as the rename and
                 # timestamp sweeps — a leftover ".JPG" is as stale as a ".jpg".
+                # Only exact sidecar suffixes match, which is what keeps a chapter
+                # file named after the same base from being swept as a sidecar.
                 for suffix in _existing_sidecar_suffixes(old_base):
                     stale_sidecar = f"{old_base}{suffix}"
                     try:
@@ -2027,41 +2987,27 @@ class BookProcessor:
                     except OSError as e:
                         log.warning(f"PROCESSOR ({self.asin}): Could not remove stale sidecar '{stale_sidecar}': {e}")
 
-        # The old folder may now be empty (a naming-template change moves whole
-        # directory levels); the existing helper stops at the first non-empty one.
-        _cleanup_empty_dirs(os.path.dirname(previous_path))
+        # The old folder(s) may now be empty (a naming-template change moves whole
+        # directory levels, and a split book's whole folder can empty out); the
+        # existing helper only ever rmdirs, so a folder still holding anything —
+        # another book's files, a sidecar we refused to sweep — is left alone.
+        for directory in sorted(stale_dirs):
+            _cleanup_empty_dirs(directory)
 
-    def _output_base_is_shared(self, old_base, previous_real):
+    def _is_one_of_our_produced_files(self, path):
         """
-        True when something OTHER than this book's previous download still occupies
-        `old_base`, which makes the sidecars there jointly owned and unsafe to
-        delete. Libraries created before same-base collisions were prevented can
-        hold two books at one base under different audio extensions.
-
-        Two independent signals, either of which is enough:
-          1. Another audio file is still on disk at the base — anything from
-             _AUDIO_EXTENSIONS other than the previous file we just removed.
-          2. Another audiobooks row is tracked at the same base, even if its file
-             is temporarily absent (a MISSING book still owns its cover/PDF).
-
-        The DB half reads every non-null filepath and compares bases in Python
-        rather than with a LIKE pattern: libraries are small, and a base name can
-        contain LIKE wildcards that would need escaping.
+        True when `path` is the same file on disk as something this run produced,
+        by inode rather than by name — a hard link, or a symlink realpath could
+        not resolve, makes two different-looking paths one file. An OSError means
+        the stat failed, so we cannot prove they are the same and the caller's
+        remaining guards decide.
         """
-        for ext in _AUDIO_EXTENSIONS:
-            candidate = f"{old_base}{ext}"
-            if os.path.realpath(candidate) == previous_real:
-                continue  # The previous download's own file, not a second book.
-            if os.path.exists(candidate):
-                return True
-
-        with get_db_connection() as con:
-            rows = con.execute("SELECT asin, filepath FROM audiobooks WHERE filepath IS NOT NULL").fetchall()
-        for row in rows:
-            if row["asin"] == self.asin:
+        for produced_path in self._produced_output_paths():
+            try:
+                if os.path.exists(produced_path) and os.path.samefile(path, produced_path):
+                    return True
+            except OSError:
                 continue
-            if os.path.splitext(os.path.realpath(row["filepath"]))[0] == old_base:
-                return True
         return False
 
     def _merge_and_finalize(self):

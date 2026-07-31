@@ -1,8 +1,10 @@
 # tests/test_processing_logic.py
 
+import contextlib
 import json
 import logging
 import os
+import shutil
 import sqlite3
 import time
 from datetime import datetime
@@ -31,6 +33,93 @@ def _clear_output_reservations():
     processing_logic._reserved_output_paths.clear()
     yield
     processing_logic._reserved_output_paths.clear()
+
+
+class _FakeCursor:
+    """The two-method slice of sqlite3.Cursor the code under test uses."""
+
+    def __init__(self, rows):
+        self.rows = list(rows)
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self):
+        return self.rows
+
+
+class _FakeDb:
+    """
+    A stand-in for the connection `processing_logic.get_db_connection` hands out,
+    answering the handful of queries the lifecycle paths make from plain lists.
+
+    Richer than a bare MagicMock because the split-aware paths ask several
+    DIFFERENT questions of one connection — the book row, this book's part rows,
+    who owns a given path, and the two whole-table ownership scans — and a test
+    that answers them all with one canned result can't tell them apart.
+    """
+
+    def __init__(self, book_row=None, part_rows=(), tracked=(), tracked_parts=(), update_error=None):
+        self.book_row = book_row
+        self.part_rows = list(part_rows)  # this book's own part filepaths
+        self.tracked = list(tracked)  # (asin, filepath) rows of `audiobooks`
+        self.tracked_parts = list(tracked_parts)  # (asin, filepath) rows of `book_files`
+        # Raised by the `UPDATE audiobooks` write, for the "the files moved and
+        # then the database refused them" case (a briefly locked library.db).
+        self.update_error = update_error
+        self.executed = []
+        self.commits = 0
+
+    # --- connection protocol -------------------------------------------------
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def commit(self):
+        self.commits += 1
+
+    def close(self):
+        pass
+
+    # --- queries -------------------------------------------------------------
+    def execute(self, query, params=None):
+        normalized = " ".join(query.split())
+        if self.update_error is not None and normalized.startswith("UPDATE audiobooks"):
+            raise self.update_error  # before recording it: the write never landed.
+        self.executed.append((normalized, params))
+        return _FakeCursor(self._answer(normalized, params))
+
+    def executemany(self, query, rows):
+        self.executed.append((" ".join(query.split()), list(rows)))
+        return _FakeCursor([])
+
+    def _answer(self, query, params):
+        if query.startswith("SELECT filepath FROM book_files WHERE asin"):
+            return [{"filepath": path} for path in self.part_rows]
+        if query.startswith("SELECT asin FROM audiobooks WHERE filepath"):
+            return [{"asin": asin} for asin, path in self.tracked if path == params[0]]
+        if query.startswith("SELECT asin FROM book_files WHERE filepath"):
+            return [{"asin": asin} for asin, path in self.tracked_parts if path == params[0]]
+        if query.startswith("SELECT asin, filepath FROM audiobooks"):
+            return [{"asin": asin, "filepath": path} for asin, path in self.tracked]
+        if query.startswith("SELECT asin, filepath FROM book_files"):
+            return [{"asin": asin, "filepath": path} for asin, path in self.tracked_parts]
+        if query.startswith("SELECT"):
+            return [self.book_row] if self.book_row else []
+        return []
+
+    def inserted_parts(self):
+        """The (asin, part_index, filepath) rows a replace_book_files write made."""
+        for query, rows in self.executed:
+            if query.startswith("INSERT INTO book_files"):
+                return rows
+        return []
+
+    def updates(self):
+        """The parameter tuples of every `UPDATE audiobooks` this connection saw."""
+        return [params for query, params in self.executed if query.startswith("UPDATE audiobooks")]
 
 
 class TestSanitizeFilename:
@@ -83,6 +172,11 @@ def _run_prepare(
     (which returns a falsy context so the method stops right after the path
     decision). Returns the processor itself, so tests can assert on any state
     PREPARE lifted out of the DB row and not just the chosen path.
+
+    `path_exists` means "a file is sitting at the book's TARGET path", not "every
+    path in the universe exists": the collision allocator now re-validates the
+    ASIN-suffixed name it falls back to (#28), and a universe where that name is
+    occupied too would legitimately keep walking to "_2".
     """
     processor = BookProcessor(asin=asin, job_id=1)
 
@@ -99,23 +193,36 @@ def _run_prepare(
 
     con.execute.side_effect = execute
 
+    settings = {
+        "naming": {
+            "template": template,
+            "truncate_subtitle": truncate_subtitle,
+            "apply_custom_to_filenames": apply_custom_to_filenames,
+            "folder_template": folder_template,
+            "file_template": file_template,
+        }
+    }
+    # The one path the fake filesystem knows about, derived the same way PREPARE
+    # derives it so the two can't drift apart.
+    author, title = processing_logic._effective_naming_names(book_row, settings)
+    target_path = build_base_output_path(
+        settings,
+        asin,
+        author,
+        title,
+        book_row["narrator"],
+        book_row["publisher"],
+        series=book_row["series"],
+        series_sequence=book_row["series_sequence"],
+        release_date=book_row["release_date"],
+        language=book_row["language"],
+    )
+
     with (
-        mock.patch.object(
-            processing_logic,
-            "load_settings",
-            return_value={
-                "naming": {
-                    "template": template,
-                    "truncate_subtitle": truncate_subtitle,
-                    "apply_custom_to_filenames": apply_custom_to_filenames,
-                    "folder_template": folder_template,
-                    "file_template": file_template,
-                }
-            },
-        ),
+        mock.patch.object(processing_logic, "load_settings", return_value=settings),
         mock.patch.object(processing_logic, "get_db_connection", return_value=con),
         mock.patch.object(processing_logic, "prepare_book_assets", return_value=(None, None)),
-        mock.patch("os.path.exists", return_value=path_exists),
+        mock.patch("os.path.exists", side_effect=lambda p: path_exists and p == target_path),
         mock.patch("os.makedirs"),
         mock.patch.object(processor, "_probe_file_asin", return_value=embedded_asin),
         mock.patch.object(processor, "_update_db_on_failure"),
@@ -588,12 +695,18 @@ class TestRenameToMatchMetadata:
         makedirs_error=None,
         also_present=(),
         move_side_effect=None,
+        db_error=None,
     ):
         row = row if row is not None else self._row()
         con = mock.MagicMock()
         con.__enter__.return_value = con
+        # Kept on the test instance so a test can assert what the database was
+        # (and was not) told; pytest builds a fresh instance per test.
+        self.con = con
 
         def execute(query, params=None):
+            if db_error is not None and query.strip().startswith("UPDATE audiobooks"):
+                raise db_error
             cursor = mock.MagicMock()
             if "WHERE filepath" in query:
                 cursor.fetchone.return_value = {"asin": target_owner} if target_owner else None
@@ -760,6 +873,25 @@ class TestRenameToMatchMetadata:
         assert held == [True]
         assert processing_logic._reserved_output_paths == set()
 
+    def test_a_failed_database_write_puts_the_file_and_its_sidecars_back(self):
+        # W2: the move happens first and the row is rewritten afterwards, so a
+        # library.db that is briefly locked used to leave the files at their new
+        # home with the row still naming the old one — a divergence nothing
+        # downstream repairs (the book reads as MISSING on the next Verify while
+        # its files sit intact one directory away). The files follow the database.
+        cover = "/data/Bram Stoker/Dracula/Bram Stoker - Dracula.jpg"
+        result, move = self._run(
+            target="/data/New/New.m4b",
+            also_present=(cover,),
+            db_error=sqlite3.OperationalError("database is locked"),
+        )
+        assert result is None
+        # Everything that moved out moved back, audio and sidecar alike...
+        assert move.call_args_list[-2].args == ("/data/New/New.m4b", self.CURRENT)
+        assert move.call_args_list[-1].args == ("/data/New/New.jpg", cover)
+        # ...and nothing was committed, so the row still names the old path.
+        self.con.commit.assert_not_called()
+
     def test_preserves_mp3_extension(self):
         # Phase 5: an .mp3 book must be renamed to an .mp3 target, so the file's
         # real extension is passed through to build_base_output_path (not the
@@ -894,6 +1026,78 @@ class TestRenameToMatchMetadata:
         assert result == str(new_dir / "New.m4b")
         assert sorted(p.name for p in old_dir.iterdir()) == ["Old 2.jpg", "Old.txt", "Older.m4b"]
         assert sorted(p.name for p in new_dir.iterdir()) == ["New.m4b"]
+
+    """Backlog #20: the sidecar sweep needs the same shared-base guard the
+    stale-file cleanup has — two books can share one extension-stripped base
+    under different audio extensions, and those sidecars are not ours to take."""
+
+    def test_shared_base_keeps_the_sidecars_where_they_are(self, tmp_path):
+        old_dir = tmp_path / "old"
+        old_dir.mkdir()
+        new_dir = tmp_path / "new"
+        current = old_dir / "Old.m4b"
+        current.write_bytes(b"audio")
+        # Another book living at the same base under a different audio extension:
+        # the cover and PDF here may be its only ones.
+        (old_dir / "Old.mp3").write_bytes(b"other book")
+        (old_dir / "Old.jpg").write_bytes(b"cover")
+        (old_dir / "Old.pdf").write_bytes(b"pdf")
+
+        target = str(new_dir / "New.m4b")
+        row = self._row(filepath=str(current))
+        con = _FakeDb(book_row=row, tracked=[("B0OTHER", str(old_dir / "Old.mp3"))])
+
+        with (
+            mock.patch.object(
+                processing_logic, "load_settings", return_value={"naming": {"apply_custom_to_filenames": True}}
+            ),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "build_base_output_path", return_value=target),
+            mock.patch.object(processing_logic, "_cleanup_empty_dirs"),
+        ):
+            result = processing_logic.rename_book_to_match_metadata("B0OURS")
+
+        # The book itself still moves — only the jointly-owned sidecars stay.
+        assert result == target
+        assert (new_dir / "New.m4b").exists()
+        assert (old_dir / "Old.jpg").exists()
+        assert (old_dir / "Old.pdf").exists()
+        assert not (new_dir / "New.jpg").exists()
+
+    def test_unshared_base_still_moves_the_sidecars(self, tmp_path):
+        # The control for the guard above: nothing else lives at the old base, so
+        # the sweep behaves exactly as it always has.
+        result, new_dir, _old_dir, _executed = self._run_on_disk(tmp_path, sidecars=("Old.jpg", "Old.pdf"))
+        assert result == str(new_dir / "New.m4b")
+        assert (new_dir / "New.jpg").exists()
+        assert (new_dir / "New.pdf").exists()
+
+    """Backlog #28: the ASIN-suffixed fallback name is re-validated instead of
+    assumed free."""
+
+    def test_taken_suffixed_target_walks_to_the_next_candidate(self):
+        # Both the plain target AND "<base>_<asin>" are occupied by other books —
+        # the old code wrote straight over the second one.
+        result, move = self._run(
+            target="/data/New/New.m4b",
+            target_exists=True,
+            also_present=("/data/New/New_B0OURS.m4b",),
+            target_owner="B0OTHER",
+        )
+        assert result == "/data/New/New_B0OURS_2.m4b"
+        move.assert_any_call(self.CURRENT, "/data/New/New_B0OURS_2.m4b")
+
+    def test_suffixed_target_taken_by_an_in_flight_book_walks_too(self):
+        processing_logic._reserved_output_paths.add("/data/New/New")
+        processing_logic._reserved_output_paths.add("/data/New/New_B0OURS")
+        result, _move = self._run(target="/data/New/New.m4b")
+        assert result == "/data/New/New_B0OURS_2.m4b"
+
+    def test_free_suffixed_target_is_used_as_before(self):
+        # The control: nothing occupies the suffixed name, so the first candidate
+        # is taken and the walk is invisible.
+        result, _move = self._run(target="/data/New/New.m4b", target_exists=True, target_owner="B0OTHER")
+        assert result == "/data/New/New_B0OURS.m4b"
 
     """v0.23.0 M11: the ASIN-suffix collision branch has to record the duplicate
     flag, the same way the download path's _finalize_success does — otherwise a
@@ -1070,6 +1274,55 @@ class TestConcurrentDuplicateHandling:
         assert path_b == "/data/A/Title/Title_B0BBBB.mp3"
         assert first.is_duplicate is False
         assert second.is_duplicate is True
+
+    """Backlog #28: the ASIN-suffixed fallback is re-validated, not assumed free."""
+
+    def _reserve_with(self, present, tracked):
+        processor = BookProcessor(asin="B0BBBB", job_id=1)
+        con = _FakeDb(tracked=tracked)
+        with (
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch("os.path.exists", side_effect=lambda p: p in present),
+            mock.patch.object(processor, "_probe_file_asin", return_value=None),
+        ):
+            return processor, processor._reserve_output_path("/data/A/Title/Title.m4b", "B0BBBB")
+
+    def test_a_taken_suffixed_name_walks_to_the_next_candidate(self):
+        # Both the plain base and "<base>_<asin>" belong to other books — the old
+        # code handed the second one straight back and overwrote it.
+        _processor, path = self._reserve_with(
+            present={"/data/A/Title/Title.m4b", "/data/A/Title/Title_B0BBBB.m4b"},
+            tracked=[("B0OTHER", "/data/A/Title/Title.m4b"), ("B0THIRD", "/data/A/Title/Title_B0BBBB.m4b")],
+        )
+        assert path == "/data/A/Title/Title_B0BBBB_2.m4b"
+
+    def test_a_suffixed_name_taken_at_a_sibling_extension_walks_too(self):
+        # The suffixed candidate is judged in the same extension-stripped currency
+        # as the plain one: another book's .mp3 there shares our sidecar base.
+        _processor, path = self._reserve_with(
+            present={"/data/A/Title/Title.m4b", "/data/A/Title/Title_B0BBBB.mp3"},
+            tracked=[("B0OTHER", "/data/A/Title/Title.m4b"), ("B0THIRD", "/data/A/Title/Title_B0BBBB.mp3")],
+        )
+        assert path == "/data/A/Title/Title_B0BBBB_2.m4b"
+
+    def test_a_reserved_suffixed_name_walks_too(self):
+        # This book's own in-flight force re-download already holds the suffixed
+        # base... which is exactly why the walk must not stop there for a THIRD
+        # book, while a book re-deriving its own name still gets it back.
+        processing_logic._reserved_output_paths.add("/data/A/Title/Title")
+        processing_logic._reserved_output_paths.add("/data/A/Title/Title_B0BBBB")
+        _processor, path = self._reserve_with(present=set(), tracked=[])
+        assert path == "/data/A/Title/Title_B0BBBB_2.m4b"
+
+    def test_our_own_file_at_the_suffixed_name_is_kept(self):
+        # The control: a previous collision of THIS book already put a file at the
+        # suffixed name, and re-downloading it must land on the same name again
+        # rather than churning to "_2" every time.
+        _processor, path = self._reserve_with(
+            present={"/data/A/Title/Title.m4b", "/data/A/Title/Title_B0BBBB.m4b"},
+            tracked=[("B0OTHER", "/data/A/Title/Title.m4b"), ("B0BBBB", "/data/A/Title/Title_B0BBBB.m4b")],
+        )
+        assert path == "/data/A/Title/Title_B0BBBB.m4b"
 
 
 class TestSiblingExtensionOnDisk:
@@ -2696,8 +2949,11 @@ class TestCleanupStaleFiles:
         present=None,
         remove_error=None,
         other_books=(),
+        other_parts=(),
         split_parts=None,
         split_dir=None,
+        split_sidecar_base=None,
+        previous_parts=None,
     ):
         """Drive _cleanup_stale_files with the filesystem faked out, and return
         the set of paths it tried to unlink plus the empty-dir cleanup mock. The
@@ -2706,13 +2962,16 @@ class TestCleanupStaleFiles:
 
         `other_books` are (asin, filepath) pairs for OTHER tracked books, which is
         what the shared-base check reads to decide whether the old base's sidecars
-        are jointly owned."""
+        are jointly owned; `other_parts` are the same for their `book_files` rows.
+        `previous_parts` is the part list the PREVIOUS download left behind — the
+        set-wise form of `previous_path`."""
         processor = BookProcessor(asin="B0OURS", job_id=1)
         processor.final_output_path = new_path or self.NEW
         processor.cleanup_stale_files = param
         if split_parts:
             processor.split_part_paths = list(split_parts)
             processor.split_output_dir = split_dir or os.path.dirname(split_parts[0])
+            processor.split_sidecar_base = split_sidecar_base
 
         if present is None:
             present = {previous_path} if previous_path else set()
@@ -2722,7 +2981,15 @@ class TestCleanupStaleFiles:
         con.__enter__.return_value = con
         tracked = [{"asin": "B0OURS", "filepath": previous_path}] if previous_path else []
         tracked += [{"asin": asin, "filepath": path} for asin, path in other_books]
-        con.execute.return_value.fetchall.return_value = tracked
+        part_rows = [{"asin": asin, "filepath": path} for asin, path in other_parts]
+        part_rows += [{"asin": "B0OURS", "filepath": path} for path in (previous_parts or [])]
+
+        def execute(query, params=None):
+            cursor = mock.MagicMock()
+            cursor.fetchall.return_value = part_rows if "FROM book_files" in query else tracked
+            return cursor
+
+        con.execute.side_effect = execute
 
         def listdir(directory):
             """The `present` set, seen as a directory listing — the sidecar sweep
@@ -2740,7 +3007,7 @@ class TestCleanupStaleFiles:
             mock.patch("os.remove", side_effect=remove_error) as remove,
             mock.patch.object(processing_logic, "_cleanup_empty_dirs") as cleanup_dirs,
         ):
-            processor._cleanup_stale_files(previous_path)
+            processor._cleanup_stale_files(previous_path, previous_parts)
 
         return {call.args[0] for call in remove.call_args_list}, cleanup_dirs
 
@@ -2974,6 +3241,31 @@ class TestCleanupStaleFiles:
         )
         assert removed == {old}
 
+    def test_a_flat_template_single_to_split_still_sweeps_the_old_sidecars(self):
+        # W1, the mirror image of the test above: with a flat "{title}" template
+        # D5's guard puts the parts (and this run's sidecars) in a NEW subfolder,
+        # so the old sidecars in the output root really are stale — but the
+        # reserved single-file path a split book never writes sits at exactly
+        # their base, and consulting it skipped the sweep. The four old sidecars
+        # were then stranded in /data forever: nothing references them, and the
+        # guard means no future run ever lands on that base again.
+        old = "/data/Dracula.m4b"
+        old_base = "/data/Dracula"
+        parts = ["/data/Dracula/Dracula - 01 - One.m4b", "/data/Dracula/Dracula - 02 - Two.m4b"]
+        sidecars = {f"{old_base}.jpg", f"{old_base}.pdf", f"{old_base}.cue", f"{old_base}.metadata.json"}
+        removed, _cleanup_dirs = self._run(
+            old,
+            new_path=old,  # a split book only ever RESERVES this path
+            param=True,
+            split_parts=parts,
+            split_dir="/data/Dracula",
+            split_sidecar_base="/data/Dracula/Dracula",
+            present={old, *sidecars, *parts},
+        )
+        assert removed == {old, *sidecars}
+        # ...and nothing this run just wrote went with them.
+        assert not removed & set(parts)
+
     def test_single_to_split_without_consent_leaves_everything(self):
         old = "/data/Author/Title/Title.m4b"
         base = "/data/Author/Title/Title"
@@ -3028,7 +3320,7 @@ class TestCleanupStaleFiles:
         ):
             processor._finalize_success(conversion_start_time=0, record_eta=False)
 
-        cleanup.assert_called_once_with(self.OLD)
+        cleanup.assert_called_once_with(self.OLD, [])
 
 
 # --- v0.24.0 Phase 2: per-chapter splitting ---------------------------------
@@ -3924,3 +4216,748 @@ class TestSplitPartsAreNotSidecars:
             processor._apply_file_timestamps()
         stamped = sorted(c.args[0] for c in utime.call_args_list)
         assert stamped == sorted([str(p) for p in parts] + [str(tmp_path / "Bram Stoker - Dracula.jpg")])
+
+
+# --- v0.24.0 Phase 4: lifecycle machinery -----------------------------------
+
+
+class TestSplitRename:
+    """#20 / D12: a metadata edit renames a SPLIT book by moving its whole set —
+    folder, chapter files and sidecars — and rewrites `filepath` and the part
+    rows together. Part filenames are deliberately kept: they were rendered from
+    per-chapter titles, which nothing persists."""
+
+    PARTS = ("Dracula - 1 - One.m4b", "Dracula - 2 - Two.m4b")
+    SIDECARS = ("Bram Stoker - Dracula.jpg", "Bram Stoker - Dracula.metadata.json")
+
+    def _library(self, tmp_path, *, parts=PARTS, sidecars=SIDECARS):
+        """A split book on disk: a folder of chapter files plus its sidecars at
+        the single-file-equivalent base."""
+        folder = tmp_path / "old" / "Dracula"
+        folder.mkdir(parents=True)
+        for name in parts:
+            (folder / name).write_bytes(b"audio")
+        for name in sidecars:
+            (folder / name).write_bytes(b"sidecar")
+        return folder
+
+    def _row(self, folder, **over):
+        row = {
+            "author": "Bram Stoker",
+            "title": "Dracula",
+            "narrator": "N",
+            "publisher": "P",
+            "custom_title": None,
+            "custom_author": None,
+            "filepath": str(folder),
+            "status": "DOWNLOADED",
+            "series": "N/A",
+            "series_sequence": "N/A",
+            "release_date": "N/A",
+            "language": "N/A",
+        }
+        row.update(over)
+        return row
+
+    def _run(
+        self,
+        folder,
+        target,
+        *,
+        part_names=PARTS,
+        tracked=(),
+        tracked_parts=(),
+        move_error=None,
+        row_over=None,
+        update_error=None,
+    ):
+        """Drive the rename against the real files under `folder`, with only the
+        database and the naming engine faked. Returns (result, fake connection)."""
+        part_paths = [str(folder / name) for name in part_names]
+        row = self._row(folder, **(row_over or {}))
+        con = _FakeDb(
+            book_row=row,
+            part_rows=part_paths,
+            tracked=[("B0OURS", str(folder)), *tracked],
+            tracked_parts=[("B0OURS", path) for path in part_paths] + list(tracked_parts),
+            update_error=update_error,
+        )
+
+        patches = [
+            mock.patch.object(
+                processing_logic, "load_settings", return_value={"naming": {"apply_custom_to_filenames": True}}
+            ),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "build_base_output_path", return_value=target),
+        ]
+        if move_error is not None:
+            patches.append(mock.patch.object(processing_logic.shutil, "move", side_effect=move_error))
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            result = processing_logic.rename_book_to_match_metadata("B0OURS")
+        return result, con
+
+    def test_parts_and_sidecars_move_into_the_new_folder(self, tmp_path):
+        folder = self._library(tmp_path)
+        new_folder = tmp_path / "new" / "Nosferatu"
+        result, con = self._run(folder, str(new_folder / "Bram Stoker - Nosferatu.m4b"))
+
+        assert result == str(new_folder)
+        # Every chapter file moved, keeping its own name (see the class docstring).
+        assert sorted(p.name for p in new_folder.iterdir()) == [
+            "Bram Stoker - Nosferatu.jpg",
+            "Bram Stoker - Nosferatu.metadata.json",
+            *sorted(self.PARTS),
+        ]
+        assert list(folder.iterdir()) == []
+
+    def test_filepath_and_part_rows_are_written_in_one_transaction(self, tmp_path):
+        folder = self._library(tmp_path)
+        new_folder = tmp_path / "new" / "Nosferatu"
+        _result, con = self._run(folder, str(new_folder / "Bram Stoker - Nosferatu.m4b"))
+
+        # The folder goes in the parent row (D3)...
+        assert con.updates() == [(str(new_folder), 0, "B0OURS")]
+        # ...the parts in the child rows, in playback order, on the SAME
+        # connection, and the whole thing commits exactly once.
+        assert con.inserted_parts() == [
+            ("B0OURS", 0, str(new_folder / self.PARTS[0])),
+            ("B0OURS", 1, str(new_folder / self.PARTS[1])),
+        ]
+        assert con.commits == 1
+
+    def test_unchanged_name_is_a_noop(self, tmp_path):
+        folder = self._library(tmp_path)
+        result, con = self._run(folder, str(folder / "Bram Stoker - Dracula.m4b"))
+        assert result is None
+        assert con.updates() == []
+        assert sorted(p.name for p in folder.iterdir()) == sorted([*self.PARTS, *self.SIDECARS])
+
+    def test_stem_only_change_moves_the_sidecars_and_leaves_the_parts(self, tmp_path):
+        # A naming template whose FOLDER level doesn't depend on the title: the
+        # book stays where it is and only its sidecar base moves.
+        folder = self._library(tmp_path)
+        result, con = self._run(folder, str(folder / "Bram Stoker - Nosferatu.m4b"))
+        assert result == str(folder)
+        assert (folder / "Bram Stoker - Nosferatu.jpg").exists()
+        assert not (folder / "Bram Stoker - Dracula.jpg").exists()
+        # The chapter files never moved, so their rows still name the same paths.
+        assert [row[2] for row in con.inserted_parts()] == [str(folder / name) for name in self.PARTS]
+
+    def test_missing_folder_is_a_noop(self, tmp_path):
+        folder = tmp_path / "gone"
+        result, con = self._run(folder, str(tmp_path / "new" / "New.m4b"))
+        assert result is None
+        assert con.updates() == []
+
+    def test_no_parts_on_disk_is_a_noop(self, tmp_path):
+        folder = self._library(tmp_path, parts=())
+        result, con = self._run(folder, str(tmp_path / "new" / "New.m4b"))
+        assert result is None
+        assert con.updates() == []
+
+    def test_a_failed_move_rolls_back_and_writes_nothing(self, tmp_path):
+        folder = self._library(tmp_path)
+        new_folder = tmp_path / "new" / "Nosferatu"
+        moves = []
+
+        def move(src, dst):
+            if len(moves) == 1:
+                raise OSError("no space left on device")
+            moves.append((src, dst))
+            shutil.move(src, dst)
+
+        result, con = self._run(folder, str(new_folder / "Bram Stoker - Nosferatu.m4b"), move_error=move)
+        assert result is None
+        assert con.updates() == []
+        # The part that had already moved is back where it started.
+        assert sorted(p.name for p in folder.iterdir()) == sorted([*self.PARTS, *self.SIDECARS])
+
+    def test_ambiguous_sidecar_base_leaves_the_sidecars_alone(self, tmp_path):
+        # Two books' sidecars in one folder: which base is ours is unknowable, so
+        # nothing is moved rather than moving the other book's cover.
+        folder = self._library(tmp_path, sidecars=("Bram Stoker - Dracula.jpg", "Someone Else - Other.jpg"))
+        new_folder = tmp_path / "new" / "Nosferatu"
+        result, _con = self._run(folder, str(new_folder / "Bram Stoker - Nosferatu.m4b"))
+        assert result == str(new_folder)
+        assert sorted(p.name for p in folder.iterdir()) == ["Bram Stoker - Dracula.jpg", "Someone Else - Other.jpg"]
+
+    def test_shared_sidecar_base_is_left_where_it_is(self, tmp_path):
+        # #20 for the split shape: another book's row still points at the old
+        # base, so its cover/metadata are not ours to walk off with.
+        folder = self._library(tmp_path)
+        new_folder = tmp_path / "new" / "Nosferatu"
+        result, _con = self._run(
+            folder,
+            str(new_folder / "Bram Stoker - Nosferatu.m4b"),
+            tracked=[("B0OTHER", str(folder / "Bram Stoker - Dracula.mp3"))],
+        )
+        assert result == str(new_folder)
+        assert (folder / "Bram Stoker - Dracula.jpg").exists()
+        assert not (new_folder / "Bram Stoker - Nosferatu.jpg").exists()
+
+    def test_a_folder_another_book_already_owns_gets_the_asin_suffix(self, tmp_path):
+        # D12 at rename time: the target folder's part paths are claimed by
+        # another split book, so this book's folder is suffixed instead of its
+        # files being written over that book's.
+        folder = self._library(tmp_path)
+        new_folder = tmp_path / "new" / "Nosferatu"
+        result, con = self._run(
+            folder,
+            str(new_folder / "Bram Stoker - Nosferatu.m4b"),
+            tracked_parts=[("B0OTHER", str(new_folder / self.PARTS[0]))],
+        )
+        assert result == f"{new_folder}_B0OURS"
+        assert con.updates() == [(f"{new_folder}_B0OURS", 1, "B0OURS")]
+        assert (tmp_path / "new" / "Nosferatu_B0OURS" / self.PARTS[0]).exists()
+
+    def test_a_failed_database_write_puts_the_whole_set_back(self, tmp_path):
+        # W2: the parts and sidecars move first and the two rows are rewritten
+        # afterwards. A library.db locked for that instant used to leave every
+        # file in the new folder while `filepath` and `book_files` still named
+        # the old one — the book reads as MISSING on the next Verify with N
+        # intact chapter files one directory away, and nothing ever reconciles
+        # it. The move is undone instead.
+        folder = self._library(tmp_path)
+        new_folder = tmp_path / "new" / "Nosferatu"
+        result, con = self._run(
+            folder,
+            str(new_folder / "Bram Stoker - Nosferatu.m4b"),
+            update_error=sqlite3.OperationalError("database is locked"),
+        )
+        assert result is None
+        # Every part and every sidecar is back under its original name...
+        assert sorted(p.name for p in folder.iterdir()) == sorted([*self.PARTS, *self.SIDECARS])
+        assert list(new_folder.iterdir()) == []
+        # ...and nothing was written, so the rows still point at the old folder.
+        assert con.updates() == []
+        assert con.commits == 0
+
+    def test_a_folder_an_in_flight_download_claimed_gets_the_asin_suffix(self, tmp_path):
+        # W3, rename side: a DOWNLOAD reserves its split folder at PREPARE time,
+        # long before any part file or `book_files` row exists, so neither the
+        # on-disk check nor the ownership map can see it. The two allocators
+        # only meet if they spell the claim the same way — the FOLDER path.
+        folder = self._library(tmp_path)
+        new_folder = tmp_path / "new" / "Nosferatu"
+        processing_logic._reserved_output_paths.add(str(new_folder))
+        result, con = self._run(folder, str(new_folder / "Bram Stoker - Nosferatu.m4b"))
+        assert result == f"{new_folder}_B0OURS"
+        assert con.updates() == [(f"{new_folder}_B0OURS", 1, "B0OURS")]
+        assert (tmp_path / "new" / "Nosferatu_B0OURS" / self.PARTS[0]).exists()
+        # The in-flight book's own claim is untouched — we release only ours.
+        assert processing_logic._reserved_output_paths == {str(new_folder)}
+
+    def test_the_chosen_folder_is_claimed_while_the_files_move(self, tmp_path):
+        # The other direction of the same currency: the folder claim has to be
+        # visible to a DOWNLOAD's folder walk (`_first_free_split_folder`) for
+        # the whole time the files are in motion, so the assertion happens
+        # INSIDE the move — checking afterwards cannot tell "claimed then
+        # released" from "never claimed".
+        folder = self._library(tmp_path)
+        new_folder = tmp_path / "new" / "Nosferatu"
+        held = []
+        real_move = shutil.move  # bound before _run patches the module attribute
+
+        def move(src, dst):
+            held.append(str(new_folder) in processing_logic._reserved_output_paths)
+            real_move(src, dst)
+
+        result, _con = self._run(folder, str(new_folder / "Bram Stoker - Nosferatu.m4b"), move_error=move)
+        assert result == str(new_folder)
+        assert held and all(held)
+        # ...and released once the move and the database write are done.
+        assert processing_logic._reserved_output_paths == set()
+
+    def test_a_part_sharing_the_sidecar_base_is_moved_once_as_a_part(self, tmp_path):
+        # Watch-item: _existing_sidecar_suffixes prefix-matches, and this chapter
+        # template produces names that begin with the very sidecar base. A part
+        # must move as a PART (keeping its name) and never be swept as a sidecar.
+        parts = ("Bram Stoker - Dracula - 01 - One.m4b", "Bram Stoker - Dracula - 02 - Two.m4b")
+        folder = self._library(tmp_path, parts=parts)
+        new_folder = tmp_path / "new" / "Nosferatu"
+        result, _con = self._run(folder, str(new_folder / "Bram Stoker - Nosferatu.m4b"), part_names=parts)
+        assert result == str(new_folder)
+        assert sorted(p.name for p in new_folder.iterdir()) == sorted(
+            ["Bram Stoker - Nosferatu.jpg", "Bram Stoker - Nosferatu.metadata.json", *parts]
+        )
+
+
+class TestSplitCollisionFolders:
+    """The same-title x2 data-loss window (Phase 2's deferred W3): two different
+    books with the same author+title, both split, must not write their part sets
+    into one folder. D12 disambiguates on the FOLDER, because part filenames
+    carry none of the book base and would collide file-for-file."""
+
+    def _plan(self, asin, *, reserved=None, tracked=(), tracked_parts=(), naming=None, book_row=BOOK_ROW):
+        """Run PREPARE's path reservation and split planning for one book."""
+        processor, submitted, _makedirs = _run_split_prepare_with_db(
+            asin=asin, tracked=tracked, tracked_parts=tracked_parts, naming=naming, book_row=book_row
+        )
+        return processor
+
+    def test_two_in_flight_books_get_separate_folders(self):
+        first = self._plan("B0AAAA")
+        second = self._plan("B0BBBB")
+        assert first.split_output_dir == "/data/Bram Stoker/Dracula"
+        assert second.split_output_dir == "/data/Bram Stoker/Dracula_B0BBBB"
+        # ...which is the whole point: no part path is shared.
+        assert not set(first.split_part_paths) & set(second.split_part_paths)
+        assert second.is_duplicate is True
+
+    def test_the_second_books_sidecars_follow_its_own_folder(self):
+        self._plan("B0AAAA")
+        second = self._plan("B0BBBB")
+        # The ASIN moved from the filename onto the folder, so the sidecar base
+        # inside that folder is the plain single-file-equivalent name again.
+        assert second._sidecar_base() == "/data/Bram Stoker/Dracula_B0BBBB/Bram Stoker - Dracula"
+
+    def test_a_previously_downloaded_split_book_is_seen_too(self):
+        # The sequential case, which no reservation can see: book A finished long
+        # ago and left no file at the single-file base — only its part rows.
+        second = self._plan(
+            "B0BBBB",
+            tracked=[("B0AAAA", "/data/Bram Stoker/Dracula")],
+            tracked_parts=[("B0AAAA", "/data/Bram Stoker/Dracula/Dracula - 1 - One.m4b")],
+        )
+        assert second.split_output_dir == "/data/Bram Stoker/Dracula_B0BBBB"
+        assert second.is_duplicate is True
+
+    def test_our_own_previous_part_set_is_not_a_collision(self):
+        # A re-download of the same book overwrites its own parts in place.
+        processor = self._plan(
+            "B0OURS",
+            tracked=[("B0OURS", "/data/Bram Stoker/Dracula")],
+            tracked_parts=[("B0OURS", "/data/Bram Stoker/Dracula/Dracula - 1 - One.m4b")],
+        )
+        assert processor.split_output_dir == "/data/Bram Stoker/Dracula"
+        assert processor.is_duplicate is False
+
+    def test_another_books_parts_elsewhere_in_a_shared_folder_are_not_a_collision(self):
+        # A naming template that gives every book of an author one folder is
+        # normal; two DIFFERENT titles splitting into it collide with nothing, so
+        # no spurious suffix appears.
+        processor = self._plan(
+            "B0OURS",
+            tracked_parts=[("B0OTHER", "/data/Bram Stoker/Dracula/Other Book - 1 - One.m4b")],
+        )
+        assert processor.split_output_dir == "/data/Bram Stoker/Dracula"
+        assert processor.is_duplicate is False
+
+    """W3: the folder itself is the reservation currency, because two books can
+    render DIFFERENT single-file bases into the SAME folder — and because the
+    rename allocator spells a collision on the folder while the download
+    allocator spells it on the filename, so neither could ever see the other's
+    filename-shaped claim."""
+
+    def test_two_titles_sharing_a_folder_but_not_a_base_still_separate(self):
+        # The failure scenario: "{author}/{title}/{title} - {narrator}" renders a
+        # different filename base per edition (so neither book's filename
+        # reservation sees the other) and the same folder for both — while the
+        # default chapter template renders identical part names. Both books used
+        # to pick that folder and the second one's promotion overwrote the first
+        # book's chapter files.
+        naming = {"template": "{author}/{title}/{title} - {narrator}"}
+        first = self._plan("B0AAAA", naming=naming, book_row={**BOOK_ROW, "narrator": "Simon Vance"})
+        second = self._plan("B0BBBB", naming=naming, book_row={**BOOK_ROW, "narrator": "Tim Curry"})
+        # Neither reservation collided on the filename base...
+        assert first.final_output_path == "/data/Bram Stoker/Dracula/Dracula - Simon Vance.m4b"
+        assert second.final_output_path == "/data/Bram Stoker/Dracula/Dracula - Tim Curry.m4b"
+        # ...and the folder claim is what keeps the part sets apart.
+        assert first.split_output_dir == "/data/Bram Stoker/Dracula"
+        assert second.split_output_dir == "/data/Bram Stoker/Dracula_B0BBBB"
+        assert not set(first.split_part_paths) & set(second.split_part_paths)
+        assert second.is_duplicate is True
+
+    def test_the_chosen_folder_is_registered_as_a_reservation(self):
+        # The claim a concurrent rename (or download) has to be able to see.
+        processor = self._plan("B0AAAA")
+        assert processor.split_output_dir in processing_logic._reserved_output_paths
+        assert processor.split_folder_reservation == processor.split_output_dir
+
+    def test_a_folder_claimed_by_a_rename_is_not_taken(self):
+        # The mirror of TestSplitRename's in-flight-download case: a metadata
+        # edit holds its target folder across the move, and the download walks
+        # past it instead of writing its parts into the middle of that move.
+        processing_logic._reserved_output_paths.add("/data/Bram Stoker/Dracula")
+        processor = self._plan("B0AAAA")
+        assert processor.split_output_dir == "/data/Bram Stoker/Dracula_B0AAAA"
+        assert processor.is_duplicate is True
+
+    def test_a_flat_template_book_does_not_collide_with_its_own_reservation(self):
+        # The control for the two checks above: D5's guard names the subfolder
+        # from the rendered single-file base, so the folder IS this book's own
+        # filename reservation. Its own claim must not push it to a suffix.
+        processor = self._plan("B0AAAA", naming={"template": "{author} - {title}"})
+        assert processor.final_output_path == "/data/Bram Stoker - Dracula.m4b"
+        assert processor.split_output_dir == "/data/Bram Stoker - Dracula"
+        assert processor.is_duplicate is False
+
+    def test_the_folder_claim_is_released_when_the_run_finishes(self, tmp_path):
+        # Reservations are process-global, so a claim that is never released
+        # would send every later re-download of this book to a suffixed folder
+        # for the life of the container. `run` discards exactly what was added.
+        processor = self._plan("B0AAAA")
+        assert processing_logic._reserved_output_paths
+        with (
+            mock.patch.object(processing_logic, "TEMP_DIR", str(tmp_path)),
+            mock.patch.object(processor, "_completion_timeout", return_value=0),
+            mock.patch.object(processing_logic.task_runner, "submit_task"),
+            mock.patch.object(processor, "_update_db_on_failure"),
+        ):
+            processor.run()
+        assert processing_logic._reserved_output_paths == set()
+
+
+def _run_split_prepare_with_db(asin="B0OURS", tracked=(), tracked_parts=(), naming=None, book_row=BOOK_ROW):
+    """
+    _run_split_prepare with a database that can answer the ownership questions
+    the split-folder allocator asks (which books track which paths), and a
+    filesystem where nothing exists.
+    """
+    processor = BookProcessor(asin=asin, job_id=1)
+    processor.download_complete_event = Event()
+    con = _FakeDb(book_row=book_row, tracked=list(tracked), tracked_parts=list(tracked_parts))
+    context = {
+        "audio_file": "/tmp/x/master_intermediate.m4b",
+        "chapters": SPLIT_CHAPTERS,
+        "split_output": True,
+        "split_encode_mode": "aac",
+    }
+    submitted = []
+    with (
+        mock.patch.object(
+            processing_logic,
+            "load_settings",
+            return_value={"naming": naming or {}, "conversion": {"output_format": "m4b"}},
+        ),
+        mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+        mock.patch.object(processing_logic, "prepare_book_assets", return_value=(context, None)),
+        mock.patch("os.path.exists", return_value=False),
+        mock.patch("os.makedirs") as makedirs,
+        mock.patch.object(processing_logic, "_yield_progress"),
+        mock.patch.object(processing_logic.task_runner, "submit_task", side_effect=submitted.append),
+    ):
+        processor._prepare_and_spawn_encode_tasks()
+    return processor, submitted, makedirs
+
+
+class TestCleanupStaleSets(TestCleanupStaleFiles):
+    """#30 / Phase 4: the previous download is a SET — the old `book_files` rows
+    when it was split, the single filepath otherwise — so every shape transition
+    cleans up after itself, and nothing is deleted that another book claims.
+
+    Inherits the parent's `_run` harness (and, deliberately, its whole suite of
+    single-file cases, which must keep passing unchanged)."""
+
+    OLD_FOLDER = "/data/Author/Old Title"
+    OLD_PARTS = [f"{OLD_FOLDER}/Old Title - 1 - One.m4b", f"{OLD_FOLDER}/Old Title - 2 - Two.m4b"]
+
+    def test_split_to_single_removes_every_old_part(self):
+        # The mirror of the single -> split transition: the book is now one file
+        # somewhere else, and the whole old part set is stale.
+        removed, cleanup_dirs = self._run(
+            self.OLD_FOLDER,
+            previous_parts=self.OLD_PARTS,
+            param=True,
+            present={*self.OLD_PARTS, f"{self.OLD_FOLDER}/Old Title.jpg"},
+        )
+        assert removed == {*self.OLD_PARTS, f"{self.OLD_FOLDER}/Old Title.jpg"}
+        cleanup_dirs.assert_any_call(self.OLD_FOLDER)
+
+    def test_the_tracked_folder_itself_is_never_unlinked(self):
+        # `previous_path` is a DIRECTORY for a split book; only its parts are files.
+        removed, _cleanup_dirs = self._run(
+            self.OLD_FOLDER,
+            previous_parts=self.OLD_PARTS,
+            param=True,
+            present={*self.OLD_PARTS, self.OLD_FOLDER},
+        )
+        assert self.OLD_FOLDER not in removed
+
+    def test_split_to_split_with_new_names_removes_the_old_parts(self):
+        # The gap Phase 3's smoke test found: a re-download whose chapter naming
+        # (or format) changed writes new parts beside the old ones, and nothing
+        # tracked the old set any more.
+        new_parts = [f"{self.OLD_FOLDER}/Old Title - 01 - One.mp3", f"{self.OLD_FOLDER}/Old Title - 02 - Two.mp3"]
+        removed, _cleanup_dirs = self._run(
+            self.OLD_FOLDER,
+            previous_parts=self.OLD_PARTS,
+            new_path=f"{self.OLD_FOLDER}/Old Title.mp3",
+            param=True,
+            split_parts=new_parts,
+            split_dir=self.OLD_FOLDER,
+            present={*self.OLD_PARTS, *new_parts},
+        )
+        assert removed == set(self.OLD_PARTS)
+
+    def test_split_to_split_in_place_removes_nothing(self):
+        # Same names, same folder: every old part IS a new part, overwritten in
+        # place, so there is nothing stale — and the sidecars are this run's own.
+        removed, cleanup_dirs = self._run(
+            self.OLD_FOLDER,
+            previous_parts=self.OLD_PARTS,
+            new_path=f"{self.OLD_FOLDER}/Old Title.m4b",
+            param=True,
+            split_parts=self.OLD_PARTS,
+            split_dir=self.OLD_FOLDER,
+            present={*self.OLD_PARTS, f"{self.OLD_FOLDER}/Old Title.jpg"},
+        )
+        assert removed == set()
+        cleanup_dirs.assert_not_called()
+
+    def test_the_old_folders_sidecars_are_swept_with_its_parts(self):
+        # The old sidecar base is read back off the folder (nothing records it),
+        # and only when the new base is somewhere else.
+        old_base = f"{self.OLD_FOLDER}/Old Title"
+        removed, _cleanup_dirs = self._run(
+            self.OLD_FOLDER,
+            previous_parts=self.OLD_PARTS,
+            param=True,
+            present={*self.OLD_PARTS, old_base + ".jpg", old_base + ".metadata.json"},
+        )
+        assert removed == {*self.OLD_PARTS, old_base + ".jpg", old_base + ".metadata.json"}
+
+    def test_an_ambiguous_old_folder_keeps_its_sidecars(self):
+        # Two books' sidecars in the old folder: the stem is unknowable, so the
+        # parts go and the sidecars stay rather than deleting the wrong book's.
+        removed, _cleanup_dirs = self._run(
+            self.OLD_FOLDER,
+            previous_parts=self.OLD_PARTS,
+            param=True,
+            present={*self.OLD_PARTS, f"{self.OLD_FOLDER}/Old Title.jpg", f"{self.OLD_FOLDER}/Other Book.jpg"},
+        )
+        assert removed == set(self.OLD_PARTS)
+
+    def test_a_part_of_another_book_is_never_deleted(self):
+        # #30: co-ownership is checked BEFORE the unlink. Here the "stale" path is
+        # one of another split book's chapter files.
+        shared = self.OLD_PARTS[0]
+        removed, _cleanup_dirs = self._run(
+            self.OLD_FOLDER,
+            previous_parts=self.OLD_PARTS,
+            param=True,
+            present=set(self.OLD_PARTS),
+            other_parts=(("B0OTHER", shared),),
+        )
+        assert shared not in removed
+        assert self.OLD_PARTS[1] in removed
+
+    def test_a_file_another_row_still_tracks_is_never_deleted(self):
+        # The single-file half of #30: two audiobooks rows at the identical path
+        # (reachable in pre-collision-guard libraries, and via manual upload).
+        removed, cleanup_dirs = self._run(
+            self.OLD,
+            param=True,
+            present={self.OLD},
+            other_books=(("B0OTHER", self.OLD),),
+        )
+        assert removed == set()
+        cleanup_dirs.assert_not_called()
+
+    def test_a_file_only_this_book_tracks_is_still_deleted(self):
+        # The control for the veto above.
+        removed, _cleanup_dirs = self._run(self.OLD, param=True, present={self.OLD})
+        assert removed == {self.OLD}
+
+    def test_a_tracked_folder_is_never_unlinked(self, tmp_path):
+        # A split book's tracked path is a DIRECTORY. With its part rows gone (a
+        # hand-restored library.db) that folder is all the cleanup is handed, and
+        # it must not be passed to os.remove nor let its neighbours be swept as
+        # if it were an audio file. A real directory here (not the fake /data
+        # paths the other cases use), so os.path.isdir has something true to say.
+        folder = tmp_path / "Dracula"
+        folder.mkdir()
+        (folder / "Dracula - 1 - One.m4b").write_bytes(b"audio")
+
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = str(tmp_path / "new" / "Dracula.m4b")
+        processor.cleanup_stale_files = True
+
+        with (
+            mock.patch.object(processing_logic, "load_settings", return_value={}),
+            mock.patch("os.remove") as remove,
+            mock.patch.object(processing_logic, "_cleanup_empty_dirs") as cleanup_dirs,
+        ):
+            processor._cleanup_stale_files(str(folder))
+
+        remove.assert_not_called()
+        cleanup_dirs.assert_not_called()
+
+    def test_a_split_part_at_the_old_base_is_not_swept_as_a_sidecar(self):
+        # Watch-item: the sweep matches on the old base by prefix, and a chapter
+        # file can legitimately start with it. Only exact sidecar suffixes go.
+        old_base = f"{self.OLD_FOLDER}/Old Title"
+        parts = [f"{old_base} - 01 - One.m4b", f"{old_base} - 02 - Two.m4b"]
+        removed, _cleanup_dirs = self._run(
+            self.OLD,
+            param=True,
+            present={self.OLD, old_base + ".cue", *parts},
+        )
+        assert removed == {self.OLD, old_base + ".cue"}
+        assert not removed & set(parts)
+
+
+class TestPostSuccessIsNonFatal:
+    """#29: everything after the verified DOWNLOADED write is housekeeping. A
+    raise there used to leave the completion event unset, `run` waiting out its
+    two-hour timeout, and the book finally recorded ERROR with its files sitting
+    perfectly well on disk — and the previous download already deleted."""
+
+    def _finalize(self, failing_step, error=RuntimeError("boom"), split=False):
+        processor = BookProcessor(asin="B0OURS", job_id=1)
+        processor.final_output_path = "/data/A/Title/Title.m4b"
+        if split:
+            processor.split_output_dir = "/data/A/Title"
+            processor.split_part_paths = ["/data/A/Title/Title - 1 - One.m4b"]
+
+        con = mock.MagicMock()
+        con.__enter__.return_value = con
+        con.execute.return_value.fetchone.return_value = {"filepath": "/data/A/Old/Old.m4b", "runtime_min": 60}
+
+        steps = {
+            "_place_supplementary_pdf": None,
+            "_place_sidecar_files": None,
+            "_apply_file_timestamps": None,
+            "_cleanup_stale_files": None,
+        }
+        with (
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "replace_book_files"),
+            mock.patch.object(processing_logic, "_yield_progress") as progress,
+            mock.patch.object(processor, "_verify_output_file", return_value=(True, None)),
+            mock.patch.object(processor, "_update_db_on_failure") as fail,
+            mock.patch.object(processor, "_promote_split_parts", return_value=True),
+            mock.patch("os.path.exists", return_value=False),
+        ):
+            for name in steps:
+                patcher = mock.patch.object(processor, name, side_effect=error if name == failing_step else None)
+                steps[name] = patcher.start()
+            try:
+                if split:
+                    processor._finalize_split()
+                else:
+                    processor._finalize_success(conversion_start_time=0, record_eta=False)
+            finally:
+                mock.patch.stopall()
+        downloaded = [c for c in con.execute.call_args_list if "status = 'DOWNLOADED'" in c.args[0]]
+        return {"steps": steps, "fail": fail, "progress": progress, "downloaded": downloaded, "processor": processor}
+
+    @pytest.mark.parametrize(
+        "failing_step",
+        ["_place_supplementary_pdf", "_place_sidecar_files", "_apply_file_timestamps", "_cleanup_stale_files"],
+    )
+    def test_a_raising_step_never_fails_the_book(self, failing_step):
+        r = self._finalize(failing_step)
+        assert len(r["downloaded"]) == 1  # the book is recorded DOWNLOADED...
+        r["fail"].assert_not_called()  # ...and never flipped to ERROR
+        assert 100 in [c.args[2] for c in r["progress"].call_args_list]
+
+    def test_the_later_steps_still_run(self):
+        # Non-fatal means "log and continue", not "abandon the rest": a failed PDF
+        # must not cost the book its sidecars, timestamps or stale-file cleanup.
+        r = self._finalize("_place_supplementary_pdf")
+        for name in ("_place_sidecar_files", "_apply_file_timestamps", "_cleanup_stale_files"):
+            r["steps"][name].assert_called_once()
+
+    def test_a_sqlite_error_in_the_cleanup_is_survived(self):
+        # #29's actual trigger: an unguarded con.execute inside the cleanup's
+        # ownership checks, running after the DOWNLOADED write.
+        r = self._finalize("_cleanup_stale_files", error=sqlite3.OperationalError("database is locked"))
+        assert len(r["downloaded"]) == 1
+        r["fail"].assert_not_called()
+
+    def test_the_split_shape_is_covered_too(self):
+        # _finalize_split wraps the same body in a try that reports failures — the
+        # housekeeping must be non-fatal before it ever gets there.
+        r = self._finalize("_place_sidecar_files", split=True)
+        assert len(r["downloaded"]) == 1
+        r["fail"].assert_not_called()
+        assert r["processor"]._completion_event.is_set()
+
+
+class TestUniqueSidecarBase:
+    """Reading a folder BACKWARDS to the base its sidecars hang off — the only
+    way to find a split book's single-file-equivalent name, which nothing
+    records. The same watch-item applies in reverse here: a chapter PART must
+    never be read as a sidecar."""
+
+    def test_a_lone_sidecar_names_the_base(self, tmp_path):
+        (tmp_path / "Bram Stoker - Dracula.jpg").write_bytes(b"cover")
+        assert processing_logic._unique_sidecar_base(str(tmp_path)) == str(tmp_path / "Bram Stoker - Dracula")
+
+    def test_part_files_are_not_sidecars(self, tmp_path):
+        (tmp_path / "Bram Stoker - Dracula.jpg").write_bytes(b"cover")
+        (tmp_path / "Dracula - 01 - One.m4b").write_bytes(b"audio")
+        (tmp_path / "Dracula - 02 - Two.mp3").write_bytes(b"audio")
+        assert processing_logic._unique_sidecar_base(str(tmp_path)) == str(tmp_path / "Bram Stoker - Dracula")
+
+    def test_the_longest_suffix_wins(self, tmp_path):
+        # ".metadata.json" must not be read as a base of "Title.metadata".
+        (tmp_path / "Title.metadata.json").write_bytes(b"{}")
+        assert processing_logic._unique_sidecar_base(str(tmp_path)) == str(tmp_path / "Title")
+
+    def test_agreeing_sidecars_still_name_one_base(self, tmp_path):
+        for name in ("Title.jpg", "Title.pdf", "Title.metadata.json", "Title.voucher"):
+            (tmp_path / name).write_bytes(b"x")
+        assert processing_logic._unique_sidecar_base(str(tmp_path)) == str(tmp_path / "Title")
+
+    def test_two_bases_are_ambiguous(self, tmp_path):
+        (tmp_path / "Title.jpg").write_bytes(b"x")
+        (tmp_path / "Other.pdf").write_bytes(b"x")
+        assert processing_logic._unique_sidecar_base(str(tmp_path)) is None
+
+    def test_no_sidecars_at_all(self, tmp_path):
+        (tmp_path / "Dracula - 01 - One.m4b").write_bytes(b"audio")
+        assert processing_logic._unique_sidecar_base(str(tmp_path)) is None
+
+    def test_a_bare_suffix_claims_nothing(self, tmp_path):
+        (tmp_path / ".pdf").write_bytes(b"x")
+        assert processing_logic._unique_sidecar_base(str(tmp_path)) is None
+
+    def test_a_missing_folder_is_answered_not_raised(self, tmp_path):
+        assert processing_logic._unique_sidecar_base(str(tmp_path / "gone")) is None
+
+    def test_uppercase_spellings_count(self, tmp_path):
+        (tmp_path / "Title.JPG").write_bytes(b"x")
+        assert processing_logic._unique_sidecar_base(str(tmp_path)) == str(tmp_path / "Title")
+
+
+class TestSplitFolderGuardLogging:
+    """M2: the D5 flat-guard line announces a PLACEMENT, so only the planner may
+    write it. The same helper answers the read-only "where do this book's
+    sidecars live" question behind the Download Annotations button, which throws
+    the folder away — and used to log a placement that wasn't happening into the
+    user-downloadable app.log on every press."""
+
+    def test_the_planner_announces_the_invented_subfolder(self, caplog):
+        with caplog.at_level(logging.INFO):
+            folder, stem = processing_logic._split_folder_and_stem("/data/Dracula", "", "B0OURS")
+        assert (folder, stem) == ("/data/Dracula", "Dracula")
+        assert "subfolder instead" in caplog.text
+
+    def test_a_quiet_caller_says_nothing(self, caplog):
+        with caplog.at_level(logging.INFO):
+            folder, stem = processing_logic._split_folder_and_stem("/data/Dracula", "", "B0OURS", quiet=True)
+        assert (folder, stem) == ("/data/Dracula", "Dracula")
+        assert "subfolder instead" not in caplog.text
+
+    def test_the_sidecar_base_lookup_is_quiet(self, caplog):
+        # The real repro: a flat template plus a split book whose folder holds no
+        # unambiguous sidecar, which is what sends the annotations route here.
+        con = _FakeDb(book_row=BOOK_ROW)
+        with (
+            mock.patch.object(
+                processing_logic, "load_settings", return_value={"naming": {"template": "{author} - {title}"}}
+            ),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            caplog.at_level(logging.INFO),
+        ):
+            base = processing_logic._rendered_split_sidecar_base(
+                "B0OURS",
+                "/data/Bram Stoker - Dracula",
+                ["/data/Bram Stoker - Dracula/Dracula - 1 - One.m4b"],
+            )
+        assert base == "/data/Bram Stoker - Dracula/Bram Stoker - Dracula"
+        assert "subfolder instead" not in caplog.text
