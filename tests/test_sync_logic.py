@@ -76,7 +76,8 @@ def db(tmp_path, monkeypatch):
     db_path = tmp_path / "library.db"
     con = sqlite3.connect(db_path)
     con.execute(
-        "CREATE TABLE audiobooks (asin TEXT PRIMARY KEY, title TEXT, status TEXT NOT NULL DEFAULT 'NEW', filepath TEXT)"
+        "CREATE TABLE audiobooks (asin TEXT PRIMARY KEY, title TEXT, status TEXT NOT NULL DEFAULT 'NEW', "
+        "filepath TEXT, retry_count INTEGER DEFAULT 0)"
     )
     con.execute(BOOK_FILES_DDL)
     con.commit()
@@ -85,11 +86,11 @@ def db(tmp_path, monkeypatch):
     return db_path
 
 
-def _seed_book(db, asin, status, filepath, parts=()):
+def _seed_book(db, asin, status, filepath, parts=(), retry_count=0):
     con = sqlite3.connect(db)
     con.execute(
-        "INSERT INTO audiobooks (asin, title, status, filepath) VALUES (?, ?, ?, ?)",
-        (asin, f"Book {asin}", status, filepath),
+        "INSERT INTO audiobooks (asin, title, status, filepath, retry_count) VALUES (?, ?, ?, ?, ?)",
+        (asin, f"Book {asin}", status, filepath, retry_count),
     )
     for index, part in enumerate(parts):
         con.execute("INSERT INTO book_files (asin, part_index, filepath) VALUES (?, ?, ?)", (asin, index, part))
@@ -275,6 +276,31 @@ class TestReconcileRepoint:
         _drain(sync_logic._reconcile_database(1, {"B0SINGLE12": [other]}))
 
         assert _book(db, "B0SINGLE12")["filepath"] == path
+
+    def test_repoint_resets_the_auto_retry_counter(self, db, tmp_path):
+        # Adoption is a success write, so it must clear retry_count exactly as the
+        # downloader's own success write does. A book left at retry_count 2 by two
+        # failed downloads, then supplied by hand, would otherwise sit permanently
+        # past the `retry_count <= 1` auto-retry gate the next time Verify flagged it.
+        path = _make_audio(tmp_path / "data" / "Book.m4b")
+        _seed_book(db, "B0SINGLE12", "MISSING", "", retry_count=2)
+
+        _drain(sync_logic._reconcile_database(1, {"B0SINGLE12": [path]}))
+
+        row = _book(db, "B0SINGLE12")
+        assert row["status"] == "DOWNLOADED"
+        assert row["retry_count"] == 0
+
+    def test_split_book_restore_resets_the_auto_retry_counter(self, db, tmp_path):
+        folder = tmp_path / "data" / "Split Book"
+        parts = [_make_audio(folder / f"{n:02d}.m4b") for n in (1, 2)]
+        _seed_book(db, "B0SPLIT123", "MISSING", "", parts=parts, retry_count=3)
+
+        _drain(sync_logic._reconcile_database(1, {"B0SPLIT123": parts}))
+
+        row = _book(db, "B0SPLIT123")
+        assert row["status"] == "DOWNLOADED"
+        assert row["retry_count"] == 0
 
     def test_unknown_asin_on_disk_creates_no_row(self, db, tmp_path):
         path = _make_audio(tmp_path / "data" / "Stranger.m4b")

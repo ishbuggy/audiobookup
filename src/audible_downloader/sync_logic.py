@@ -488,8 +488,14 @@ def _reconcile_database(job_id, found_files):
                         f"SYNC-LOGIC ({job_id}): {len(found_paths)} untracked files carry ASIN {asin_from_file}; "
                         f"linking the book to '{correct_filepath}' only."
                     )
+            # retry_count is reset for the same reason _finalize_success resets it:
+            # the counter only means "how many times has the CURRENT attempt to get
+            # this book failed", and the book is now downloaded. Leaving a stale
+            # count behind would put a book that failed twice before being supplied
+            # by hand permanently past the `retry_count <= 1` auto-retry gate the
+            # moment a later Verify flags it ERROR again.
             cur.execute(
-                "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ? WHERE asin = ?",
+                "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, retry_count = 0 WHERE asin = ?",
                 (correct_filepath, asin_from_file),
             )
             fixed_untracked += 1

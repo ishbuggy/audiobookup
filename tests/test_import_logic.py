@@ -19,7 +19,8 @@ _SCHEMA = (
     "CREATE TABLE audiobooks ("
     "asin TEXT PRIMARY KEY, author TEXT, title TEXT, status TEXT, series TEXT, narrator TEXT, "
     "runtime_min INTEGER, release_date TEXT, filepath TEXT, publisher TEXT, language TEXT, "
-    "purchase_date TEXT, summary TEXT, date_added TEXT, source TEXT DEFAULT 'audible')"
+    "purchase_date TEXT, summary TEXT, date_added TEXT, source TEXT DEFAULT 'audible', "
+    "retry_count INTEGER DEFAULT 0)"
 )
 
 # Copied verbatim from the idempotent migration block in bin/start.sh: schema
@@ -199,6 +200,29 @@ class TestAdoptFile:
         assert len(rows) == 1
         assert rows[0]["filepath"] == path
         assert rows[0]["source"] == "imported"
+
+    def test_reconcile_resets_the_auto_retry_counter(self, db, tmp_path):
+        # Adoption is a success write, so it clears retry_count exactly as the
+        # downloader's own success write does. A book left at retry_count 2 by two
+        # failed downloads, then supplied by hand, would otherwise sit permanently
+        # past the `retry_count <= 1` auto-retry gate the next time Verify flagged it.
+        _seed(db, asin="B0KNOWN123", title="Known", status="MISSING", filepath="", source="audible", retry_count=2)
+        result, _path, _cover = _adopt(db, "known.m4b", tmp_path, embedded_asin="B0KNOWN123")
+        assert result["action"] == "reconciled"
+        row = _rows(db)[0]
+        assert row["status"] == "DOWNLOADED"
+        assert row["retry_count"] == 0
+
+    def test_reimport_of_an_existing_key_resets_the_auto_retry_counter(self, db, tmp_path):
+        # The step-(3) sibling of the test above: an already-imported book re-adopted
+        # at a new path takes the UPDATE branch, which must clear the counter too.
+        _seed(db, asin="B0KNOWN123", title="Known", status="ERROR", filepath="", source="imported", retry_count=2)
+        result, path, _cover = _adopt(db, "k.m4b", tmp_path, allow_reconcile=False, embedded_asin="B0KNOWN123")
+        assert result["key"] == "B0KNOWN123"
+        row = _rows(db)[0]
+        assert row["status"] == "DOWNLOADED"
+        assert row["filepath"] == path
+        assert row["retry_count"] == 0
 
     def test_already_tracked_path_is_skipped(self, db, tmp_path):
         full = tmp_path / "dup.m4b"

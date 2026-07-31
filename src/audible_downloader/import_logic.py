@@ -294,8 +294,14 @@ def adopt_file(filepath, *, allow_reconcile=True, key=None, job_id=None):
                         f"skipping '{filepath}' rather than repointing it."
                     )
                     return {"action": "skipped", "reason": "asin-already-linked", "key": embedded_asin}
+                # retry_count is reset alongside the status, as every writer of
+                # DOWNLOADED does (see processing_logic._finalize_success): the
+                # counter tracks failures of the attempt to GET this book, and the
+                # book is now here. A stale count would leave a twice-failed book
+                # permanently past the `retry_count <= 1` auto-retry gate if a later
+                # Verify ever flags it ERROR again.
                 con.execute(
-                    "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ? WHERE asin = ?",
+                    "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, retry_count = 0 WHERE asin = ?",
                     (filepath, embedded_asin),
                 )
                 con.commit()
@@ -352,8 +358,12 @@ def adopt_file(filepath, *, allow_reconcile=True, key=None, job_id=None):
                 return {"action": "skipped", "reason": "key-already-linked", "key": key}
             # Re-adopting a previously imported book (embedded-ASIN key) at a new
             # path: refresh its location without spawning a duplicate row.
+            # retry_count is cleared here too — same constraint as step (1).
             con.execute(
-                "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, source = 'imported' WHERE asin = ?",
+                (
+                    "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ?, source = 'imported', "
+                    "retry_count = 0 WHERE asin = ?"
+                ),
                 (filepath, key),
             )
             action = "reconciled"

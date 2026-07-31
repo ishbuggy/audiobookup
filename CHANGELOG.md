@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tidying up after a re-download can never remove a file another book still uses:** In the unusual case where two library entries point at the same file on disk, the "clean up replaced files" step after a Force Re-download now checks for shared ownership before deleting anything, instead of after some files were already gone.
 - **Books flagged by the integrity check are retried once, not twice:** When the library integrity check found a book damaged or missing, scheduled auto-processing would re-download it, and then re-download it a second time if that attempt also failed — one more than the "retry a failed book once" setting promises. It now gets exactly one automatic attempt, the same as a book that failed while downloading.
 - **Fallback names for same-named books are double-checked:** When two books would land on the same filename, the alternate name chosen for the second one is now verified to be genuinely free — before, in contrived cases, it could itself already be taken.
+- **A book fixed by hand becomes eligible for automatic retries again:** When the library scan or a manual import finds a book's file and marks the book as downloaded, its count of used-up automatic retry attempts now starts fresh. Previously, a book that had exhausted its retries and was later supplied by hand could be quietly excluded from all future automatic re-downloads if it ever ran into trouble again.
 
 ## [0.23.0] - 2026-07-30
 
