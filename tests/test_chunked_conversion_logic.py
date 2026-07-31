@@ -1371,6 +1371,8 @@ class TestEncodeBookMp3Trim:
             "0",
             "-id3v2_version",
             "3",
+            "-f",
+            "mp3",
             "/data/out.mp3.part",
         ]
 
@@ -1457,6 +1459,14 @@ class TestEncodeBookMp3PartialContainment:
         assert cmd[-1] == self.PART
         replace.assert_called_once_with(self.PART, self.FINAL)
         remove.assert_not_called()
+
+    def test_part_output_names_the_mp3_muxer_explicitly(self):
+        # ffmpeg infers the muxer from the output extension, and ".part" maps to
+        # none of them ("Unable to choose an output format"), so hiding the real
+        # ".mp3" suffix behind it has to be paired with an explicit "-f mp3" —
+        # without it every single-file MP3 encode fails before writing a byte.
+        _, cmd, _, _ = self._run(0)
+        assert cmd[-3:] == ["-f", "mp3", self.PART]
 
     def test_failure_removes_the_part_file_and_never_promotes_it(self):
         result, _, replace, remove = self._run(1)

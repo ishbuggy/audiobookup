@@ -1765,7 +1765,10 @@ def encode_book_mp3(asin, job_id, temp_dir, final_output_path, context, stop_eve
     # all, so the next deep sync would adopt it and mark the book DOWNLOADED.
     # Same directory means the same filesystem, so the rename below is atomic.
     part_path = final_output_path + ".part"
-    command += [part_path]
+    # ffmpeg picks the output muxer from the file extension, and ".part" maps to
+    # nothing ("Unable to choose an output format"), so the format has to be named
+    # explicitly the moment the real ".mp3" suffix is hidden behind it.
+    command += ["-f", "mp3", part_path]
 
     process = None
     stderr_chunks = []
