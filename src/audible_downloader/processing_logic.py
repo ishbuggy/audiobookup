@@ -434,6 +434,29 @@ def _parse_timestamp_date(value):
         return None
 
 
+def resolve_configured_file_timestamp(book_fields):
+    """
+    Resolve the epoch seconds a book's files should carry under the current
+    `conversion.file_timestamp_source` setting, as `(source, timestamp)`.
+
+    `source` is None when the setting is off ("none", the default, or anything
+    unrecognized in an old settings.json) — that is the "leave real file times
+    alone" answer. Otherwise `source` names the field that was consulted and
+    `timestamp` is either the parsed value or None when the book has no usable
+    date, which the caller reports however suits it.
+
+    `book_fields` is any mapping carrying Audible's `release_date` /
+    `purchase_date` fields under those names — the processor's in-memory
+    book_info during a download, or an `audiobooks` row for a book that
+    finished long ago. Both spellings match, so the same policy answers for
+    both and the on-demand sidecars stamp like the download-time ones.
+    """
+    source = load_settings().get("conversion", {}).get("file_timestamp_source", "none")
+    if source not in ("release_date", "purchase_date"):
+        return None, None
+    return source, _parse_timestamp_date((book_fields or {}).get(source))
+
+
 def _build_naming_values(
     asin,
     author,
@@ -2638,12 +2661,10 @@ class BookProcessor:
         date is skipped silently and a utime failure is logged, never fatal —
         a cosmetic timestamp must not turn a finished book into an error.
         """
-        source = load_settings().get("conversion", {}).get("file_timestamp_source", "none")
-        if source not in ("release_date", "purchase_date"):
-            return
-
         book_info = (self.context or {}).get("book_info") or {}
-        timestamp = _parse_timestamp_date(book_info.get(source))
+        source, timestamp = resolve_configured_file_timestamp(book_info)
+        if source is None:
+            return
         if timestamp is None:
             log.debug(f"PROCESSOR ({self.asin}): No usable {source} for file timestamps; leaving them as-is.")
             return

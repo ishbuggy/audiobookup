@@ -889,10 +889,16 @@ class TestDownloadBookAnnotations:
 
         db_path = tmp_path / "library.db"
         con = sqlite3.connect(db_path)
-        con.execute("CREATE TABLE audiobooks (asin TEXT PRIMARY KEY, title TEXT, status TEXT, filepath TEXT)")
         con.execute(
-            "INSERT INTO audiobooks (asin, title, status, filepath) VALUES (?, ?, ?, ?)",
-            ("B001", "Dracula", "DOWNLOADED", str(book_file)),
+            "CREATE TABLE audiobooks (asin TEXT PRIMARY KEY, title TEXT, status TEXT, filepath TEXT, "
+            "release_date TEXT, purchase_date TEXT)"
+        )
+        # The dates carry the conversion.file_timestamp_source stamping (#26):
+        # sync stores its "N/A" placeholder when Audible omits a field.
+        con.execute(
+            "INSERT INTO audiobooks (asin, title, status, filepath, release_date, purchase_date) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("B001", "Dracula", "DOWNLOADED", str(book_file), "2019-06-27", "2023-04-05T06:07:08.000Z"),
         )
         # A book that was never downloaded: no path to place a sidecar beside.
         con.execute(
@@ -1080,6 +1086,66 @@ class TestDownloadBookAnnotations:
         ):
             response = client.post("/api/book/B001/annotations")
         assert response.status_code == 200
+        assert annotated_db.with_name("Dracula.annotations.json").exists()
+
+    def _run_with_timestamp_source(self, client, source, asin="B001"):
+        """POST the annotations route with conversion.file_timestamp_source set."""
+        from audible_downloader import processing_logic
+
+        settings = {"conversion": {"file_timestamp_source": source}}
+        with (
+            mock.patch.object(processing_logic, "load_settings", return_value=settings),
+            mock.patch("audible_downloader.routes.subprocess.run", side_effect=self._fake_run(writes_file=True)),
+        ):
+            return client.post(f"/api/book/{asin}/annotations")
+
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [("release_date", (2019, 6, 27)), ("purchase_date", (2023, 4, 5))],
+    )
+    def test_sidecar_is_stamped_like_the_books_other_files(
+        self, client, completed_setup, annotated_db, source, expected
+    ):
+        # Backlog #26: download-time annotations are stamped at finalize, so with
+        # a timestamp source configured an on-demand dump must not be the one
+        # file of the book still reading "now".
+        from datetime import datetime
+
+        _login_session(client)
+        response = self._run_with_timestamp_source(client, source)
+        assert response.status_code == 200
+        sidecar = annotated_db.with_name("Dracula.annotations.json")
+        assert sidecar.stat().st_mtime == datetime(*expected).timestamp()
+
+    @pytest.mark.parametrize("source", ["none", "bogus"])
+    def test_stamping_off_leaves_the_sidecar_alone(self, client, completed_setup, annotated_db, source):
+        # The default ("none") and an unrecognized value from an old
+        # settings.json both mean "leave real file times alone".
+        from datetime import datetime
+
+        _login_session(client)
+        response = self._run_with_timestamp_source(client, source)
+        assert response.status_code == 200
+        sidecar = annotated_db.with_name("Dracula.annotations.json")
+        assert sidecar.stat().st_mtime != datetime(2019, 6, 27).timestamp()
+
+    def test_a_book_with_no_usable_date_still_saves_its_annotations(self, client, completed_setup, annotated_db):
+        # B004 has no release_date at all: the stamp is skipped, the download is
+        # still a success — a cosmetic timestamp must never fail the route.
+        _login_session(client)
+        response = self._run_with_timestamp_source(client, "release_date", asin="B004")
+        assert response.status_code == 200
+        assert response.get_json()["annotations"] is True
+        assert (annotated_db.parent / "Dracula" / "Bram Stoker - Dracula.annotations.json").exists()
+
+    def test_a_failed_stamp_does_not_fail_the_download(self, client, completed_setup, annotated_db):
+        # Resolution or utime blowing up is non-fatal: the annotations are
+        # already on disk by then.
+        _login_session(client)
+        with mock.patch("audible_downloader.routes.os.utime", side_effect=OSError("read-only")):
+            response = self._run_with_timestamp_source(client, "release_date")
+        assert response.status_code == 200
+        assert response.get_json()["annotations"] is True
         assert annotated_db.with_name("Dracula.annotations.json").exists()
 
 

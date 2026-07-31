@@ -947,11 +947,18 @@ def download_book_annotations(asin):
         annotations_command,
         find_annotations_file,
     )
-    from audible_downloader.processing_logic import _tracked_part_paths, sidecar_base_for_tracked_book
+    from audible_downloader.processing_logic import (
+        _tracked_part_paths,
+        resolve_configured_file_timestamp,
+        sidecar_base_for_tracked_book,
+    )
 
     con = get_db_connection()
     try:
-        row = con.execute("SELECT status, filepath FROM audiobooks WHERE asin = ?", (asin,)).fetchone()
+        # release_date/purchase_date come along for the timestamp stamping below.
+        row = con.execute(
+            "SELECT status, filepath, release_date, purchase_date FROM audiobooks WHERE asin = ?", (asin,)
+        ).fetchone()
     except sqlite3.Error as e:
         log.error(f"Database error reading book {asin} for annotations: {e}", exc_info=True)
         return jsonify(error="Failed to read the database."), 500
@@ -1048,6 +1055,22 @@ def download_book_annotations(asin):
             base = os.path.splitext(filepath)[0]
         target = base + ".annotations.json"
         shutil.move(source, target)
+        # Stamp the new sidecar like its siblings. A download-time annotations
+        # file is stamped by the processor's finalize step, so with
+        # `conversion.file_timestamp_source` set every file of the book carries
+        # the release/purchase date — a dump fetched afterwards would otherwise
+        # be the one file left reading "now". Same policy, same resolution,
+        # asked of the stored row instead of the in-flight book_info.
+        try:
+            timestamp_source, timestamp = resolve_configured_file_timestamp(dict(row))
+            if timestamp is not None:
+                os.utime(target, (timestamp, timestamp))
+            elif timestamp_source is not None:
+                log.debug(f"No usable {timestamp_source} for {asin}; leaving the annotations timestamp as-is.")
+        except Exception as e:
+            # Non-fatal by design: the annotations are already saved, so a failed
+            # stamp is a cosmetic miss and must not turn this into an error.
+            log.debug(f"Could not set the annotations timestamp for {asin}: {e}")
         log.info(f"Saved annotations for {asin} to {target}")
         return jsonify(success=True, annotations=True, path=target)
     except subprocess.TimeoutExpired:
