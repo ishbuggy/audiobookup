@@ -2581,12 +2581,27 @@ class TestGenerateCueSheet:
         assert "TRACK 100 AUDIO" in cue
         assert "TRACK 105 AUDIO" in cue
 
-    def test_embedded_quotes_are_escaped(self):
+    def test_embedded_quotes_become_two_single_quotes(self):
+        # CUE has no backslash escape, so a double quote is REPLACED, not escaped.
         chapters = [{"title": 'The "Big" Chapter', "start_offset_ms": 0}]
         cue = generate_cue_sheet(chapters, "x.m4b", 'A "Quoted" Title', 'Au "thor"', "B0")
-        assert 'TITLE "The \\"Big\\" Chapter"' in cue
-        assert 'TITLE "A \\"Quoted\\" Title"' in cue
-        assert 'PERFORMER "Au \\"thor\\""' in cue
+        assert "TITLE \"The ''Big'' Chapter\"" in cue
+        assert "TITLE \"A ''Quoted'' Title\"" in cue
+        assert "PERFORMER \"Au ''thor''\"" in cue
+        assert "\\" not in cue
+
+    def test_embedded_newlines_stay_on_one_line(self):
+        # A CR/LF inside a field would split the record in this line-oriented
+        # format; each becomes a single space (CRLF collapsing to one, not two).
+        chapters = [{"title": "Split\r\nChapter", "start_offset_ms": 0}]
+        cue = generate_cue_sheet(chapters, "x.m4b", "Ti\ntle", "Au\rthor", "B0")
+        assert 'PERFORMER "Au thor"' in cue
+        assert 'TITLE "Ti tle"' in cue
+        assert '    TITLE "Split Chapter"' in cue
+        assert "\r" not in cue
+        # Header lines + one TRACK/TITLE/INDEX trio, and nothing extra from a
+        # field having broken across lines.
+        assert len(cue.rstrip("\n").split("\n")) == 7
 
     def test_missing_chapter_title_falls_back(self):
         cue = generate_cue_sheet([{"start_offset_ms": 0}], "x.m4b", "T", "A", "B0")

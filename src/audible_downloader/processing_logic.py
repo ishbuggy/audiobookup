@@ -1493,12 +1493,17 @@ def generate_cue_sheet(chapters, audio_filename, title, author, asin):
     CUE INDEX times are MM:SS:FF, where FF counts 1/75-second frames. MM is the
     total minute count and may exceed 99 on long books; SS is 0..59; FF is
     derived from the millisecond remainder. Track numbers are zero-padded to at
-    least two digits (three past track 99). Embedded double quotes in any quoted
-    field are escaped so a stray quote in a title can't break the CUE syntax.
+    least two digits (three past track 99).
+
+    The CUE format defines NO escape mechanism inside a quoted field, so unsafe
+    characters can only be replaced, never escaped: a double quote becomes two
+    single quotes (the convention other CUE writers use, and visually close to
+    the original), and CR/LF — which would split a record in this line-oriented
+    format — become a single space (a CRLF pair collapses to one space).
     """
 
     def _q(text):
-        return (text or "").replace('"', '\\"')
+        return (text or "").replace('"', "''").replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
 
     # MP3 output declares FILE ... MP3; every mp4-family container is WAVE.
     ext = os.path.splitext(audio_filename)[1].lower()
