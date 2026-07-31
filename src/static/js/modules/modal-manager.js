@@ -117,6 +117,17 @@ function renderFileInfo(book) {
     });
 }
 
+// Books adopted from disk by the importer have no Audible identity, so they are
+// stored under a synthetic "IMPORT-<hex>" key in the ASIN column (see the key
+// minting in import_logic.py). Every feature that calls out to Audible for a book
+// — the annotations dump, the full-summary fetch — would hand that key to
+// `audible download -a IMPORT-…` and fail every single time. The two buttons that
+// do so are therefore HIDDEN for these books rather than disabled: there is no
+// state in which they could ever succeed, so offering them at all is misleading.
+function isRealAudibleAsin(asin) {
+    return typeof asin === "string" && asin !== "" && !asin.startsWith("IMPORT-");
+}
+
 async function handleBookClick(event) {
     const card = event.target.closest(".book-card");
     if (!card) return; // Not a book card click
@@ -202,9 +213,13 @@ async function handleBookClick(event) {
             errorDetailsDiv.style.display = "none";
         }
 
+        // Both Audible-backed actions below are off the table for an imported book,
+        // whose synthetic key Audible has never heard of.
+        const canQueryAudible = isRealAudibleAsin(asin);
+
         // Full Summary Button
         const fetchSummaryBtn = document.getElementById("fetch-full-summary-btn");
-        if (book.is_summary_full === 0) {
+        if (book.is_summary_full === 0 && canQueryAudible) {
             fetchSummaryBtn.style.display = "inline-block";
             fetchSummaryBtn.dataset.asin = asin;
         } else {
@@ -214,7 +229,7 @@ async function handleBookClick(event) {
         // Annotations Button: the dump is written next to the audiobook, so it is
         // only offered for a book that actually has a file on disk. (The route
         // re-checks this — the button is a convenience, not the guard.)
-        if (book.status === "DOWNLOADED") {
+        if (book.status === "DOWNLOADED" && canQueryAudible) {
             downloadAnnotationsBtn.style.display = "inline-block";
             downloadAnnotationsBtn.dataset.asin = asin;
         } else {
