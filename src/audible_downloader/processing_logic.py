@@ -2457,10 +2457,14 @@ class BookProcessor:
         back out of it, so a run that produced nothing leaves nothing.
 
         _plan_split_output creates the folder before the first chunk is even
-        queued, which means a failed encode, a rolled-back promotion or a
-        discarded post-timeout set all leave an empty directory sitting in the
-        library — most visibly in D5's flat-template case, where that folder is a
-        level that did not exist before this run. _cleanup_empty_dirs does the
+        queued, which means a failed encode, a cancelled one, a rolled-back
+        promotion or a discarded post-timeout set all leave an empty directory
+        sitting in the library — most visibly in D5's flat-template case, where
+        that folder is a level that did not exist before this run. The four
+        callers cover exactly those: _fail_or_cancel (every failed or cancelled
+        step, including a chunk that never got to encode), the verification
+        failure, the promotion rollback and the post-timeout discard.
+        _cleanup_empty_dirs does the
         work and carries the guarantees that matter: it only ever rmdirs, so a
         folder holding anything at all (another book's files, a stray sidecar) is
         left alone, and it refuses to walk outside /data.
@@ -3463,7 +3467,17 @@ class BookProcessor:
         _update_db_on_failure; either way exactly one write survives.) The prepare
         path needs no equivalent guard: it already reads its own -15 as
         cancellation and writes nothing.
+
+        Whatever the report turns out to be, the run is over for this book, so
+        this is also where a split book's empty output folder goes. It runs
+        BEFORE the two early returns above precisely because a cancel and a
+        post-timeout echo leave the same empty directory a plain failure does,
+        and it is safe on every path into here: parts only ever enter that folder
+        during promotion, and a promotion that failed part-way has already put
+        them back (_remove_promoted_parts). A folder holding anything at all is
+        left alone by _cleanup_empty_dirs regardless.
         """
+        self._prune_empty_split_dir()
         if self.stop_event is not None and self.stop_event.is_set():
             log.info(f"PROCESSOR ({self.asin}): Step cancelled; leaving book status unchanged.")
             return

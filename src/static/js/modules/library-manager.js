@@ -143,9 +143,12 @@ function buildDuplicateBadgeHTML(book) {
 // server-supplied integer (never user text), so interpolating it into the markup
 // is safe — the duplicate badge above composes its markup the same way.
 function buildFileCountBadgeHTML(book) {
-    return book.file_count > 0
-        ? `<span class="badge-files" title="Split into ${book.file_count} chapter files"><i class="fas fa-layer-group"></i> ${book.file_count} files</span>`
-        : "";
+    if (!(book.file_count > 0)) return "";
+    // A one-part set can't happen today (splitting needs two or more chapters),
+    // but the detail modal already handles the singular and the two must not read
+    // differently if any future writer ever produces one.
+    const plural = book.file_count === 1 ? "" : "s";
+    return `<span class="badge-files" title="Split into ${book.file_count} chapter file${plural}"><i class="fas fa-layer-group"></i> ${book.file_count} file${plural}</span>`;
 }
 
 // --- Grid View (default cards) ---

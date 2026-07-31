@@ -4107,6 +4107,58 @@ class TestPostTimeoutSplitFinalize:
         assert all(os.path.exists(p) for p in processor.split_part_paths)
 
 
+class TestFailedSplitRunLeavesNoEmptyFolder:
+    """Review M1: _plan_split_output creates the book's output folder before the
+    first chunk is queued, so a failed or cancelled encode used to leave an empty
+    directory behind in the library — most visibly under a flat naming template,
+    where that folder is a level that did not exist before the run. Every failure
+    and cancel report goes through _fail_or_cancel, so that is where the folder is
+    swept; _cleanup_empty_dirs only ever rmdirs, so nothing holding files is at
+    risk."""
+
+    def _report(self, message, *, split=True, stop_event=None, timed_out=False):
+        processor = BookProcessor(asin="B0OURS", job_id=7, stop_event=stop_event)
+        processor.final_output_path = "/data/Bram Stoker - Dracula.m4b"
+        if split:
+            processor.split_output_dir = "/data/Bram Stoker/Dracula"
+            processor.split_part_paths = [
+                "/data/Bram Stoker/Dracula/Dracula - 01 - One.m4b",
+                "/data/Bram Stoker/Dracula/Dracula - 02 - Two.m4b",
+            ]
+        if timed_out:
+            processor._timed_out.set()
+        with (
+            mock.patch.object(processing_logic, "_cleanup_empty_dirs") as cleanup_dirs,
+            mock.patch.object(processor, "_update_db_on_failure") as fail,
+        ):
+            processor._fail_or_cancel(message)
+        return cleanup_dirs, fail
+
+    def test_a_failed_chunk_encode_removes_the_planned_folder(self):
+        cleanup_dirs, fail = self._report("A chapter chunk failed to encode.")
+        cleanup_dirs.assert_called_once_with("/data/Bram Stoker/Dracula")
+        fail.assert_called_once()
+
+    def test_a_cancel_removes_it_too_without_touching_the_book(self):
+        # The cancel path returns before any DB write, so the sweep runs first —
+        # a cancelled split download must not leave a folder either.
+        stop_event = Event()
+        stop_event.set()
+        cleanup_dirs, fail = self._report("A chapter chunk failed to encode.", stop_event=stop_event)
+        cleanup_dirs.assert_called_once_with("/data/Bram Stoker/Dracula")
+        fail.assert_not_called()
+
+    def test_a_post_timeout_echo_removes_it_too_without_reporting_again(self):
+        cleanup_dirs, fail = self._report("A chapter chunk failed to encode.", timed_out=True)
+        cleanup_dirs.assert_called_once_with("/data/Bram Stoker/Dracula")
+        fail.assert_not_called()
+
+    def test_an_unsplit_run_has_no_folder_of_its_own_to_remove(self):
+        cleanup_dirs, fail = self._report("MP3 encode failed.", split=False)
+        cleanup_dirs.assert_not_called()
+        fail.assert_called_once()
+
+
 class TestUnsplitFinalizeStillClearsPartRows:
     """The mirror of the split write: a book re-downloaded as a single file must
     lose the part rows a previous split download left, or it stays 'split'

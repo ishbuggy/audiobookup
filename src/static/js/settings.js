@@ -457,6 +457,32 @@ document.addEventListener("DOMContentLoaded", () => {
             return;
         }
 
+        // The same guard once more, for Minimum Chapter File Length. Its min/max
+        // attributes are inert for exactly the reason the password's minlength was
+        // — saving is a button click, not a form submit — and both ends of the
+        // range matter: a CLEARED field posts Number("") === 0, silently switching
+        // chapter merging off, while an absurdly large value merges every chapter
+        // forward until the "two or more parts" gate quietly converts the book to a
+        // single file with the Split by Chapter toggle still showing on. The server
+        // clamps the same range; this is what tells the user, rather than saving
+        // something other than what the field says.
+        const MAX_FILE_DURATION_SEC = 3600; // mirrors the input's max attribute
+        const minDurationInput = document.getElementById("minimum-file-duration");
+        // Skip the check while the field is disabled (Split by Chapter off): the
+        // value is irrelevant then, and blocking the save would point the user at a
+        // greyed-out field they cleared before turning splitting off.
+        if (minDurationInput && !minDurationInput.disabled) {
+            const rawDuration = minDurationInput.value.trim();
+            const duration = Number(rawDuration);
+            if (rawDuration === "" || !Number.isFinite(duration) || duration < 0 || duration > MAX_FILE_DURATION_SEC) {
+                showCustomAlert(
+                    `Minimum Chapter File Length must be a number between 0 and ${MAX_FILE_DURATION_SEC} seconds (0 disables merging). Nothing was saved.`,
+                    '<i class="fas fa-times-circle" style="color: #dc3545;"></i> Invalid Chapter Length',
+                );
+                return;
+            }
+        }
+
         // Correctly get the initial username from the data attribute set in the HTML
         const initialUsername = usernameInput.dataset.initialUsername;
 
@@ -556,8 +582,12 @@ document.addEventListener("DOMContentLoaded", () => {
                     }
                 }
             } catch (error) {
+                // showCustomAlert assigns innerHTML (other callers pass markup),
+                // and this message can carry a string that came back from the
+                // server — escape it here rather than at the modal, which every
+                // other caller relies on to render its <strong>/<i> tags.
                 showCustomAlert(
-                    `Could not save settings: ${error.message}`,
+                    `Could not save settings: ${window.escapeHtml(error.message)}`,
                     '<i class="fas fa-times-circle" style="color: #dc3545;"></i> Error',
                 );
             }
@@ -690,8 +720,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 );
                 setTimeout(() => window.location.reload(), 2000);
             } catch (error) {
+                // Escaped for the same reason as the save handler's alert above:
+                // the message may be the server's own `error` string, and the
+                // modal renders whatever it is given as HTML.
                 showCustomAlert(
-                    `Error importing settings: ${error.message}`,
+                    `Error importing settings: ${window.escapeHtml(error.message)}`,
                     '<i class="fas fa-times-circle" style="color: #dc3545;"></i> Error',
                 );
             }

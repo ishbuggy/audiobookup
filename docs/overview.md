@@ -27,7 +27,7 @@ Once synced, your library dashboard shows every book you own along with its curr
 
 ### Download & Convert
 
-Selecting books to process (or letting automation do it) starts a background job. AudioBookup downloads each book from Audible, decrypts it, converts it to your chosen output format, embeds chapters and metadata, and writes it to disk — all while showing granular, real-time progress in the job panel. You can safely close the browser; the job keeps running on the server.
+Selecting books to process (or letting automation do it) starts a background job. AudioBookup downloads each book from Audible, decrypts it, converts it to your chosen output format, embeds chapters and metadata, and writes it to disk — one file per book by default, or one file per chapter if you've turned on Split by Chapter — all while showing granular, real-time progress in the job panel. You can safely close the browser; the job keeps running on the server.
 
 Finished files carry extended tags — album, album artist, genre, publisher, and the Audible ASIN, alongside the usual title/author/narrator — so they slot cleanly into players like Plex, Audiobookshelf, and Apple Books. And if a re-encoded book arrives from Audible as one single chapter longer than 30 minutes, AudioBookup automatically splits it into evenly spaced 15-minute "Part N" chapters so you can still navigate and track your position (an "Original" lossless remux keeps its chapters exactly as delivered).
 
@@ -55,7 +55,7 @@ A few terms that come up throughout the app and the rest of these docs:
 - **Jobs:** AudioBookup runs one job at a time — a Sync, a Download, or a Verify (library-integrity check) — tracked with live progress and kept in a searchable history.
 - **Sidecar files:** Optional extra files saved alongside a converted audiobook, sharing its filename. The Settings page's **Sidecar Files** section covers a cover image, a `metadata.json`, and a `.cue` chapter sheet — all off by default. Two more sit under **Downloading** instead: the book's companion PDF (on by default) and the original undecrypted source file.
 - **Advanced Mode:** A single toggle on the Settings page that reveals the full set of expert options — download-quality requests, MP3 encoder tuning, chapter/metadata cleanups, sidecar files, separate folder/file naming templates, and more — without cluttering the page for everyday use.
-- **Output formats:** **AAC `.m4b`** re-encodes for precision and universal player compatibility; **Original** is a lossless remux with no re-encoding step; **MP3** encodes a single file per book, readable by effectively any player.
+- **Output formats:** **AAC `.m4b`** re-encodes for precision and universal player compatibility; **Original** is a lossless remux with no re-encoding step; **MP3** encodes to a format readable by effectively any player. Any of the three can also save one file per chapter instead of one file for the whole book — see [Split by Chapter](configuration.md#chapters--metadata).
 
 ## Where to go next
 

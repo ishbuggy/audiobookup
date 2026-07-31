@@ -95,19 +95,24 @@ function renderFileInfo(book) {
     partsList.innerHTML = "";
     if (!isSplit) return;
 
-    // A part the server could not stat reports "Missing" (deleted) or
-    // "Unreadable" (permissions); either way the set is incomplete.
-    const missingCount = book.files.filter(
-        (part) => part.size_hr === "Missing" || part.size_hr === "Unreadable",
-    ).length;
+    // A part the server could not stat reports "Missing" (the file is gone) or
+    // "Unreadable" (it is there but permissions or I/O got in the way). Either
+    // way the set is incomplete, but the summary keeps the two apart just as the
+    // rows below do — calling a permissions failure "missing" sends the user
+    // looking for a file that never left.
+    const missingCount = book.files.filter((part) => part.size_hr === "Missing").length;
+    const unreadableCount = book.files.filter((part) => part.size_hr === "Unreadable").length;
+    const problems = [];
+    if (missingCount > 0) problems.push(`${missingCount} missing`);
+    if (unreadableCount > 0) problems.push(`${unreadableCount} unreadable`);
     const plural = book.files.length === 1 ? "" : "s";
     document.getElementById("modal-file-count").textContent =
-        missingCount > 0
-            ? `${book.files.length} chapter file${plural} (${missingCount} missing)`
+        problems.length > 0
+            ? `${book.files.length} chapter file${plural} (${problems.join(", ")})`
             : `${book.files.length} chapter file${plural}`;
     // An incomplete set must be visible at the summary level, not buried in a
     // collapsed list — review W1.
-    if (missingCount > 0) partsDetails.open = true;
+    if (problems.length > 0) partsDetails.open = true;
     book.files.forEach((part) => {
         const li = document.createElement("li");
         if (part.size_hr === "Missing") li.textContent = `${part.name} — missing`;

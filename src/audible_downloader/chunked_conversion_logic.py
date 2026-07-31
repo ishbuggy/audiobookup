@@ -46,6 +46,10 @@ AUTO_CHUNK_SIZE_SEC = 900
 # chapter-JSON data, not branding. Milliseconds.
 MAX_PLAUSIBLE_BRAND_SPAN_MS = 60_000
 
+# Upper bound on the "Minimum Chapter File Length" setting, mirroring the max the
+# settings input offers. Seconds.
+_MAX_MIN_FILE_DURATION_SEC = 3600
+
 # The MP3 (LAME) frame bitrates, ascending. When "match source bitrate" is on we
 # round the master's bitrate UP to the smallest of these that isn't lower, so a
 # re-encode never throws away bits the source had (capped at 320, LAME's ceiling).
@@ -880,9 +884,14 @@ def prepare_book_assets(asin, job_id, temp_dir, lossless=False):
             will_remux_lossless = output_format == "original" and audio_file.lower().endswith(".m4b")
             # The setting is in SECONDS; the transform takes milliseconds.
             # A hand-edited settings.json can hold anything, and anything
-            # unusable means "no merge" rather than an exception.
+            # unusable means "no merge" rather than an exception. Both ends are
+            # clamped to the range the settings input itself offers (0..3600):
+            # past the top end every chapter merges forward into the next until
+            # the ">= 2 parts" gate quietly converts the book single-file with
+            # the toggle still showing on.
             try:
-                min_ms = max(0, int(float(chapter_settings.get("minimum_file_duration", 0) or 0))) * 1000
+                seconds = int(float(chapter_settings.get("minimum_file_duration", 0) or 0))
+                min_ms = min(_MAX_MIN_FILE_DURATION_SEC, max(0, seconds)) * 1000
             except (TypeError, ValueError):
                 min_ms = 0
             merged_chapters = merge_short_chapters(chapters_list, min_ms)

@@ -314,6 +314,25 @@ def get_book_details(asin):
     part_rows = get_book_files(asin)
     book_dict["file_count"] = len(part_rows)
     if part_rows:
+        # A split book demoted to MISSING has `audiobooks.filepath` blanked by the
+        # deep-sync reconcile while its part rows deliberately survive, which left
+        # the modal showing "Path: N/A" above a real size and a list of bare
+        # basenames — the user is told the book is missing and given nowhere to
+        # look for the parts that aren't (review W3). The parts still name their
+        # own folder, so the Path line falls back to it.
+        if not book_dict.get("filepath"):
+            part_dirs = {os.path.dirname(row["filepath"]) for row in part_rows}
+            if len(part_dirs) == 1:
+                book_dict["filepath"] = part_dirs.pop()
+            else:
+                # One folder by construction; a hand-edited set spanning several
+                # falls back to the deepest folder holding all of them. Mixed
+                # absolute/relative paths make that unanswerable, and then the
+                # Path line simply stays "N/A" as before.
+                try:
+                    book_dict["filepath"] = os.path.commonpath(sorted(part_dirs))
+                except ValueError:
+                    pass
         # Per-part sizes for the modal's file list, plus the roll-ups (total
         # size, newest mtime) that stand in for the single file's stats.
         parts = []
@@ -988,6 +1007,14 @@ def download_book_annotations(asin):
         return jsonify(error="This book has not been downloaded yet."), 400
     if not os.path.exists(filepath):
         return jsonify(error="The book's audio file is missing from disk."), 400
+    # For a split book that path is the FOLDER, which outlives every chapter file
+    # being deleted out of it — so the check above passes for a book with no audio
+    # left at all and the dump lands in an empty folder, against the guard's whole
+    # point (review M2). The part rows are that shape's real file list, so ask
+    # them instead: one surviving part is enough to have somewhere to save beside.
+    part_paths = _tracked_part_paths(asin)
+    if part_paths and not any(os.path.exists(path) for path in part_paths):
+        return jsonify(error="The book's chapter files are missing from disk."), 400
 
     env = os.environ.copy()
     env["HOME"] = DATABASE_DIR

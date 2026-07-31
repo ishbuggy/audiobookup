@@ -800,6 +800,23 @@ class TestSplitDecision:
         assert context["split_output"] is True
         assert len(context["chapters"]) == 2
 
+    def test_an_out_of_range_minimum_is_clamped_to_the_settings_maximum(self):
+        # Review M3: the settings input offers 0..3600 seconds but a hand-edited
+        # settings.json (or, before the client-side guard, a typo) could carry
+        # anything. Unclamped, an absurd minimum merges every chapter forward
+        # until nothing is left to split and the book quietly converts to a single
+        # file with the toggle still on. Two 2-hour chapters stay two files.
+        chapters = [
+            {"title": "One", "start_offset_ms": 0, "length_ms": 7_200_000},
+            {"title": "Two", "start_offset_ms": 7_200_000, "length_ms": 7_200_000},
+        ]
+        context, error, _ = self._run_prepare(
+            _split_settings(minimum_file_duration=100_000), chapters=chapters, total_sec="14400.0"
+        )
+        assert error is None
+        assert context["split_output"] is True
+        assert [c["title"] for c in context["chapters"]] == ["One", "Two"]
+
     def test_single_chapter_book_is_not_split(self):
         # Short enough that auto-chunking doesn't fire either, so this really is
         # the "fewer than two chapters" gate.

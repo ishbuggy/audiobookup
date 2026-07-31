@@ -1119,6 +1119,33 @@ class TestDownloadBookAnnotations:
         assert (split_dir / "Bram Stoker - Dracula.annotations.json").exists()
         assert not (annotated_db.parent / "Dracula.annotations.json").exists()
 
+    def test_split_book_with_every_part_deleted_is_rejected(self, client, completed_setup, annotated_db):
+        # Review M2: a split book's filepath is its FOLDER, which survives every
+        # chapter file being deleted out of it — so the "file actually on disk"
+        # guard passed and the dump was written into an empty folder. The part
+        # rows are what that shape has to be judged on.
+        _login_session(client)
+        split_dir = annotated_db.parent / "Dracula"
+        for part in split_dir.glob("*.m4b"):
+            part.unlink()
+        with mock.patch("audible_downloader.routes.subprocess.run") as run:
+            response = client.post("/api/book/B004/annotations")
+        assert response.status_code == 400
+        assert "error" in response.get_json()
+        run.assert_not_called()  # no Audible call for a book with no audio left
+        assert not list(split_dir.glob("*.annotations.json"))
+
+    def test_split_book_with_one_surviving_part_is_allowed(self, client, completed_setup, annotated_db):
+        # The other side of that guard: a partly-deleted set still has somewhere
+        # to put the sidecar, so it saves exactly as a complete set does.
+        _login_session(client)
+        split_dir = annotated_db.parent / "Dracula"
+        (split_dir / "Dracula - 2 - Two.m4b").unlink()
+        with mock.patch("audible_downloader.routes.subprocess.run", side_effect=self._fake_run(writes_file=True)):
+            response = client.post("/api/book/B004/annotations")
+        assert response.status_code == 200
+        assert (split_dir / "Bram Stoker - Dracula.annotations.json").exists()
+
     def test_single_file_book_is_unaffected(self, client, completed_setup, annotated_db):
         # The control: a normal book still saves next to its own audio file.
         _login_session(client)
@@ -1350,6 +1377,45 @@ class TestGetBookDetailsSplit:
         # The total covers only the parts still on disk (1024 + 4096 bytes).
         assert data["file_size_hr"] == "5.0 KB"
         assert data["file_mtime_hr"] != "N/A"
+
+    def test_blanked_filepath_falls_back_to_the_parts_folder(self, client, completed_setup, details_db):
+        # Review W3: the deep-sync reconcile blanks a demoted split book's
+        # `filepath` but deliberately keeps its part rows, which left the modal
+        # showing "Path: N/A" beside a real size and a list of bare basenames —
+        # the book is called missing and the user is given nowhere to look for the
+        # parts that survived. The parts still name their folder.
+        from audible_downloader import db as db_module
+
+        con = sqlite3.connect(db_module.DB_FILE)
+        con.execute("UPDATE audiobooks SET filepath = '', status = 'MISSING' WHERE asin = 'B003'")
+        con.commit()
+        con.close()
+
+        _login_session(client)
+        response = client.get("/api/book/B003")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["filepath"] == str(details_db["one_missing_dir"])
+        # The surviving parts still report normally.
+        assert data["file_count"] == 3
+        assert data["file_size_hr"] == "5.0 KB"
+
+    def test_blanked_filepath_on_a_single_file_book_is_unchanged(self, client, completed_setup, details_db):
+        # The control: with no part rows there is nothing to derive a folder from,
+        # so the single-file path keeps today's empty answer.
+        from audible_downloader import db as db_module
+
+        con = sqlite3.connect(db_module.DB_FILE)
+        con.execute("UPDATE audiobooks SET filepath = '', status = 'MISSING' WHERE asin = 'B001'")
+        con.commit()
+        con.close()
+
+        _login_session(client)
+        response = client.get("/api/book/B001")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert not data["filepath"]
+        assert data["file_size_hr"] == "N/A"
 
     def test_split_book_with_no_parts_on_disk_reports_na(self, client, completed_setup, details_db):
         _login_session(client)
