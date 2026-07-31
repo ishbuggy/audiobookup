@@ -105,12 +105,16 @@ _SIDECAR_SUFFIXES = (
 # Audiobookshelf drops a "cover.jpg" (plus a bare "metadata.json", which matches
 # no suffix at all) into every book folder, so a folder whose real sidecars are
 # gone reads back as the base "cover", and the stale sweep then deletes another
-# program's file. A cue sheet, a curated ".metadata.json" and an annotations dump
-# hanging off a NAMED base are ours; cover images, PDFs and raw masters are
+# program's file. A retained ".aax"/".aaxc" master and its ".voucher" are
+# audible-cli artifacts no external library manager produces, so they corroborate
+# as strongly as a curated ".metadata.json" — and for a SPLIT book they are
+# usually the ONLY corroborator on offer, since a split book never gets a cue
+# sheet (D9) and both JSON dumps are opt-in settings. Cover images and PDFs are
 # exactly what other tools also leave lying around, so they corroborate nothing.
-# Deliberately narrow: a suffix missing from here only costs a skipped sweep (a
-# harmless file left behind), while a wrong one costs a user's data.
-_APP_WRITTEN_SIDECAR_SUFFIXES = (".cue", ".metadata.json", ".annotations.json")
+# Deliberately narrow, and the asymmetry is the point: a suffix missing from here
+# costs a skipped sweep — the files just stay where they are, stranded in a
+# folder no row points at — while a wrong one costs a user's data.
+_APP_WRITTEN_SIDECAR_SUFFIXES = (".cue", ".metadata.json", ".annotations.json", ".aax", ".aaxc", ".voucher")
 
 # Every audio extension a tracked book's file can carry. Two books at the same
 # base under DIFFERENT audio extensions share one set of sidecars, so any of
@@ -228,7 +232,7 @@ def _unique_sidecar_base(folder):
     return None
 
 
-def _owned_sidecar_base(folder, expected_stem=None):
+def _owned_sidecar_base(folder, expected_stem=None, quiet=False):
     """
     The sidecar base inside `folder` that this book can be shown to OWN, or None
     when the folder's one candidate cannot be corroborated.
@@ -249,12 +253,24 @@ def _owned_sidecar_base(folder, expected_stem=None):
        the same is this book's, and that covers every case where the naming of
        the stem itself didn't change between runs — the overwhelming majority.
     2. **The files.** A base carrying at least one _APP_WRITTEN_SIDECAR_SUFFIXES
-       file was written by this app whatever it is called, which is what keeps a
-       renamed book's old sidecars sweepable/movable.
+       file was written by this app whatever it is called, so it can still be
+       swept or moved after a rename has left its stem behind. This arm is a
+       backstop, not a guarantee: for a split book the cue sheet is never written
+       (D9) and both JSON dumps are opt-in, so what usually answers here is a
+       retained ".aax"/".aaxc" master and its ".voucher" — and a renamed split
+       book with none of those on disk is simply left alone.
 
     Neither answered means we cannot prove the files are ours, so we do nothing
     with them: an abandoned cover left behind in a folder is a mess, deleting a
     file this app never wrote is data loss.
+
+    `quiet` silences the "leaving them alone" line for callers that are only
+    ASKING where a book's sidecars are rather than moving or deleting any — the
+    same affordance, and for the same reason, as `_split_folder_and_stem`: the
+    annotations button runs this on every press, and a book folder shared with
+    another library manager would announce its refusal into a user-downloadable
+    app.log every time. The destructive callers (the stale sweep, the rename)
+    stay loud, because there the refusal explains a sweep that didn't happen.
     """
     base = _unique_sidecar_base(folder)
     if base is None:
@@ -269,10 +285,11 @@ def _owned_sidecar_base(folder, expected_stem=None):
     if any(suffix.lower() in _APP_WRITTEN_SIDECAR_SUFFIXES for suffix in _existing_sidecar_suffixes(base)):
         return base
 
-    log.info(
-        f"SIDECARS: '{folder}' holds sidecar files at '{os.path.basename(base)}', which is neither this "
-        f"book's name nor a file this app wrote; leaving them alone."
-    )
+    if not quiet:
+        log.info(
+            f"SIDECARS: '{folder}' holds sidecar files at '{os.path.basename(base)}', which is neither this "
+            f"book's name nor a file this app wrote; leaving them alone."
+        )
     return None
 
 
@@ -954,7 +971,10 @@ def sidecar_base_for_tracked_book(asin):
 
     rendered_base = _rendered_split_sidecar_base(asin, filepath, parts)
     expected_stem = os.path.basename(rendered_base) if rendered_base else None
-    return _owned_sidecar_base(filepath, expected_stem) or rendered_base
+    # `quiet=True`: this is a read-only lookup behind the annotations button, so
+    # a folder shared with another library manager must not announce its refusal
+    # into app.log on every press (same rule as the D5 guard line above).
+    return _owned_sidecar_base(filepath, expected_stem, quiet=True) or rendered_base
 
 
 def _rendered_split_sidecar_base(asin, folder, part_paths):

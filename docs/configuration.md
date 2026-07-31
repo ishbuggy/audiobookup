@@ -75,9 +75,9 @@ Default: `Off`.
 **Output Format**
 The single most consequential setting on this page — it decides what kind of file AudioBookup produces locally, separate from Download Quality above (which only affects what's requested from Audible).
 
-- **Original (remux, no re-encode):** Strips Audible's DRM and re-packages the decrypted audio untouched — chapters, metadata, and cover art get muxed in, but the audio itself is never re-encoded. This is the fastest option and involves zero quality loss, since nothing is recompressed. Trade-off: file sizes match whatever Audible originally shipped, and the "Strip Audible Branding" and MP3-only options below don't apply to it. With **Split by Chapter** on, this format's chapters are usually cut straight out of the downloaded audio too, so splitting costs almost nothing extra — but a small number of titles need a different, compatibility download path, and those are split into re-encoded AAC parts instead.
-- **AAC (.m4b):** Re-encodes the audio to AAC at the quality level chosen just below, producing a standard `.m4b` audiobook file (or one `.m4b` per chapter, with **Split by Chapter** on) — the most broadly compatible option across audiobook and podcast apps.
-- **MP3:** Encodes to MP3 (with embedded chapters) using the LAME encoder options in the advanced block below — one file for the whole book, or one per chapter with **Split by Chapter** on. The most universally playable format, at the cost of losing some of the chapter/format niceties dedicated audiobook players offer for `.m4b`.
+- **Original (remux, no re-encode):** Strips Audible's DRM and re-packages the decrypted audio untouched — chapters, metadata, and cover art get muxed in, but the audio itself is never re-encoded. This is the fastest option and involves zero quality loss, since nothing is recompressed. Trade-off: file sizes match whatever Audible originally shipped, and the "Strip Audible Branding" and MP3-only options below don't apply to it. With **Split by Chapter** on, this format's chapters are usually cut straight out of the downloaded audio too, so splitting costs almost nothing extra — but a small number of titles need a compatibility decoding step during decryption, and those are split into re-encoded AAC parts instead.
+- **AAC (.m4b):** Re-encodes the audio to AAC at the quality level chosen just below, producing a standard `.m4b` audiobook file — the most broadly compatible option across audiobook and podcast apps.
+- **MP3:** Encodes to MP3 (with embedded chapters) using the LAME encoder options in the advanced block below — one file for the whole book. The most universally playable format, at the cost of losing some of the chapter/format niceties dedicated audiobook players offer for `.m4b`.
 
 With **Split by Chapter** on (below, in Chapters & Metadata), every format saves one file per chapter instead of one file for the whole book.
 
@@ -140,7 +140,7 @@ Choices: High / Standard / Fast. Default: `High`.
 
 ## Chapters & Metadata
 
-![The Chapters & Metadata section, showing the Strip (Unabridged) toggle](images/settings-04-chapters.png)
+![The Chapters & Metadata section, showing the Strip (Unabridged) toggle and the new Split by Chapter toggle](images/settings-04-chapters.png)
 
 > **Automatic, not a setting:** if a re-encoded book arrives from Audible as one single chapter longer than 30 minutes, AudioBookup splits it into evenly spaced 15-minute "Part N" chapters so playback navigation still works. This always happens for such books (an "Original" lossless remux is never touched) and has no toggle here — mentioned so the extra chapters don't come as a surprise.
 
@@ -150,7 +150,7 @@ Default: `Off`.
 `settings.json: conversion.chapters.strip_unabridged — default false`
 
 **Split by Chapter**
-Saves each chapter of a book as its own file inside a folder for that book, instead of one single audiobook file — works with all three output formats above. Off by default, so today's single-file output is unchanged. A book needs at least two chapters left after the cleanups on this page (and after the Minimum File Duration merge below) to actually split; if only one chapter survives, it's saved as a single file exactly as before — this includes the automatic 15-minute "Part N" chunking described above, which never splits regardless of this setting. Applies to books converted from now on; an already-downloaded book keeps its current shape until you Force Re-download it.
+Saves each chapter of a book as its own file inside a folder, instead of one single audiobook file — works with all three output formats above. The folder is normally whatever the last folder level of your naming template below would produce; a fully flat template with no folder level at all still gets one, invented automatically from the book's own name so files aren't dumped loose into your library root, and a template whose last folder level is shared across books (for example, grouping only by author, with no per-book level) means every split book at that level shares one folder together. Off by default, so today's single-file output is unchanged. A book needs at least two chapters left after the cleanups on this page and after the Minimum Chapter File Length merge below to actually split; if only one chapter survives, it's saved as a single file exactly as before. Separately, a book auto-chunked into the automatic 15-minute "Part N" chapters described above never splits regardless of this setting, even though the chunking leaves it with plenty of chapters. Applies to books converted from now on; an already-downloaded book keeps its current shape until you Force Re-download it.
 Default: `Off`.
 `settings.json: conversion.chapters.split_by_chapter — default false`
 
@@ -158,7 +158,7 @@ Default: `Off`.
 <summary><b>Advanced options — Chapters & Metadata</b> (visible when Advanced Mode is on)</summary>
 
 **Minimum Chapter File Length (seconds)** *(only used while Split by Chapter is on)*
-A chapter shorter than this many seconds is merged into the chapter that follows it, instead of becoming its own tiny file — useful for the very short "stub" chapters (like a bare "Chapter 1" announcement) some Audible titles ship. If several short chapters land next to each other, they keep folding forward until the combined length clears the threshold or there's nothing left to merge into. The last chapter in a book is never merged away, even if it's short. Set to `0` to disable merging entirely and get one file per original chapter.
+A chapter shorter than this many seconds is merged into the chapter that follows it, instead of becoming its own tiny file — useful for the very short "stub" chapters (like a bare "Chapter 1" announcement) some Audible titles ship. If several short chapters land next to each other, they keep folding forward until the combined length clears the threshold or there's nothing left to merge into. The last chapter in a book is never merged away, even if it's short. The merged chapter's title is built by joining the short chapter's title and the one it merges into with a single space (e.g. "Chapter 19" and "The Heist" become "Chapter 19 The Heist") — worth knowing since that title feeds directly into filenames via `{ch_title}`. Set to `0` to disable merging entirely and get one file per original chapter.
 Range: 0–3600. Default: `3`.
 `settings.json: conversion.chapters.minimum_file_duration — default 3` (seconds)
 
@@ -270,15 +270,15 @@ Default: both empty (the single template above is authoritative).
 `settings.json: naming.folder_template — default ""` / `naming.file_template — default ""`
 
 **Chapter File Name Template** *(only used while [Split by Chapter](#chapters--metadata) is on)*
-Names the individual files a split book produces — the folder they land in still comes from the templates above. Available placeholders are the book placeholders listed above, plus three chapter-specific ones:
+Names the individual files a split book produces — the folder they land in still comes from the templates above, with the same flat-template fallback and shared-folder behavior described under [Split by Chapter](#chapters--metadata). Available placeholders are the book placeholders listed above, plus three chapter-specific ones:
 
 | Placeholder | Meaning |
 | --- | --- |
-| `{ch}` | The chapter's number (1-based), zero-padded so filenames sort correctly (e.g. `01`, `02`, … `12` for a 12-chapter book) |
+| `{ch}` | The part's number (1-based), zero-padded to the width of the final part count *after* the Minimum Chapter File Length merge above — not the book's original chapter count (e.g. a 12-chapter book merged down to 9 parts pads to `01`…`09`, not `12`) |
 | `{ch_total}` | The total number of chapter files the book produces |
 | `{ch_title}` | The chapter's own title |
 
-This names the file only, not any folder level — a template containing a `/` doesn't create a subfolder, it just gets flattened into the filename. A template that leaves out `{ch}` gets ` - {ch}` appended automatically, since every part needs a name that's actually unique.
+This names the file only, not any folder level — a template containing a `/` doesn't create a subfolder; everything up through the last `/` is silently discarded, and only the text after it is used as the filename. A template that leaves out `{ch}` gets ` - {ch}` appended automatically, since every part needs a name that's actually unique.
 Default: `{title} - {ch} - {ch_title}`.
 `settings.json: naming.chapter_file_template — default "{title} - {ch} - {ch_title}"`
 

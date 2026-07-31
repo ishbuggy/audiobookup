@@ -135,7 +135,8 @@ DEFAULT_SETTINGS = {
             "chapter_title_template": "{ch_title}",
             # Split the finished book into one output file PER CHAPTER instead of
             # a single audiobook file (v0.24.0). Default off keeps today's
-            # single-file output; nothing reads this yet.
+            # single-file output; read by the conversion pipeline's split gate,
+            # which also declines to split an auto-chunked book.
             "split_by_chapter": False,
             # Minimum length, IN SECONDS, of a per-chapter output file. A chapter
             # shorter than this is merged forward into the chapter that follows

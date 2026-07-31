@@ -266,12 +266,11 @@
                                     What we encode locally — separate from Download Quality (what we request from
                                     Audible) in the Downloading section. <strong>Original</strong> strips DRM only and
                                     keeps Audible's audio untouched (fastest, no quality loss); with
-                                    <strong>Split by Chapter</strong> on, that usually holds per chapter too — a small
-                                    number of titles fall back to a different download path and get split into
-                                    re-encoded AAC parts instead. <strong>AAC (.m4b)</strong> re-encodes at the quality
-                                    below. <strong>MP3</strong> re-encodes to MP3 with chapters, using the LAME options
-                                    below. With <strong>Split by Chapter</strong> (in Chapters &amp; Metadata), every
-                                    format saves one file per chapter instead of one file per book.
+                                    <strong>Split by Chapter</strong> on, that usually holds per chapter too — but a
+                                    small number of titles need a compatibility decoding step during decryption, and
+                                    those are split into re-encoded AAC parts instead.
+                                    <strong>AAC (.m4b)</strong> re-encodes at the quality below.
+                                    <strong>MP3</strong> re-encodes to MP3 with chapters, using the LAME options below.
                                 </small>
                             </label>
                             <!-- prettier-ignore -->

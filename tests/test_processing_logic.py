@@ -5066,8 +5066,37 @@ class TestOwnedSidecarBase:
         (tmp_path / "Someone Else - Other.jpg").write_bytes(b"cover")
         assert processing_logic._owned_sidecar_base(str(tmp_path), "Bram Stoker - Dracula") is None
 
+    def test_a_retained_master_and_voucher_corroborate_a_renamed_split_book(self, tmp_path):
+        # W1: the realistic renamed-split-book folder. No cue sheet (D9 never
+        # writes one for a split book) and both JSON dumps off, so the retained
+        # AAXC master and its voucher are the only proof the folder is ours —
+        # and they are hundreds of MB, so a skipped sweep strands them.
+        (tmp_path / "Old Title.aaxc").write_bytes(b"master")
+        (tmp_path / "Old Title.voucher").write_bytes(b"{}")
+        (tmp_path / "Old Title.jpg").write_bytes(b"cover")
+        assert processing_logic._owned_sidecar_base(str(tmp_path), "New Title") == str(tmp_path / "Old Title")
+
+    def test_a_retained_aax_master_alone_corroborates(self, tmp_path):
+        # The AAX fallback leaves a ".aax" and no voucher; it has to count too.
+        (tmp_path / "Old Title.aax").write_bytes(b"master")
+        assert processing_logic._owned_sidecar_base(str(tmp_path), "New Title") == str(tmp_path / "Old Title")
+
     def test_an_empty_folder_is_answered_not_raised(self, tmp_path):
         assert processing_logic._owned_sidecar_base(str(tmp_path / "gone"), "Title") is None
+
+    def test_a_destructive_caller_is_told_why_the_sweep_was_skipped(self, tmp_path, caplog):
+        # M1: the sweep and the rename stay loud — the refusal is the explanation
+        # for files they left behind.
+        (tmp_path / "cover.jpg").write_bytes(b"cover")
+        with caplog.at_level(logging.INFO):
+            assert processing_logic._owned_sidecar_base(str(tmp_path), "Bram Stoker - Dracula") is None
+        assert "leaving them alone" in caplog.text
+
+    def test_a_quiet_caller_says_nothing(self, tmp_path, caplog):
+        (tmp_path / "cover.jpg").write_bytes(b"cover")
+        with caplog.at_level(logging.INFO):
+            assert processing_logic._owned_sidecar_base(str(tmp_path), "Bram Stoker - Dracula", quiet=True) is None
+        assert "leaving them alone" not in caplog.text
 
 
 class TestSidecarBaseForTrackedBook:
@@ -5131,6 +5160,20 @@ class TestSidecarBaseForTrackedBook:
         book = tmp_path / "Dracula.m4b"
         book.write_bytes(b"audio")
         assert self._base(book, []) == str(tmp_path / "Dracula")
+
+    def test_the_annotations_lookup_does_not_log_its_refusal(self, tmp_path, caplog):
+        # M1: this runs on every Download Annotations press, and app.log is
+        # user-downloadable — a foreign folder must not narrate itself each time.
+        folder = tmp_path / "Dracula"
+        folder.mkdir()
+        part = folder / "Dracula - 01 - One.m4b"
+        part.write_bytes(b"audio")
+        (folder / "cover.jpg").write_bytes(b"cover")
+
+        with caplog.at_level(logging.INFO):
+            base = self._base(folder, [part])
+        assert base == str(folder / "Bram Stoker - Dracula")
+        assert "leaving them alone" not in caplog.text
 
 
 class TestSplitFolderGuardLogging:
