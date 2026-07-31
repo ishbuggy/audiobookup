@@ -444,7 +444,11 @@ document.addEventListener("DOMContentLoaded", () => {
         // server and come back as a bare 400. Mirrors the mismatch guard above: the
         // *entire* save is aborted, so nothing reports "Saved!" while the password
         // was silently rejected.
-        const MIN_PASSWORD_LENGTH = 8; // must match the server's check in routes.py
+        // Mirrors the server's check in routes.py. Not a perfect mirror: JS counts
+        // UTF-16 code units where the server counts characters, so exotic input
+        // (emoji, rare scripts) can slip past this guard — the server still refuses
+        // it, and its explanation is surfaced by the save handler below.
+        const MIN_PASSWORD_LENGTH = 8;
         if (newPassword !== "" && newPassword.length < MIN_PASSWORD_LENGTH) {
             showCustomAlert(
                 `The new password must be at least ${MIN_PASSWORD_LENGTH} characters long. Nothing was saved — please choose a longer password.`,
@@ -672,7 +676,14 @@ document.addEventListener("DOMContentLoaded", () => {
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(settings),
                 });
-                if (!response.ok) throw new Error("Server rejected the settings file.");
+                if (!response.ok) {
+                    // Same server-explanation surfacing as the Save handler above —
+                    // imports post to the same endpoint, so a refusal carries the same
+                    // JSON `error` field (and a non-JSON body degrades to the generic
+                    // message the same way).
+                    const errorData = await response.json().catch(() => ({}));
+                    throw new Error(errorData.error || "Server rejected the settings file.");
+                }
                 showCustomAlert(
                     "Settings imported successfully! The page will now reload.",
                     '<i class="fas fa-check-circle" style="color: #28a745;"></i> Success',

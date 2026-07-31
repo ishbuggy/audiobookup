@@ -228,7 +228,8 @@ async function handleBookClick(event) {
 
         // Annotations Button: the dump is written next to the audiobook, so it is
         // only offered for a book that actually has a file on disk. (The route
-        // re-checks this — the button is a convenience, not the guard.)
+        // re-checks the file's existence — but not the ASIN's shape, so for the
+        // synthetic-key half this visibility gate is the only guard.)
         if (book.status === "DOWNLOADED" && canQueryAudible) {
             downloadAnnotationsBtn.style.display = "inline-block";
             downloadAnnotationsBtn.dataset.asin = asin;
@@ -376,6 +377,10 @@ async function handleBookClick(event) {
     }
 }
 
+// The button label carries an icon, so it is restored via innerHTML after the
+// "Fetching..." state — a static string only, same as ANNOTATIONS_BTN_LABEL below.
+const SUMMARY_BTN_LABEL = '<i class="fas fa-book-open"></i> Get Full Summary';
+
 async function handleFetchFullSummary(event) {
     const btn = event.currentTarget;
     const asin = btn.dataset.asin;
@@ -399,7 +404,9 @@ async function handleFetchFullSummary(event) {
     } finally {
         btn.classList.remove("loading");
         btn.disabled = false;
-        btn.textContent = "Get Full Summary";
+        // Restored via innerHTML because the label carries an icon — textContent
+        // would strip the <i> for good (same pattern as the annotations button).
+        btn.innerHTML = SUMMARY_BTN_LABEL;
     }
 }
 
