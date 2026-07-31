@@ -22,6 +22,14 @@ _SCHEMA = (
     "purchase_date TEXT, summary TEXT, date_added TEXT, source TEXT DEFAULT 'audible')"
 )
 
+# Copied verbatim from the idempotent migration block in bin/start.sh: schema
+# creation is owned by that script, so test fixtures must build the same table.
+BOOK_FILES_DDL = (
+    "CREATE TABLE IF NOT EXISTS book_files ("
+    "asin TEXT NOT NULL, part_index INTEGER NOT NULL, filepath TEXT NOT NULL, "
+    "PRIMARY KEY (asin, part_index))"
+)
+
 
 @pytest.fixture
 def db(tmp_path, monkeypatch):
@@ -29,6 +37,7 @@ def db(tmp_path, monkeypatch):
     db_path = tmp_path / "library.db"
     con = sqlite3.connect(db_path)
     con.execute(_SCHEMA)
+    con.execute(BOOK_FILES_DDL)
     con.commit()
     con.close()
     monkeypatch.setattr(db_module, "DB_FILE", str(db_path))
@@ -42,6 +51,24 @@ def _seed(db, **cols):
     con.execute(f"INSERT INTO audiobooks ({keys}) VALUES ({marks})", tuple(cols.values()))
     con.commit()
     con.close()
+
+
+def _seed_parts(db, asin, paths):
+    """Give a seeded book the `book_files` rows that make it a split book."""
+    con = sqlite3.connect(db)
+    con.executemany(
+        "INSERT INTO book_files (asin, part_index, filepath) VALUES (?, ?, ?)",
+        [(asin, index, path) for index, path in enumerate(paths)],
+    )
+    con.commit()
+    con.close()
+
+
+def _parts(db, asin):
+    con = sqlite3.connect(db)
+    rows = con.execute("SELECT filepath FROM book_files WHERE asin = ? ORDER BY part_index", (asin,)).fetchall()
+    con.close()
+    return [row[0] for row in rows]
 
 
 def _rows(db):
@@ -251,6 +278,103 @@ class TestAdoptFile:
             result = import_logic.adopt_file(str(full))
         assert result["key"].startswith("IMPORT-")
         assert _rows(db)[0]["asin"].startswith("IMPORT-")
+
+
+class TestAdoptFileSplitBooks:
+    """v0.24.0 Phase 5: an import never repoints a split book. Its row points at a
+    FOLDER, so `os.path.isfile` would call it repointable and a single scanned or
+    uploaded chapter would take over the row and orphan the other N-1 files —
+    and a book whose folder the user MOVED is indistinguishable here from one
+    whose chapters were deleted, so intactness cannot be the test either."""
+
+    def _split_book(self, db, tmp_path, asin="B0SPLIT123", *, present=2, missing=0):
+        """Seed a split book with `present` parts on disk and `missing` gone."""
+        folder = tmp_path / "lib" / "Split Book"
+        folder.mkdir(parents=True)
+        paths = []
+        for n in range(present):
+            part = folder / f"{n:02d}.m4b"
+            part.write_bytes(b"chapter")
+            paths.append(str(part))
+        paths += [str(folder / f"{present + n:02d}.m4b") for n in range(missing)]
+        _seed(db, asin=asin, title="Split", status="DOWNLOADED", filepath=str(folder), source="audible")
+        _seed_parts(db, asin, paths)
+        return str(folder), paths
+
+    def test_intact_part_set_blocks_the_repoint(self, db, tmp_path):
+        folder, paths = self._split_book(db, tmp_path, present=3)
+        result, _path, cover = _adopt(db, "stray.m4b", tmp_path, embedded_asin="B0SPLIT123")
+
+        assert result["action"] == "skipped"
+        assert result["reason"] == "split-book"
+        row = _rows(db)[0]
+        assert row["filepath"] == folder  # still the folder, not the stray file
+        assert _parts(db, "B0SPLIT123") == paths  # part set untouched
+        cover.assert_not_called()
+
+    def test_broken_part_set_still_blocks_the_repoint(self, db, tmp_path):
+        # The parts are not where the database says, but "deleted" and "the user
+        # moved the folder" look identical from here — and the moved case is the
+        # one the import scan actively feeds us, since relocated parts read as
+        # untracked. Adopting one of them would define the book as chapter 3.
+        folder, paths = self._split_book(db, tmp_path, present=1, missing=2)
+        result, _path, _cover = _adopt(db, "rescued.m4b", tmp_path, embedded_asin="B0SPLIT123")
+
+        assert result["action"] == "skipped"
+        assert result["reason"] == "split-book"
+        row = _rows(db)[0]
+        assert row["filepath"] == folder
+        assert _parts(db, "B0SPLIT123") == paths  # every part row survives
+
+    def test_vanished_part_set_still_blocks_the_repoint(self, db, tmp_path):
+        _folder, paths = self._split_book(db, tmp_path, present=0, missing=3)
+        result, _path, _cover = _adopt(db, "rescued.m4b", tmp_path, embedded_asin="B0SPLIT123")
+
+        assert result["action"] == "skipped"
+        assert result["reason"] == "split-book"
+        assert _parts(db, "B0SPLIT123") == paths
+
+    def test_single_file_books_are_unaffected_by_the_split_guard(self, db, tmp_path):
+        # No part rows: the guard falls through to exactly today's isfile test.
+        existing = tmp_path / "canonical.m4b"
+        existing.write_bytes(b"real")
+        _seed(db, asin="B0KNOWN123", title="Known", status="DOWNLOADED", filepath=str(existing), source="audible")
+        result, _path, _cover = _adopt(db, "stray.m4b", tmp_path, embedded_asin="B0KNOWN123")
+
+        assert result["action"] == "skipped"
+        assert result["reason"] == "asin-already-linked"
+
+    def test_blank_part_rows_do_not_make_a_book_look_split(self, db, tmp_path):
+        # A hand-written row with an empty filepath is not a part; every reader of
+        # these rows drops it, so this book still takes the single-file path.
+        _seed(db, asin="B0KNOWN123", title="Known", status="MISSING", filepath="", source="audible")
+        _seed_parts(db, "B0KNOWN123", [""])
+        result, path, _cover = _adopt(db, "found.m4b", tmp_path, embedded_asin="B0KNOWN123")
+
+        assert result["action"] == "reconciled"
+        assert _rows(db)[0]["filepath"] == path
+
+    def test_chosen_key_path_also_refuses_a_split_row(self, db, tmp_path):
+        # The second guard call site: a genuine import whose chosen key already
+        # has a (split) row. allow_reconcile=False forces that path.
+        folder, paths = self._split_book(db, tmp_path, asin="B0SPLIT123", present=2)
+        result, _path, _cover = _adopt(db, "stray.m4b", tmp_path, allow_reconcile=False, embedded_asin="B0SPLIT123")
+
+        assert result["action"] == "skipped"
+        assert result["reason"] == "split-book"
+        assert _rows(db)[0]["filepath"] == folder
+        assert _parts(db, "B0SPLIT123") == paths
+
+    def test_chosen_key_path_refuses_a_split_row_with_a_broken_set_too(self, db, tmp_path):
+        folder, paths = self._split_book(db, tmp_path, asin="B0SPLIT123", present=0, missing=2)
+        result, _path, _cover = _adopt(db, "rescued.m4b", tmp_path, allow_reconcile=False, embedded_asin="B0SPLIT123")
+
+        assert result["action"] == "skipped"
+        assert result["reason"] == "split-book"
+        row = _rows(db)[0]
+        assert row["filepath"] == folder
+        assert row["source"] == "audible"  # provenance untouched by a refusal
+        assert _parts(db, "B0SPLIT123") == paths
 
 
 class TestMetadataSanitization:
@@ -595,6 +719,28 @@ class TestScanUntracked:
 
         found = import_logic.scan_data_dir_for_untracked()
         assert found == [str(untracked)]  # tracked, non-audio, and staged files excluded
+
+    def test_split_book_part_files_are_not_reported_as_untracked(self, db, tmp_path, monkeypatch):
+        # v0.24.0 Phase 5: a split book contributes ONE `audiobooks.filepath` (its
+        # folder) but owns N files. Without the `book_files` union every chapter we
+        # produced would be offered as an import candidate on every scan, forever.
+        data = tmp_path / "data"
+        folder = data / "Author" / "Split Book"
+        folder.mkdir(parents=True)
+        parts = []
+        for n in range(3):
+            part = folder / f"{n:02d}.m4b"
+            part.write_bytes(b"x")
+            parts.append(str(part))
+        stranger = data / "Author" / "stranger.m4b"
+        stranger.write_bytes(b"x")
+
+        _seed(db, asin="B0SPLIT123", title="Split", filepath=str(folder))
+        _seed_parts(db, "B0SPLIT123", parts)
+        monkeypatch.setattr(import_logic, "DATA_DIR", str(data))
+
+        found = import_logic.scan_data_dir_for_untracked()
+        assert found == [os.path.abspath(str(stranger))]
 
     def test_staging_sibling_dir_is_still_scanned(self, db, tmp_path, monkeypatch):
         # L10: only the staging dir (and its contents) is skipped. A sibling whose

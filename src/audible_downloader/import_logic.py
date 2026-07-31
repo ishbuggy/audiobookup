@@ -21,7 +21,7 @@ import uuid
 from datetime import datetime, timezone
 
 from . import COVERS_DIR
-from .db import get_db_connection
+from .db import get_all_tracked_part_paths, get_book_files, get_db_connection
 from .logger import log
 from .process_registry import process_registry
 
@@ -196,6 +196,18 @@ def _extract_cover(filepath, key, job_id=None):
         log.debug(f"IMPORT: thumbnail generation failed for {key}: {e}")
 
 
+def _split_part_paths(asin):
+    """
+    The book's per-chapter file paths, or an empty list when it isn't split.
+    ANY row here means the book is split — that presence is the split flag — so
+    callers use the emptiness of this list, not the paths' existence on disk, to
+    decide how the book may be touched. Rows with a blank `filepath` are dropped
+    so this reader agrees with the other readers of the same rows (`sync_logic`
+    and `processing_logic`) about what counts as a part.
+    """
+    return [row["filepath"] for row in get_book_files(asin) if row["filepath"]]
+
+
 def _row_blocks_repoint(existing_filepath, incoming_filepath):
     """
     True if a DB row we were about to repoint at `incoming_filepath` already
@@ -205,6 +217,10 @@ def _row_blocks_repoint(existing_filepath, incoming_filepath):
     hijack a real Audible row (mark it DOWNLOADED, steal its filepath). A row with
     no filepath, a filepath whose file is gone, or one already pointing at this
     same file does not block — those are the legitimate reconcile cases.
+
+    Single-file books only: a SPLIT book is refused outright by its caller before
+    reaching here (see adopt_file), because this test cannot express the split
+    case at all — such a row holds a FOLDER, so `isfile` is always False.
     """
     if not existing_filepath:
         return False
@@ -223,7 +239,8 @@ def adopt_file(filepath, *, allow_reconcile=True, key=None, job_id=None):
          Guarded: if that row already points at a different, still-present file we
          skip instead of repointing (action="skipped", reason="asin-already-linked"),
          so a stray or hostile copy can neither hijack the row nor flip-flop the
-         filepath between duplicates on repeated scans.
+         filepath between duplicates on repeated scans. A SPLIT book is refused
+         unconditionally (action="skipped", reason="split-book") — see below.
       2. Same absolute path already tracked -> action="skipped" (idempotent
          re-scan; no duplicate row).
       3. Otherwise a genuine import: the key is `key` (when the caller pre-chose
@@ -254,6 +271,23 @@ def adopt_file(filepath, *, allow_reconcile=True, key=None, job_id=None):
         if embedded_asin and allow_reconcile:
             known = con.execute("SELECT asin, filepath FROM audiobooks WHERE asin = ?", (embedded_asin,)).fetchone()
             if known is not None:
+                # A SPLIT book is never repointed by an import, whether or not its
+                # parts are still where the database says they are. We cannot tell
+                # a book whose chapter files were DELETED from one whose folder the
+                # user simply MOVED — and the moved case is exactly what the scan
+                # feeds us, since relocated parts look untracked. Repointing would
+                # then write one chapter file as the whole book's filepath and drop
+                # the rest, silently redefining a 12-file book as a single-file book
+                # holding chapter 7. Changing a book's shape belongs to a force
+                # re-download, and recovering a moved folder to the deep sync's
+                # restore (sync_logic._reconcile_database) — never to an import.
+                known_parts = _split_part_paths(embedded_asin)
+                if known_parts:
+                    log.info(
+                        f"IMPORT: ASIN {embedded_asin} is a split book with {len(known_parts)} chapter files; "
+                        f"skipping '{filepath}' rather than repointing it at a single file."
+                    )
+                    return {"action": "skipped", "reason": "split-book", "key": embedded_asin}
                 if _row_blocks_repoint(known["filepath"], filepath):
                     log.info(
                         f"IMPORT: ASIN {embedded_asin} is already linked to an existing file; "
@@ -299,8 +333,17 @@ def adopt_file(filepath, *, allow_reconcile=True, key=None, job_id=None):
     with get_db_connection() as con:
         exists = con.execute("SELECT asin, filepath FROM audiobooks WHERE asin = ?", (key,)).fetchone()
         if exists is not None:
-            # The chosen key already has a row. Same guard as step 1: never
-            # repoint a row that is already linked to a different live file.
+            # The chosen key already has a row. Same two guards as step 1, in the
+            # same order: a split book is refused outright (its shape is not an
+            # import's to change), and a row already linked to a different live
+            # file is never repointed.
+            existing_parts = _split_part_paths(key)
+            if existing_parts:
+                log.info(
+                    f"IMPORT: key {key} is a split book with {len(existing_parts)} chapter files; "
+                    f"skipping '{filepath}' rather than repointing it at a single file."
+                )
+                return {"action": "skipped", "reason": "split-book", "key": key}
             if _row_blocks_repoint(exists["filepath"], filepath):
                 log.info(
                     f"IMPORT: key {key} is already linked to an existing file; "
@@ -460,8 +503,9 @@ def adopt_upload(staging_path, original_filename, settings):
 def scan_data_dir_for_untracked():
     """
     Walk DATA_DIR and return the list of importable file paths that are NOT
-    already tracked by a DB row's `filepath`. The staging directory is skipped.
-    Cheap (no probing) — the scan job probes each returned path via adopt_file.
+    already tracked — by a book's own `filepath` OR by one of its per-chapter
+    part rows. The staging directory is skipped. Cheap (no probing) — the scan
+    job probes each returned path via adopt_file.
     """
     with get_db_connection() as con:
         tracked = {
@@ -469,6 +513,11 @@ def scan_data_dir_for_untracked():
             for row in con.execute("SELECT filepath FROM audiobooks WHERE filepath IS NOT NULL AND filepath != ''")
             if row["filepath"]
         }
+    # A split book owns many files but contributes only ONE `audiobooks.filepath`
+    # (its folder), so the parent column alone would leave every per-chapter file
+    # we produced looking untracked — reported as an import candidate on every
+    # single scan, forever. The child rows close that gap.
+    tracked.update(os.path.abspath(path) for path in get_all_tracked_part_paths() if path)
 
     staging = os.path.abspath(import_staging_dir())
     untracked = []

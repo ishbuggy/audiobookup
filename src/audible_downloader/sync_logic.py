@@ -14,6 +14,11 @@ from .db import get_db_connection
 from .logger import log
 from .process_registry import process_registry
 
+# Root of the final library, walked by the deep sync's filesystem scan. A module
+# constant (not a literal inside the scan function) so tests can point it at a
+# temp directory — same pattern as import_logic.DATA_DIR.
+AUDIOBOOK_LIBRARY_PATH = "/data"
+
 
 # --- Private Helper: Yields progress updates in the correct format ---
 def _yield_progress(status_text, progress, stage_text=None):
@@ -224,10 +229,14 @@ def _scan_local_filesystem(job_id):
     """
     Generator that scans the /data directory for audiobook files (.m4b and
     .mp3), using a cache to speed up the process. Yields progress updates and
-    returns a dictionary mapping ASINs to file paths.
+    returns a dictionary mapping each ASIN to the LIST of files carrying it, in
+    sorted path order.
+
+    The value is a list, not a single path, because one book can now own many
+    files: a book split into per-chapter files stamps the same `asin` tag into
+    every part. A single-file book simply gets a one-element list.
     """
     yield from _yield_progress("Scanning local files...", 50, stage_text="Phase 2/3: Scanning Filesystem")
-    AUDIOBOOK_LIBRARY_PATH = "/data"
     CACHE_FILE = os.path.join(CONFIG_DIR, ".file_scan_cache")
     cache = {}
     if os.path.exists(CACHE_FILE):
@@ -249,6 +258,13 @@ def _scan_local_filesystem(job_id):
             # match them too or MP3 titles stay invisible to filesystem sync.
             if f.endswith((".m4b", ".mp3")):
                 files_to_scan.append(os.path.join(r, f))
+
+    # os.walk yields directory entries in whatever order the filesystem hands
+    # back, which is neither sorted nor stable across runs. Sort once so the scan
+    # is reproducible — the reconcile picks the FIRST file of an ASIN when a book
+    # has several and no part rows, and that choice must not depend on the order
+    # a directory happens to be stored in.
+    files_to_scan.sort()
 
     total_files_to_scan = len(files_to_scan)
 
@@ -298,7 +314,10 @@ def _scan_local_filesystem(job_id):
                 # -------------------------------------
 
             if asin:
-                found_files[asin] = filepath
+                # Append rather than assign: a split book's parts all carry the
+                # same ASIN, and a plain assignment silently kept only the last
+                # one seen. The cache line format stays per-file and unchanged.
+                found_files.setdefault(asin, []).append(filepath)
                 new_cache_lines.append(f"{current_mtime}|{asin}|{filepath}\n")
         except (OSError, subprocess.CalledProcessError) as e:
             log.warning(f"SYNC-LOGIC ({job_id}): Could not process file '{filepath}': {e}")
@@ -310,12 +329,83 @@ def _scan_local_filesystem(job_id):
     return found_files
 
 
+# --- Private Helper: Read a book's split-part paths through an open connection ---
+def _tracked_part_paths(cur, asin):
+    """
+    The book's per-chapter file paths in playback order, or an empty list when
+    the book isn't split. Presence of these rows IS the split flag, so this is
+    what tells the reconcile pass whether `audiobooks.filepath` names a single
+    audio file or the book's folder.
+
+    Reads through the caller's cursor so the whole reconcile pass stays on one
+    connection, and tolerates a database with no `book_files` table at all — a
+    hand-restored library.db is a real thing and must not fail a sync.
+    """
+    try:
+        rows = cur.execute("SELECT filepath FROM book_files WHERE asin = ? ORDER BY part_index", (asin,)).fetchall()
+        return [row["filepath"] for row in rows if row["filepath"]]
+    except sqlite3.Error as e:
+        log.warning(f"SYNC-LOGIC: Could not read the per-chapter file rows for {asin}: {e}")
+        return []
+
+
+def _book_folder_from_parts(part_paths):
+    """
+    The folder that holds a split book's parts — the value `audiobooks.filepath`
+    carries for a split book. Derived from the parts themselves so a restored
+    book is never pointed at one individual part (the whole point of the repoint
+    invariant below).
+
+    Parts always land in one folder in practice. If a hand-edited database has
+    them spread across several, we return the first of those folders rather than
+    their common ancestor: the ancestor is guaranteed to be no part's own folder
+    and could well be a directory holding OTHER books, which is then what the
+    rename and the detail view would treat as this book's folder.
+    """
+    if not part_paths:
+        return ""
+    return sorted({os.path.dirname(path) for path in part_paths})[0]
+
+
+def _relocated_part_paths(part_paths, found_paths):
+    """
+    Work out where a split book's parts moved to, or return None if the scan
+    results don't unambiguously describe the same book at a new location.
+
+    `part_paths` are the tracked (now stale) paths in `part_index` order and
+    `found_paths` is every file on disk carrying this ASIN. The match has to be
+    exact to be safe, so all three must hold: the same NUMBER of files (two
+    copies of the book, i.e. 2N files, is not a move), all found files in ONE
+    folder (scattered copies aren't either), and the same multiset of file NAMES.
+
+    The returned list is aligned to `part_paths` BY NAME, never by directory
+    order — the position of each path is the book's playback order, and file
+    names within one book are unique because the chapter number is mandatory in
+    the part-name template.
+    """
+    if not part_paths or len(found_paths) != len(part_paths):
+        return None
+    folders = {os.path.dirname(path) for path in found_paths}
+    if len(folders) != 1:
+        return None
+    tracked_names = sorted(os.path.basename(path) for path in part_paths)
+    if tracked_names != sorted(os.path.basename(path) for path in found_paths):
+        return None
+    folder = folders.pop()
+    return [os.path.join(folder, os.path.basename(path)) for path in part_paths]
+
+
 # --- Private Helper 3: Reconcile DB with filesystem scan ---
 def _reconcile_database(job_id, found_files):
     """
     Generator that compares the DB state with the filesystem scan results.
     It marks books as MISSING if their file is gone, and marks them as
     DOWNLOADED if the file is found but the DB state is wrong.
+
+    `found_files` maps an ASIN to the LIST of files carrying it (see
+    _scan_local_filesystem). Split books are handled off their `book_files`
+    rows rather than off that list: those rows are the authoritative record of
+    which files the book is supposed to own.
     """
     yield from _yield_progress("Reconciling database...", 95, stage_text="Phase 3/3: Reconciling Database")
     marked_missing, fixed_untracked = 0, 0
@@ -323,18 +413,86 @@ def _reconcile_database(job_id, found_files):
         cur = con.cursor()
         downloaded_books = cur.execute("SELECT asin, filepath FROM audiobooks WHERE status = 'DOWNLOADED'").fetchall()
         for book in downloaded_books:
-            if not book["filepath"] or not os.path.exists(book["filepath"]):
-                cur.execute("UPDATE audiobooks SET status = 'MISSING', filepath = '' WHERE asin = ?", (book["asin"],))
-                marked_missing += 1
-
-        for asin_from_file, correct_filepath in found_files.items():
-            db_status_row = cur.execute("SELECT status FROM audiobooks WHERE asin = ?", (asin_from_file,)).fetchone()
-            if db_status_row and db_status_row["status"] != "DOWNLOADED":
-                cur.execute(
-                    "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ? WHERE asin = ?",
-                    (correct_filepath, asin_from_file),
+            part_paths = _tracked_part_paths(cur, book["asin"])
+            if part_paths:
+                # Split book: `filepath` is the book's FOLDER, which happily
+                # survives every part being deleted out of it — so existence of
+                # that path proves nothing. The part SET is the real test, and
+                # per D10 any missing part demotes the whole book to MISSING.
+                missing_parts = [path for path in part_paths if not os.path.exists(path)]
+                if not missing_parts:
+                    continue
+                log.info(
+                    f"SYNC-LOGIC ({job_id}): {book['asin']} is missing "
+                    f"{len(missing_parts)} of {len(part_paths)} parts; marking MISSING."
                 )
-                fixed_untracked += 1
+            elif book["filepath"] and os.path.exists(book["filepath"]):
+                continue
+            # The `book_files` rows are deliberately KEPT: they record the set
+            # this book is expected to own, so a later scan can restore it, and
+            # they keep the import scanner from reporting the surviving parts as
+            # untracked files. A re-download replaces them wholesale.
+            cur.execute("UPDATE audiobooks SET status = 'MISSING', filepath = '' WHERE asin = ?", (book["asin"],))
+            marked_missing += 1
+
+        for asin_from_file, found_paths in found_files.items():
+            db_status_row = cur.execute("SELECT status FROM audiobooks WHERE asin = ?", (asin_from_file,)).fetchone()
+            if not db_status_row or db_status_row["status"] == "DOWNLOADED":
+                continue
+
+            part_paths = _tracked_part_paths(cur, asin_from_file)
+            if part_paths:
+                # INVARIANT: repointing never targets an individual part. A split
+                # book is restored with its FOLDER as the filepath, exactly as a
+                # fresh split download records it, or not at all — pointing
+                # `filepath` at one chapter file would silently redefine a split
+                # book as a single-file book holding one chapter.
+                if all(os.path.exists(path) for path in part_paths):
+                    correct_filepath = _book_folder_from_parts(part_paths)
+                else:
+                    # The tracked paths are (partly) gone, but the scan may have
+                    # just found this book's files somewhere else: moving a folder
+                    # in a file manager is the ordinary way a library gets
+                    # reorganized, and healing that is the deep scan's whole job —
+                    # single-file books have always been repointed this way. Only
+                    # an exact, unambiguous match counts (see _relocated_part_paths).
+                    relocated = _relocated_part_paths(part_paths, found_paths)
+                    if relocated is None:
+                        continue
+                    correct_filepath = _book_folder_from_parts(relocated)
+                    # Rewrite the part rows on the reconcile's own cursor, so the
+                    # child rows and the status/filepath write below land in ONE
+                    # transaction (D3/D10: the two must never be observed
+                    # disagreeing). Matching on the OLD path rather than on
+                    # `part_index` leaves the ordering column untouched, so each
+                    # part keeps its playback position by construction.
+                    for old_path, new_path in zip(part_paths, relocated):
+                        cur.execute(
+                            "UPDATE book_files SET filepath = ? WHERE asin = ? AND filepath = ?",
+                            (new_path, asin_from_file, old_path),
+                        )
+                    log.info(
+                        f"SYNC-LOGIC ({job_id}): Found all {len(relocated)} parts of {asin_from_file} "
+                        f"at a new location; restoring it to '{correct_filepath}'."
+                    )
+            else:
+                correct_filepath = found_paths[0]
+                if len(found_paths) > 1:
+                    # An untracked multi-file folder (e.g. someone's own split of
+                    # an audiobook, dropped into /data). Adopting whole external
+                    # folders is out of scope for this release, so we stay with
+                    # today's single-file behavior and take the first file in the
+                    # scan's sorted order — reproducible run to run, and logged so
+                    # it isn't a silent choice.
+                    log.warning(
+                        f"SYNC-LOGIC ({job_id}): {len(found_paths)} untracked files carry ASIN {asin_from_file}; "
+                        f"linking the book to '{correct_filepath}' only."
+                    )
+            cur.execute(
+                "UPDATE audiobooks SET status = 'DOWNLOADED', filepath = ? WHERE asin = ?",
+                (correct_filepath, asin_from_file),
+            )
+            fixed_untracked += 1
         con.commit()
     # Ruff E501: Break long f-string into multiple lines
     log.info(
