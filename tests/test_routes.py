@@ -1081,3 +1081,151 @@ class TestDownloadBookAnnotations:
             response = client.post("/api/book/B001/annotations")
         assert response.status_code == 200
         assert annotated_db.with_name("Dracula.annotations.json").exists()
+
+
+class TestGetBookDetailsSplit:
+    """v0.24.0 Phase 6: GET /api/book/<asin> reports File Information across a
+    split book's parts (its `filepath` is the folder, the audio is in
+    `book_files`), while a single-file book keeps the legacy single-stat path."""
+
+    @pytest.fixture
+    def details_db(self, tmp_path, monkeypatch):
+        """A temp library.db holding one single-file book and three split books
+        (all parts present / one part deleted / every part deleted).
+
+        The route reads DB_FILE through its OWN module-level binding for the
+        "database not found" guard, so both bindings are pointed at the temp
+        database — patching only the db module would 404 every request.
+        """
+        from audible_downloader import db as db_module
+        from audible_downloader import routes as routes_module
+
+        library = tmp_path / "library"
+        library.mkdir()
+
+        # The single-file control: the row's path is the audio file itself.
+        single_file = library / "Dracula.m4b"
+        single_file.write_bytes(b"a" * 1024)
+
+        def make_split(folder_name, part_sizes):
+            """Create a book folder with one real .m4b per chapter, returning
+            (folder, [part paths]) so a test can delete parts afterwards."""
+            folder = library / folder_name
+            folder.mkdir()
+            paths = []
+            for index, size in enumerate(part_sizes, start=1):
+                part = folder / f"{folder_name} - {index} - Chapter {index}.m4b"
+                part.write_bytes(b"a" * size)
+                paths.append(part)
+            return folder, paths
+
+        all_present_dir, all_present_parts = make_split("AllPresent", [1024, 2048, 4096])
+        one_missing_dir, one_missing_parts = make_split("OneMissing", [1024, 2048, 4096])
+        none_present_dir, none_present_parts = make_split("NonePresent", [1024, 2048])
+
+        db_path = tmp_path / "library.db"
+        con = sqlite3.connect(db_path)
+        con.execute(
+            "CREATE TABLE audiobooks ("
+            "asin TEXT PRIMARY KEY, title TEXT, author TEXT, status TEXT, filepath TEXT, "
+            "custom_title TEXT, custom_author TEXT, custom_cover INTEGER DEFAULT 0, "
+            "is_summary_full INTEGER DEFAULT 0, is_duplicate INTEGER DEFAULT 0)"
+        )
+        # The real schema lives in bin/start.sh; the test database hand-creates
+        # only the tables under test, so `book_files` is created here too.
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS book_files ("
+            "asin TEXT NOT NULL, part_index INTEGER NOT NULL, filepath TEXT NOT NULL, "
+            "PRIMARY KEY (asin, part_index))"
+        )
+        con.executemany(
+            "INSERT INTO audiobooks (asin, title, author, status, filepath) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("B001", "Dracula", "Bram Stoker", "DOWNLOADED", str(single_file)),
+                ("B002", "AllPresent", "Author", "DOWNLOADED", str(all_present_dir)),
+                ("B003", "OneMissing", "Author", "DOWNLOADED", str(one_missing_dir)),
+                ("B004", "NonePresent", "Author", "DOWNLOADED", str(none_present_dir)),
+            ],
+        )
+        for asin, parts in (("B002", all_present_parts), ("B003", one_missing_parts), ("B004", none_present_parts)):
+            con.executemany(
+                "INSERT INTO book_files (asin, part_index, filepath) VALUES (?, ?, ?)",
+                [(asin, index, str(part)) for index, part in enumerate(parts)],
+            )
+        con.commit()
+        con.close()
+
+        # The middle part of B003 and every part of B004 vanish from disk while
+        # their rows stay behind — the shapes the "Missing" rendering exists for.
+        one_missing_parts[1].unlink()
+        for part in none_present_parts:
+            part.unlink()
+
+        monkeypatch.setattr(db_module, "DB_FILE", str(db_path))
+        monkeypatch.setattr(routes_module, "DB_FILE", str(db_path))
+        return {
+            "single_file": single_file,
+            "all_present_dir": all_present_dir,
+            "one_missing_dir": one_missing_dir,
+            "one_missing": one_missing_parts,
+            "none_present": none_present_parts,
+        }
+
+    def test_single_file_book_reports_no_parts(self, client, completed_setup, details_db):
+        _login_session(client)
+        response = client.get("/api/book/B001")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["file_count"] == 0
+        assert data["files"] == []
+        # The legacy single-file stats are unchanged.
+        assert data["file_size_hr"] == "1.0 KB"
+        assert data["file_type"] == ".m4b Audiobook"
+        assert data["file_mtime_hr"] != "N/A"
+
+    def test_split_book_reports_every_part_in_order(self, client, completed_setup, details_db):
+        _login_session(client)
+        response = client.get("/api/book/B002")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["file_count"] == 3
+        assert [part["name"] for part in data["files"]] == [
+            "AllPresent - 1 - Chapter 1.m4b",
+            "AllPresent - 2 - Chapter 2.m4b",
+            "AllPresent - 3 - Chapter 3.m4b",
+        ]
+        assert all(part["size_hr"] != "Missing" for part in data["files"])
+        # D3: a split book's `filepath` is its FOLDER — the modal's Path row.
+        assert data["filepath"] == str(details_db["all_present_dir"])
+        # 1024 + 2048 + 4096 bytes, reported as the set's total.
+        assert data["file_size_hr"] == "7.0 KB"
+        assert data["file_type"] == ".m4b Audiobook"
+        assert data["file_mtime_hr"] != "N/A"
+
+    def test_missing_part_is_flagged_without_losing_the_rest(self, client, completed_setup, details_db):
+        _login_session(client)
+        response = client.get("/api/book/B003")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["file_count"] == 3
+        assert data["files"][1]["size_hr"] == "Missing"
+        assert data["files"][1]["name"] == "OneMissing - 2 - Chapter 2.m4b"
+        assert data["files"][0]["size_hr"] != "Missing"
+        assert data["files"][2]["size_hr"] != "Missing"
+        # D3: a split book's `filepath` is its FOLDER — the modal's Path row.
+        assert data["filepath"] == str(details_db["one_missing_dir"])
+        # The total covers only the parts still on disk (1024 + 4096 bytes).
+        assert data["file_size_hr"] == "5.0 KB"
+        assert data["file_mtime_hr"] != "N/A"
+
+    def test_split_book_with_no_parts_on_disk_reports_na(self, client, completed_setup, details_db):
+        _login_session(client)
+        response = client.get("/api/book/B004")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["file_count"] == 2
+        assert [part["size_hr"] for part in data["files"]] == ["Missing", "Missing"]
+        assert data["file_size_hr"] == "N/A"
+        assert data["file_mtime_hr"] == "N/A"
+        # Nothing on disk means no format to assert either (review M2).
+        assert data["file_type"] == "N/A"

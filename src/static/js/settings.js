@@ -74,6 +74,19 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     /**
+     * Enables/disables the minimum-chapter-length input to match the Split by
+     * Chapter toggle: the merge threshold only means something while splitting is
+     * on. The input keeps its class="setting-input", and the save sweep reads
+     * disabled inputs too, so the stored value survives an off/on round trip.
+     */
+    function updateSplitDependents() {
+        const splitToggle = document.getElementById("split-by-chapter");
+        const minLengthInput = document.getElementById("minimum-file-duration");
+        if (!splitToggle || !minLengthInput) return;
+        minLengthInput.disabled = !splitToggle.checked;
+    }
+
+    /**
      * Handles the API call and UI updates for the manual authentication check.
      * @param {HTMLButtonElement} btn - The "Run Authentication Check" button.
      */
@@ -361,6 +374,12 @@ document.addEventListener("DOMContentLoaded", () => {
     const outputFormatSelect = document.getElementById("output-format-select");
     if (outputFormatSelect) {
         outputFormatSelect.addEventListener("change", updateFormatVisibility);
+    }
+
+    // Split-by-chapter toggle: the minimum-length input tracks its state.
+    const splitByChapterToggle = document.getElementById("split-by-chapter");
+    if (splitByChapterToggle) {
+        splitByChapterToggle.addEventListener("change", updateSplitDependents);
     }
 
     // Live-update the numeric readout next to the VBR quality slider.
@@ -657,6 +676,9 @@ document.addEventListener("DOMContentLoaded", () => {
     // Set the initial visibility of the format-dependent controls (AAC quality
     // row / MP3 block) from the server-rendered output-format value.
     updateFormatVisibility();
+
+    // Initial disabled state of the minimum-length input, from the server-rendered toggle.
+    updateSplitDependents();
 
     // Fetch settings to determine the initial state of Advanced Mode and populate scheduler widgets.
     fetch("/api/settings")

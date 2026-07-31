@@ -64,6 +64,59 @@ async function getCleanupStaleFilesSetting() {
     }
 }
 
+// The single renderer for the modal's File Information section. It is used both
+// when the modal opens and by the two rename reconcilers (metadata save and
+// duplicate resolve), so the split-book shape — file count row plus the
+// collapsible list of chapter files — can never drift between those paths.
+//
+// The book object always carries `files`: empty for a normal single-file book,
+// one entry per chapter file (in playback order) for a split one. For a split
+// book the existing fields already describe the set — `filepath` is the book's
+// folder, `file_size_hr` the total, `file_mtime_hr` the newest part — so the
+// four top lines need no per-shape branching.
+//
+// Part names and sizes are template/user-derived, so they go in via textContent
+// on generated <li> elements, never through innerHTML.
+function renderFileInfo(book) {
+    document.getElementById("modal-file-path").textContent = book.filepath || "N/A";
+    document.getElementById("modal-file-type").textContent = book.file_type || "N/A";
+    document.getElementById("modal-file-size").textContent = book.file_size_hr || "N/A";
+    document.getElementById("modal-file-mtime").textContent = book.file_mtime_hr || "N/A";
+
+    const isSplit = Array.isArray(book.files) && book.files.length > 0;
+    const countRow = document.getElementById("modal-file-count-row");
+    const partsDetails = document.getElementById("modal-file-parts");
+    const partsList = document.getElementById("modal-file-parts-list");
+
+    // Reset to the single-file shape first, so a re-render after a rename (or a
+    // previously opened split book) never leaves stale rows behind.
+    countRow.style.display = isSplit ? "block" : "none";
+    partsDetails.style.display = isSplit ? "block" : "none";
+    partsList.innerHTML = "";
+    if (!isSplit) return;
+
+    // A part the server could not stat reports "Missing" (deleted) or
+    // "Unreadable" (permissions); either way the set is incomplete.
+    const missingCount = book.files.filter(
+        (part) => part.size_hr === "Missing" || part.size_hr === "Unreadable",
+    ).length;
+    const plural = book.files.length === 1 ? "" : "s";
+    document.getElementById("modal-file-count").textContent =
+        missingCount > 0
+            ? `${book.files.length} chapter file${plural} (${missingCount} missing)`
+            : `${book.files.length} chapter file${plural}`;
+    // An incomplete set must be visible at the summary level, not buried in a
+    // collapsed list — review W1.
+    if (missingCount > 0) partsDetails.open = true;
+    book.files.forEach((part) => {
+        const li = document.createElement("li");
+        if (part.size_hr === "Missing") li.textContent = `${part.name} — missing`;
+        else if (part.size_hr === "Unreadable") li.textContent = `${part.name} — unreadable`;
+        else li.textContent = `${part.name} — ${part.size_hr}`;
+        partsList.appendChild(li);
+    });
+}
+
 async function handleBookClick(event) {
     const card = event.target.closest(".book-card");
     if (!card) return; // Not a book card click
@@ -136,11 +189,9 @@ async function handleBookClick(event) {
         document.getElementById("modal-book-language").textContent = book.language || "N/A";
         document.getElementById("modal-book-summary").textContent = book.summary || "No summary available.";
 
-        // File Info
-        document.getElementById("modal-file-path").textContent = book.filepath || "N/A";
-        document.getElementById("modal-file-type").textContent = book.file_type || "N/A";
-        document.getElementById("modal-file-size").textContent = book.file_size_hr || "N/A";
-        document.getElementById("modal-file-mtime").textContent = book.file_mtime_hr || "N/A";
+        // File Info. Fresh modal opens start collapsed; re-renders (renames) preserve the user's expansion.
+        document.getElementById("modal-file-parts").open = false;
+        renderFileInfo(book);
 
         // Error Info
         const errorDetailsDiv = document.getElementById("modal-error-details");
@@ -211,10 +262,34 @@ async function handleBookClick(event) {
                 // is cleaned up automatically, or we offer the choice here.
                 const cleanupAlways = await getCleanupStaleFilesSetting();
 
+                // A split book re-downloads as a set of chapter files, so the warning copy
+                // pluralizes; `files` is present on every /api/book response (empty = single).
+                // These clauses stay plain text (no tags) so the native-confirm fallback
+                // below can reuse them verbatim.
+                const isSplit = Array.isArray(book.files) && book.files.length > 0;
+                const newFileClause = isSplit
+                    ? "the new files are written to a new path"
+                    : "the new file is written to a new path";
+                const prevFilesClause = isSplit
+                    ? "the previous chapter files and their companion files"
+                    : "the previous file and its companion files";
+                const prevLeftClause = isSplit
+                    ? "the previous files are left on disk"
+                    : "the previous file is left on disk";
+                const newLocationLeadIn = isSplit
+                    ? "If the new files are written to a different location"
+                    : "If the new file is written to a different location";
+                // A split book never has a cue sheet (D9), so the split copy must
+                // not promise to delete one.
+                const companionListClause = isSplit
+                    ? "(PDF, cover, metadata, annotations, and any retained original AAX/AAXC files and their vouchers)"
+                    : "(PDF, cover, cue sheet, metadata, annotations, and any retained original AAX/AAXC files and their vouchers)";
+
                 // Shared first half of the warning, in both HTML and plain-text form.
+                // "It will be re-downloaded" stays singular: it refers to the book.
                 const escapedTitle = `<strong>${window.escapeHtml(book.title)}</strong>`;
-                const introHtml = `Are you sure you want to re-download "${escapedTitle}"?<br>It will be re-downloaded and converted using your <strong>current</strong> settings. If the output format or naming template has changed since the original download, the new file is written to a new path`;
-                const introText = `Re-download "${book.title}"?\n\nIt will be re-downloaded and converted using your current settings. If the output format or naming template has changed since the original download, the new file is written to a new path`;
+                const introHtml = `Are you sure you want to re-download "${escapedTitle}"?<br>It will be re-downloaded and converted using your <strong>current</strong> settings. If the output format or naming template has changed since the original download, ${newFileClause}`;
+                const introText = `Re-download "${book.title}"?\n\nIt will be re-downloaded and converted using your current settings. If the output format or naming template has changed since the original download, ${newFileClause}`;
 
                 if (window.showConfirmationModal) {
                     if (cleanupAlways) {
@@ -222,7 +297,7 @@ async function handleBookClick(event) {
                         // with no job_params, letting the server setting govern.
                         window.showConfirmationModal(
                             '<i class="fas fa-exclamation-triangle"></i> Force Re-download?',
-                            `${introHtml} and the previous file and its companion files will be <strong>deleted automatically</strong> (per your <strong>Clean up Replaced Files</strong> setting).`,
+                            `${introHtml} and ${prevFilesClause} will be <strong>deleted automatically</strong> (per your <strong>Clean up Replaced Files</strong> setting).`,
                             () => runDownload(),
                         );
                     } else {
@@ -233,10 +308,10 @@ async function handleBookClick(event) {
                         // cleared, so the input is still in the DOM when it fires.
                         window.showConfirmationModal(
                             '<i class="fas fa-exclamation-triangle"></i> Force Re-download?',
-                            `${introHtml} and the previous file is left on disk.` +
+                            `${introHtml} and ${prevLeftClause}.` +
                                 `<label style="display: block; margin-top: 15px; font-weight: normal">` +
                                 `<input type="checkbox" id="redownload-cleanup-checkbox" style="margin-right: 8px" />` +
-                                `If the new file is written to a different location, also delete the previous file and its companion files (PDF, cover, cue sheet, metadata, annotations, and any retained original AAX/AAXC files and their vouchers).` +
+                                `${newLocationLeadIn}, also delete ${prevFilesClause} ${companionListClause}.` +
                                 `</label>`,
                             () => {
                                 const checkbox = document.getElementById("redownload-cleanup-checkbox");
@@ -251,15 +326,15 @@ async function handleBookClick(event) {
                     if (cleanupAlways) {
                         if (
                             confirm(
-                                `${introText} and the previous file and its companion files will be deleted automatically (per your settings).`,
+                                `${introText} and ${prevFilesClause} will be deleted automatically (per your settings).`,
                             )
                         ) {
                             runDownload();
                         }
                     } else {
-                        if (confirm(`${introText} and the previous file is left on disk.`)) {
+                        if (confirm(`${introText} and ${prevLeftClause}.`)) {
                             const alsoDelete = confirm(
-                                "If the new file is written to a different location, also delete the previous file and its companion files (PDF, cover, cue sheet, metadata, annotations, and any retained original AAX/AAXC files and their vouchers)?",
+                                `${newLocationLeadIn}, also delete ${prevFilesClause} ${companionListClause}?`,
                             );
                             runDownload({ cleanup_stale_files: alsoDelete });
                         }
@@ -458,8 +533,11 @@ async function saveMetadata(payload) {
         });
 
         // If the opt-in filename rename ran, the stored path changed — reflect it.
+        // Re-rendering from the updated cached book handles both shapes: a split
+        // book's rename moves its folder but keeps the part filenames intact.
         if (data.renamed_to) {
-            document.getElementById("modal-file-path").textContent = data.renamed_to;
+            currentDetailBook.filepath = data.renamed_to;
+            renderFileInfo(currentDetailBook);
         }
 
         closeMetadataEditor();
@@ -651,8 +729,11 @@ async function applyDuplicateResolution() {
             is_duplicate: data.is_duplicate,
         });
 
+        // Same as the metadata save: re-render from the updated cached book, so a
+        // split book's moved folder is reflected without disturbing its part list.
         if (data.renamed_to) {
-            document.getElementById("modal-file-path").textContent = data.renamed_to;
+            currentDetailBook.filepath = data.renamed_to;
+            renderFileInfo(currentDetailBook);
         }
 
         // The flag is now clear: hide both the indicator and the resolve button.

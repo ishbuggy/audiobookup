@@ -223,9 +223,10 @@
                                 Clean up Replaced Files
                                 <small style="display: block; font-weight: normal; color: #6c757d">
                                     When a re-download lands at a different location (because the output format or
-                                    naming template changed), delete the previous file and its companion files (PDF,
-                                    cover, cue sheet, metadata, annotations, and any retained original AAX/AAXC files
-                                    and their vouchers) automatically instead of asking each time.
+                                    naming template changed), delete the previous audio file (or a split book's chapter
+                                    files) along with its companion files (PDF, cover, cue sheet, metadata, annotations,
+                                    and any retained original AAX/AAXC files and their vouchers) automatically instead
+                                    of asking each time.
                                 </small>
                             </label>
                             <label class="switch">
@@ -266,7 +267,9 @@
                                     Audible) in the Downloading section. <strong>Original</strong> strips DRM only and
                                     keeps Audible's audio untouched (fastest, no quality loss).
                                     <strong>AAC (.m4b)</strong> re-encodes at the quality below. <strong>MP3</strong>
-                                    produces a single MP3 with chapters, using the LAME options below.
+                                    re-encodes to MP3 with chapters, using the LAME options below. With
+                                    <strong>Split by Chapter</strong> (in Chapters &amp; Metadata), every format saves
+                                    one file per chapter instead of one file per book.
                                 </small>
                             </label>
                             <!-- prettier-ignore -->
@@ -509,6 +512,53 @@
                             </label>
                         </div>
 
+                        <!-- Split-by-chapter pair: the number input below is only meaningful while
+                             the toggle is on, so settings.js disables it when the toggle is off
+                             (see updateSplitDependents). -->
+                        <div class="form-group">
+                            <label for="split-by-chapter">
+                                Split by Chapter
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Save each chapter as its own file inside a folder for the book, instead of one
+                                    single audiobook file. Applies to books converted from now on.
+                                </small>
+                            </label>
+                            <label class="switch">
+                                <input
+                                    type="checkbox"
+                                    id="split-by-chapter"
+                                    class="setting-input"
+                                    data-path="conversion.chapters.split_by_chapter"
+                                    {%
+                                    if
+                                    settings.conversion.chapters.split_by_chapter
+                                    %}checked{%
+                                    endif
+                                    %}
+                                />
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+
+                        <div class="form-group advanced-setting">
+                            <label for="minimum-file-duration">
+                                Minimum Chapter File Length (seconds)
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Chapters shorter than this are merged into the following chapter instead of becoming
+                                    their own tiny file. 0 disables merging. Only used while Split by Chapter is on.
+                                </small>
+                            </label>
+                            <input
+                                type="number"
+                                id="minimum-file-duration"
+                                class="setting-input"
+                                data-path="conversion.chapters.minimum_file_duration"
+                                value="{{ settings.conversion.chapters.minimum_file_duration | default(3) }}"
+                                min="0"
+                                max="3600"
+                            />
+                        </div>
+
                         <div class="form-group advanced-setting">
                             <label for="combine-nested-titles">
                                 Combine Nested Chapter Titles
@@ -672,7 +722,8 @@
                             <label for="create-cue-sheet">
                                 Create .cue Sheet
                                 <small style="display: block; font-weight: normal; color: #6c757d">
-                                    Write a <code>.cue</code> chapter sheet next to the audiobook.
+                                    Write a <code>.cue</code> chapter sheet next to the audiobook. Not written for books
+                                    split by chapter — with one file per chapter, a cue sheet has nothing to add.
                                 </small>
                             </label>
                             <label class="switch">
@@ -839,6 +890,30 @@
                                 data-path="naming.file_template"
                                 style="width: 100%; box-sizing: border-box"
                                 value="{{ settings.naming.file_template | default('') }}"
+                            />
+                        </div>
+
+                        <div
+                            class="form-group advanced-setting"
+                            style="flex-direction: column; align-items: flex-start"
+                        >
+                            <label for="chapter-file-template" style="margin-bottom: 0.5em">
+                                Chapter File Name Template
+                                <small style="display: block; font-weight: normal; color: #6c757d">
+                                    Names each chapter's file when Split by Chapter (in Chapters &amp; Metadata) is on.
+                                    Placeholders: <code>{ch}</code> (chapter number, zero-padded so files sort
+                                    correctly), <code>{ch_total}</code>, <code>{ch_title}</code>, plus the book
+                                    placeholders above. If <code>{ch}</code> is missing it is added automatically. This
+                                    names the file only — the folder comes from the templates above.
+                                </small>
+                            </label>
+                            <input
+                                type="text"
+                                id="chapter-file-template"
+                                class="setting-input"
+                                data-path="naming.chapter_file_template"
+                                style="width: 100%; box-sizing: border-box"
+                                value="{{ settings.naming.chapter_file_template | default('{title} - {ch} - {ch_title}') }}"
                             />
                         </div>
 

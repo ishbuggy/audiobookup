@@ -431,8 +431,20 @@
                     <h4 style="margin-top: 1em">File Information</h4>
                     <p><strong>Path:</strong> <span id="modal-file-path"></span></p>
                     <p><strong>Type:</strong> <span id="modal-file-type"></span></p>
+                    <!-- Split books only: the file count and the per-chapter file list stay hidden
+                         for a normal single-file book (see renderFileInfo in modal-manager.js). -->
+                    <p id="modal-file-count-row" style="display: none">
+                        <strong>Files:</strong> <span id="modal-file-count"></span>
+                    </p>
                     <p><strong>Size:</strong> <span id="modal-file-size"></span></p>
                     <p><strong>Last Modified:</strong> <span id="modal-file-mtime"></span></p>
+                    <details id="modal-file-parts" style="display: none; margin-top: 0.5em">
+                        <summary style="cursor: pointer">Chapter files</summary>
+                        <ul
+                            id="modal-file-parts-list"
+                            style="font-size: 0.9em; margin: 0.5em 0 0 0; padding-left: 1.5em"
+                        ></ul>
+                    </details>
                     <button id="download-annotations-btn" style="display: none; margin-top: 0.5em">
                         <i class="fas fa-bookmark"></i> Download Annotations
                     </button>

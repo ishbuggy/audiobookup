@@ -136,6 +136,18 @@ function buildDuplicateBadgeHTML(book) {
         : "";
 }
 
+// File-count badge (v0.24.0): a book split into per-chapter files shows how many,
+// in every view. `file_count` comes from the library API and is 0 for a normal
+// single-file book (so those render nothing); ANY positive count means split,
+// matching the detail modal's "any part rows = split" contract. The count is a
+// server-supplied integer (never user text), so interpolating it into the markup
+// is safe — the duplicate badge above composes its markup the same way.
+function buildFileCountBadgeHTML(book) {
+    return book.file_count > 0
+        ? `<span class="badge-files" title="Split into ${book.file_count} chapter files"><i class="fas fa-layer-group"></i> ${book.file_count} files</span>`
+        : "";
+}
+
 // --- Grid View (default cards) ---
 function renderGridView(books, esc) {
     books.forEach((book) => {
@@ -149,6 +161,7 @@ function renderGridView(books, esc) {
             <p class="book-card-author">${esc(book.author)}</p>
             <span class="book-card-status status-${esc(book.status)}">${esc(book.status)}</span>
             ${buildDuplicateBadgeHTML(book)}
+            ${buildFileCountBadgeHTML(book)}
             <div class="book-card-actions">${buildActionButtonHTML(book, esc)}</div>
         </div>`;
         libraryGrid.appendChild(card);
@@ -179,6 +192,7 @@ function renderListView(books, esc) {
         </div>
         <span class="book-card-status status-${esc(book.status)}">${esc(book.status)}</span>
         ${buildDuplicateBadgeHTML(book)}
+        ${buildFileCountBadgeHTML(book)}
         <div class="book-card-actions">${buildActionButtonHTML(book, esc)}</div>`;
         libraryGrid.appendChild(card);
     });
@@ -215,7 +229,7 @@ function renderTableView(books, esc) {
             <td class="table-title">${esc(book.title)}</td>
             <td>${esc(book.author)}</td>
             <td>${esc(book.series || "")}</td>
-            <td><span class="book-card-status status-${esc(book.status)}">${esc(book.status)}</span>${buildDuplicateBadgeHTML(book)}</td>
+            <td><span class="book-card-status status-${esc(book.status)}">${esc(book.status)}</span>${buildDuplicateBadgeHTML(book)}${buildFileCountBadgeHTML(book)}</td>
             <td class="col-actions"><div class="book-card-actions">${buildActionButtonHTML(book, esc)}</div></td>`;
         tbody.appendChild(row);
     });

@@ -28,6 +28,10 @@
     --color-accent-yellow: #e0a800;
     --color-accent-yellow-text: #856404;
     --color-accent-yellow-bg: #fff3cd;
+    /* Neutral informational badge (file-count pill) — muted blue-gray, so it
+       reads as a fact about the book rather than a warning. */
+    --color-badge-neutral-text: #334155;
+    --color-badge-neutral-bg: #e2e8f0;
 }
 
 body.dark-mode {
@@ -53,6 +57,8 @@ body.dark-mode {
     --color-accent-yellow: #e0a800;
     --color-accent-yellow-text: #ffc107;
     --color-accent-yellow-bg: #3e3820;
+    --color-badge-neutral-text: #cbd5e1;
+    --color-badge-neutral-bg: #334155;
 }
 
 /* ==========================================================================
@@ -1417,9 +1423,30 @@ h2 {
     vertical-align: middle;
 }
 
+/* File-count badge for split books (v0.24.0) — structure mirrors
+   .badge-duplicate, neutral palette. */
+.badge-files {
+    display: inline-block;
+    margin-left: 0.4em;
+    padding: 0.2em 0.55em;
+    border-radius: 20px;
+    font-size: 0.75em;
+    font-weight: bold;
+    background-color: var(--color-badge-neutral-bg);
+    color: var(--color-badge-neutral-text);
+    white-space: nowrap;
+    vertical-align: middle;
+}
+
 /* Grid cards stack their info vertically, so let the badge sit on its own line
    under the status pill rather than pushing the layout. */
 #library-grid.view-grid .badge-duplicate {
+    margin-left: 0;
+    margin-top: 0.4em;
+    align-self: flex-start;
+}
+
+#library-grid.view-grid .badge-files {
     margin-left: 0;
     margin-top: 0.4em;
     align-self: flex-start;

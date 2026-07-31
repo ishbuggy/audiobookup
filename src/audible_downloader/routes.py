@@ -1,3 +1,4 @@
+import errno
 import json
 import math
 import os
@@ -48,6 +49,7 @@ from audible_downloader.auth import login_required, verify_credentials
 from audible_downloader.db import (
     apply_metadata_overrides,
     get_all_books,
+    get_book_files,
     get_books_for_download_modal,
     get_db_connection,
     get_db_stats,
@@ -294,23 +296,69 @@ def get_book_details(asin):
         book_dict["cover_url_original"] = original_cover_path
     else:
         book_dict["cover_url_original"] = thumb_cover_path
-    file_path = book_dict.get("filepath")
-    if file_path and os.path.exists(file_path):
-        try:
-            stat_info = os.stat(file_path)
-            book_dict["file_size_hr"] = format_bytes(stat_info.st_size)
-            book_dict["file_mtime_hr"] = datetime.fromtimestamp(stat_info.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-            # Derive the label from the real on-disk extension so imported .m4a
-            # files (L8 preserves their extension) aren't mislabeled as ".m4b".
-            file_ext = os.path.splitext(file_path)[1].lower()
-            book_dict["file_type"] = f"{file_ext} Audiobook" if file_ext else "Audiobook"
-        except Exception as e:
-            log.warning(f"Could not get file stats for {file_path}: {e}")
-            book_dict["file_size_hr"] = "Error"
+    # v0.24.0: a split book's `filepath` is its FOLDER, not an audio file — the
+    # real audio lives in the `book_files` parts — so File Information is
+    # computed across the part set instead of by statting the row's path. The
+    # presence of part rows IS the split flag; an empty list is a normal book.
+    part_rows = get_book_files(asin)
+    book_dict["file_count"] = len(part_rows)
+    if part_rows:
+        # Per-part sizes for the modal's file list, plus the roll-ups (total
+        # size, newest mtime) that stand in for the single file's stats.
+        parts = []
+        total_size = 0
+        newest_mtime = None
+        for row in part_rows:
+            part_path = row["filepath"]
+            try:
+                stat_info = os.stat(part_path)
+            except OSError as e:
+                # One unreadable/deleted part must not fail the whole request:
+                # it is flagged and the rest still report. A permissions failure
+                # must not read as a deleted file (review M3), so only ENOENT
+                # renders as "Missing".
+                log.warning(f"Could not get file stats for part {part_path}: {e}")
+                sentinel = "Missing" if e.errno == errno.ENOENT else "Unreadable"
+                parts.append({"name": os.path.basename(part_path), "size_hr": sentinel})
+                continue
+            total_size += stat_info.st_size
+            if newest_mtime is None or stat_info.st_mtime > newest_mtime:
+                newest_mtime = stat_info.st_mtime
+            parts.append({"name": os.path.basename(part_path), "size_hr": format_bytes(stat_info.st_size)})
+        book_dict["files"] = parts
+        book_dict["file_size_hr"] = format_bytes(total_size) if newest_mtime is not None else "N/A"
+        book_dict["file_mtime_hr"] = (
+            datetime.fromtimestamp(newest_mtime).strftime("%Y-%m-%d %H:%M:%S") if newest_mtime is not None else "N/A"
+        )
+        # Every part shares one extension by construction, so the first part's
+        # real on-disk extension labels the whole set (same rule as below). With
+        # nothing left on disk there is no format to assert, so the type reads
+        # "N/A" like the single-file branch's missing-file shape (review M2).
+        if newest_mtime is not None:
+            first_ext = os.path.splitext(part_rows[0]["filepath"])[1].lower()
+            book_dict["file_type"] = f"{first_ext} Audiobook" if first_ext else "Audiobook"
+        else:
+            book_dict["file_type"] = "N/A"
     else:
-        book_dict["file_size_hr"] = "N/A"
-        book_dict["file_mtime_hr"] = "N/A"
-        book_dict["file_type"] = "N/A"
+        # Single-file book: the row's path IS the audio file.
+        book_dict["files"] = []
+        file_path = book_dict.get("filepath")
+        if file_path and os.path.exists(file_path):
+            try:
+                stat_info = os.stat(file_path)
+                book_dict["file_size_hr"] = format_bytes(stat_info.st_size)
+                book_dict["file_mtime_hr"] = datetime.fromtimestamp(stat_info.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                # Derive the label from the real on-disk extension so imported .m4a
+                # files (L8 preserves their extension) aren't mislabeled as ".m4b".
+                file_ext = os.path.splitext(file_path)[1].lower()
+                book_dict["file_type"] = f"{file_ext} Audiobook" if file_ext else "Audiobook"
+            except Exception as e:
+                log.warning(f"Could not get file stats for {file_path}: {e}")
+                book_dict["file_size_hr"] = "Error"
+        else:
+            book_dict["file_size_hr"] = "N/A"
+            book_dict["file_mtime_hr"] = "N/A"
+            book_dict["file_type"] = "N/A"
     return jsonify(book_dict)
 
 
