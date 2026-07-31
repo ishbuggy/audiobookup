@@ -8,6 +8,7 @@ from unittest import mock
 from urllib.parse import quote
 
 import pytest
+from werkzeug.security import check_password_hash
 
 
 def _login(client, next_value=None, password="changeme"):
@@ -704,6 +705,67 @@ class TestSettingsGetRedaction:
         assert client.get("/api/settings").status_code == 200
         assert "password_hash" in settings_module.DEFAULT_SETTINGS
         assert "initial_setup_complete" in settings_module.DEFAULT_SETTINGS
+
+
+class TestSettingsPostRedactionStrip:
+    """The mirror image of the GET-side redaction: POST /api/settings is where the
+    "Import Settings" button uploads a settings file verbatim, so a pre-v0.23
+    export still carrying the old install's password_hash must not overwrite the
+    live credential (nothing would warn — credentials_changed only watches the
+    plain-text `password` key — and the user would discover it at next login)."""
+
+    # A recognizable stand-in for the stored hash (not a real credential).
+    STORED_HASH = "pbkdf2:sha256:600000$storedsalt$0123456789abcdef"
+    IMPORTED_HASH = "pbkdf2:sha256:600000$oldexport$fedcba9876543210"
+
+    def test_imported_password_hash_is_ignored_but_siblings_apply(self, client, completed_setup, settings_file):
+        from audible_downloader import settings as settings_module
+
+        settings_file.write_text(json.dumps({"initial_setup_complete": True, "password_hash": self.STORED_HASH}))
+
+        _login_session(client)
+        response = client.post(
+            "/api/settings",
+            json={
+                "password_hash": self.IMPORTED_HASH,  # stale key from an old export
+                "advanced_mode_enabled": True,  # legitimate sibling in the same payload
+            },
+        )
+        assert response.status_code == 200
+
+        stored = settings_module.load_settings()
+        assert stored["password_hash"] == self.STORED_HASH  # untouched
+        assert stored["advanced_mode_enabled"] is True  # the real setting landed
+
+    def test_imported_setup_flag_is_ignored(self, client, completed_setup, settings_file):
+        """initial_setup_complete is first-run wizard state for THIS install; an
+        imported False would drop the user back into the setup gate."""
+        from audible_downloader import settings as settings_module
+
+        settings_file.write_text(json.dumps({"initial_setup_complete": True, "password_hash": self.STORED_HASH}))
+
+        _login_session(client)
+        response = client.post("/api/settings", json={"initial_setup_complete": False})
+        assert response.status_code == 200
+        assert settings_module.load_settings()["initial_setup_complete"] is True
+
+    def test_a_real_password_change_still_works(self, client, completed_setup, settings_file):
+        """Stripping the hash must not block the supported path: a plain-text
+        `password` still rehashes the credential and forces the logout."""
+        from audible_downloader import settings as settings_module
+
+        settings_file.write_text(json.dumps({"initial_setup_complete": True, "password_hash": self.STORED_HASH}))
+
+        _login_session(client)
+        response = client.post(
+            "/api/settings",
+            json={"password": "a-new-password", "password_hash": self.IMPORTED_HASH},
+        )
+        assert response.status_code == 200
+
+        stored = settings_module.load_settings()
+        assert stored["password_hash"] not in (self.STORED_HASH, self.IMPORTED_HASH)
+        assert check_password_hash(stored["password_hash"], "a-new-password")
 
 
 class TestSettingsOutputFormatMirror:

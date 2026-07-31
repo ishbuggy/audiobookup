@@ -201,6 +201,17 @@ def post_settings():
     if not isinstance(new_settings, dict):
         return jsonify(error="Invalid data format"), 400
 
+    # Redaction has to be symmetric: what an export never carries, an import must
+    # never apply. The settings page's "Import Settings" button POSTs an uploaded
+    # file here verbatim, and a pre-v0.23 export still contains the old install's
+    # password_hash — deep-merged in, it would silently replace the live
+    # credential (credentials_changed only watches the plain-text `password` key,
+    # so no logout and no warning fires and the user finds out at next login).
+    # Drop the same keys the GET side filters, by the same top-level convention,
+    # so the two directions cannot drift apart. Never log the values.
+    for key in REDACTED_SETTINGS_KEYS:
+        new_settings.pop(key, None)
+
     current_settings = load_settings()
 
     # Flag to track if we need to force a logout
