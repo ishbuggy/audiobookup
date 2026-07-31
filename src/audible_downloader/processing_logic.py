@@ -2897,8 +2897,15 @@ class BookProcessor:
             # sitting at the final path masquerading as a real book. It would
             # otherwise linger until a later retry's embedded-ASIN check chose to
             # overwrite it; removing it now keeps /data honest in the meantime.
-            # A split book removes ALL of its parts, for the same reason: the
-            # ones that did land are a partial book nothing tracks.
+            # A split book removes ALL of its parts, for the same reason —
+            # including any the previous download owned, which the promotion
+            # rollback deliberately spares. The difference is that verification
+            # is only ever reached once EVERY target was replaced, so no prior
+            # copy survives at any of them: what is on disk is this run's failed
+            # output either way, and leaving a known-bad set at tracked paths is
+            # worse than an ERROR row with the files gone. The cost — part rows
+            # left naming files that are no longer there, until the retry — is
+            # recorded as backlog #51.
             for produced_path in self._produced_output_paths():
                 if not os.path.exists(produced_path):
                     continue
@@ -3465,18 +3472,26 @@ class BookProcessor:
 
         The disk half is asked FIRST, and that is what keeps this free in the
         common case: a first download has nothing sitting at any of its targets,
-        so no query is made at all. Only a re-download landing on its own files
-        pays for the row read.
+        so no query is made at all — and nothing to spare, so a failed first
+        download still rolls back completely. Only a re-download landing on its
+        own files pays for the row read.
 
-        Best-effort by construction: _tracked_part_paths already answers [] for a
-        database that cannot be read, which simply makes the teardown as
-        thorough as it was before — the safe direction for a first download and
-        the only one available with no rows to trust.
+        That read FAILS CLOSED. `_tracked_part_paths` answers [] both for a book
+        with no part rows and for a database it could not read (it swallows
+        sqlite3.Error), and from here the two are indistinguishable — so an empty
+        answer with files already sitting at our targets is treated as "cannot
+        prove these are disposable" and spares all of them. Getting that
+        backwards is the whole bug this exists to prevent: a lock on this one
+        SELECT would otherwise empty the set and hand a cancel back to deleting
+        the user's previous chapter files. Sparing too much costs untracked files
+        a deep sync will adopt; sparing too little costs audio.
         """
         on_disk = [target for target in self.split_part_paths if os.path.exists(target)]
         if not on_disk:
             return set()
         tracked = {os.path.realpath(path) for path in _tracked_part_paths(self.asin)}
+        if not tracked:
+            return set(on_disk)
         return {target for target in on_disk if os.path.realpath(target) in tracked}
 
     def _remove_promoted_parts(self, promoted, targets):

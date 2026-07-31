@@ -3926,10 +3926,35 @@ class TestPromotionSparesThePreviousDownload:
 
         assert not out_dir.exists()
 
-    def test_an_untracked_previous_run_is_not_mistaken_for_a_tracked_one(self, tmp_path):
-        # Both halves of the test are load-bearing: files at the target paths
-        # that NO row names are this run's own orphans (or a stranger's the
-        # allocator already judged), not a previous download to protect.
+    def test_a_target_no_row_names_is_not_mistaken_for_a_tracked_one(self, tmp_path):
+        # Both halves of the predicate are load-bearing. Here the row read plainly
+        # SUCCEEDED — it names this book's parts under their previous chapter
+        # naming — and none of them is where this run is writing, so what is
+        # sitting at the targets is this run's own orphaned output rather than a
+        # previous download to protect.
+        processor, out_dir, _tracked = self._processor(tmp_path, previous=(0, 1))
+        processor.stop_event = Event()
+        real_move = processing_logic.shutil.move
+        elsewhere = [str(out_dir / "Dracula - 01 - One.m4b")]
+
+        def move_then_cancel(src, dst):
+            result = real_move(src, dst)
+            processor.stop_event.set()
+            return result
+
+        with contextlib.ExitStack() as stack:
+            for patch in self._patches(elsewhere, move=move_then_cancel):
+                stack.enter_context(patch)
+            assert processor._promote_split_parts() is False
+
+        assert not (out_dir / "Dracula - 1.m4b").exists()
+
+    def test_a_row_read_that_answers_nothing_spares_everything_on_disk(self, tmp_path):
+        # F1: `_tracked_part_paths` swallows sqlite3.Error and answers [] — the
+        # same answer a book with no part rows gives — so an empty read with
+        # files already at our targets cannot be read as "these are disposable".
+        # A lock on that one SELECT would otherwise hand the cancel path straight
+        # back to deleting the user's previous chapter files.
         processor, out_dir, _tracked = self._processor(tmp_path, previous=(0, 1))
         processor.stop_event = Event()
         real_move = processing_logic.shutil.move
@@ -3944,7 +3969,37 @@ class TestPromotionSparesThePreviousDownload:
                 stack.enter_context(patch)
             assert processor._promote_split_parts() is False
 
-        assert not (out_dir / "Dracula - 1.m4b").exists()
+        assert (out_dir / "Dracula - 1.m4b").read_text() == "new audio 0"
+        assert (out_dir / "Dracula - 2.m4b").read_text() == "previous audio 1"
+        # ...and the target nothing was ever at is still not there, so a failed
+        # FIRST download (nothing on disk, nothing to spare) still rolls back.
+        assert not (out_dir / "Dracula - 3.m4b").exists()
+
+    def test_a_mixed_set_spares_the_old_parts_and_removes_the_new_ones(self, tmp_path):
+        # F2: with every promoted part also pre-existing, a rollback that skipped
+        # its delete loop entirely would look identical. Only one target belongs
+        # to the previous download here, so the two halves have to be told apart:
+        # part 1 survives, part 2 — placed by this run, tracked by nothing — goes.
+        processor, out_dir, tracked = self._processor(tmp_path, previous=(0,))
+        real_move = processing_logic.shutil.move
+        calls = []
+
+        def failing_move(src, dst):
+            calls.append(src)
+            if len(calls) == 3:
+                raise OSError("No space left on device")
+            return real_move(src, dst)
+
+        with contextlib.ExitStack() as stack:
+            for patch in self._patches(tracked, move=failing_move):
+                stack.enter_context(patch)
+            assert processor._promote_split_parts() is False
+
+        assert (out_dir / "Dracula - 1.m4b").read_text() == "new audio 0"
+        assert not (out_dir / "Dracula - 2.m4b").exists()
+        assert not (out_dir / "Dracula - 3.m4b").exists()
+        # The folder still holds the spared part, so the prune leaves it alone.
+        assert out_dir.exists()
 
     def test_a_raising_finalize_discards_only_the_parts_this_run_created(self, tmp_path):
         # W8: the part-row write is allowed to raise (a locked database), and that
