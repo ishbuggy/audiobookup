@@ -4398,6 +4398,32 @@ class TestSplitRename:
         assert result == str(new_folder)
         assert sorted(p.name for p in folder.iterdir()) == ["Bram Stoker - Dracula.jpg", "Someone Else - Other.jpg"]
 
+    def test_an_external_library_managers_cover_is_not_taken_along(self, tmp_path):
+        # The same defect the stale sweep had, in the move direction: the folder's
+        # only sidecar-shaped file is an external library manager's "cover.jpg"
+        # (its bare "metadata.json" matches no suffix at all), which reads back as
+        # the unambiguous base "cover". The chapter files still move; the files
+        # this app never wrote stay exactly where their owner put them.
+        folder = self._library(tmp_path, sidecars=("cover.jpg", "metadata.json"))
+        new_folder = tmp_path / "new" / "Nosferatu"
+        result, _con = self._run(folder, str(new_folder / "Bram Stoker - Nosferatu.m4b"))
+
+        assert result == str(new_folder)
+        assert sorted(p.name for p in folder.iterdir()) == ["cover.jpg", "metadata.json"]
+        assert sorted(p.name for p in new_folder.iterdir()) == sorted(self.PARTS)
+
+    def test_a_cover_only_base_still_moves_when_the_stem_is_unchanged(self, tmp_path):
+        # The name branch of the corroboration: nothing but a cover image at the
+        # base, but it is spelled exactly like the stem this rename renders, so
+        # it is this book's and follows the parts into the new folder.
+        folder = self._library(tmp_path, sidecars=("Bram Stoker - Dracula.jpg",))
+        new_folder = tmp_path / "new" / "Dracula"
+        result, _con = self._run(folder, str(new_folder / "Bram Stoker - Dracula.m4b"))
+
+        assert result == str(new_folder)
+        assert sorted(p.name for p in new_folder.iterdir()) == sorted(["Bram Stoker - Dracula.jpg", *self.PARTS])
+        assert list(folder.iterdir()) == []
+
     def test_shared_sidecar_base_is_left_where_it_is(self, tmp_path):
         # #20 for the split shape: another book's row still points at the old
         # base, so its cover/metadata are not ours to walk off with.
@@ -4671,14 +4697,17 @@ class TestCleanupStaleSets(TestCleanupStaleFiles):
 
     def test_split_to_single_removes_every_old_part(self):
         # The mirror of the single -> split transition: the book is now one file
-        # somewhere else, and the whole old part set is stale.
+        # somewhere else, and the whole old part set is stale. The metadata JSON
+        # is what identifies the old base as this app's own work — the book was
+        # renamed, so the stem no longer matches the one this run rendered.
+        old_base = f"{self.OLD_FOLDER}/Old Title"
         removed, cleanup_dirs = self._run(
             self.OLD_FOLDER,
             previous_parts=self.OLD_PARTS,
             param=True,
-            present={*self.OLD_PARTS, f"{self.OLD_FOLDER}/Old Title.jpg"},
+            present={*self.OLD_PARTS, old_base + ".jpg", old_base + ".metadata.json"},
         )
-        assert removed == {*self.OLD_PARTS, f"{self.OLD_FOLDER}/Old Title.jpg"}
+        assert removed == {*self.OLD_PARTS, old_base + ".jpg", old_base + ".metadata.json"}
         cleanup_dirs.assert_any_call(self.OLD_FOLDER)
 
     def test_the_tracked_folder_itself_is_never_unlinked(self):
@@ -4733,6 +4762,49 @@ class TestCleanupStaleSets(TestCleanupStaleFiles):
             present={*self.OLD_PARTS, old_base + ".jpg", old_base + ".metadata.json"},
         )
         assert removed == {*self.OLD_PARTS, old_base + ".jpg", old_base + ".metadata.json"}
+
+    def test_an_external_library_managers_files_are_never_swept(self):
+        # The live Phase 8 defect: Audiobookshelf writes "cover.jpg" and a bare
+        # "metadata.json" into every book folder it manages. The bare JSON matches
+        # no sidecar suffix, so the folder reads back as the single unambiguous
+        # base "cover" — and the sweep deleted another program's cover image on
+        # every re-download. Nothing in that folder is ours to delete but the
+        # parts we wrote.
+        removed, _cleanup_dirs = self._run(
+            self.OLD_FOLDER,
+            previous_parts=self.OLD_PARTS,
+            param=True,
+            present={*self.OLD_PARTS, f"{self.OLD_FOLDER}/cover.jpg", f"{self.OLD_FOLDER}/metadata.json"},
+        )
+        assert removed == set(self.OLD_PARTS)
+
+    def test_the_rendered_stem_corroborates_a_cover_only_base(self):
+        # The other corroboration branch, and the common case: only the FOLDER
+        # level of the naming template changed, so the old base is spelled
+        # exactly like the stem this run just rendered for itself. A lone cover
+        # image at that base is ours and goes with the parts.
+        old_folder = "/data/Old Author/Title"
+        old_parts = [f"{old_folder}/Title - 1 - One.m4b"]
+        removed, _cleanup_dirs = self._run(
+            old_folder,
+            previous_parts=old_parts,
+            param=True,
+            present={*old_parts, f"{old_folder}/Title.jpg"},
+        )
+        assert removed == {*old_parts, f"{old_folder}/Title.jpg"}
+
+    def test_a_renamed_books_uncorroborated_cover_is_left_behind(self):
+        # The accepted cost of the guard above: the book was renamed (so the old
+        # stem matches nothing this run rendered) and the only sidecar left is a
+        # cover image, which any library manager could equally have written. The
+        # cover is stranded rather than risking someone else's file.
+        removed, _cleanup_dirs = self._run(
+            self.OLD_FOLDER,
+            previous_parts=self.OLD_PARTS,
+            param=True,
+            present={*self.OLD_PARTS, f"{self.OLD_FOLDER}/Old Title.jpg"},
+        )
+        assert removed == set(self.OLD_PARTS)
 
     def test_an_ambiguous_old_folder_keeps_its_sidecars(self):
         # Two books' sidecars in the old folder: the stem is unknowable, so the
@@ -4937,6 +5009,128 @@ class TestUniqueSidecarBase:
     def test_uppercase_spellings_count(self, tmp_path):
         (tmp_path / "Title.JPG").write_bytes(b"x")
         assert processing_logic._unique_sidecar_base(str(tmp_path)) == str(tmp_path / "Title")
+
+
+class TestOwnedSidecarBase:
+    """Inferring a base is a guess; acting on it needs proof. A book folder on a
+    real library is shared with whatever else manages that library — an
+    Audiobookshelf "cover.jpg" reads back as a perfectly unambiguous base — so a
+    base counts as ours only when its NAME is the stem we render today or its
+    FILES are ones only this app writes."""
+
+    def test_the_rendered_stem_names_the_base(self, tmp_path):
+        (tmp_path / "Bram Stoker - Dracula.jpg").write_bytes(b"cover")
+        base = processing_logic._owned_sidecar_base(str(tmp_path), "Bram Stoker - Dracula")
+        assert base == str(tmp_path / "Bram Stoker - Dracula")
+
+    def test_an_app_written_sidecar_names_the_base(self, tmp_path):
+        # The renamed-book case: the stem no longer matches anything we would
+        # render, but a curated metadata.json at that base is ours whatever it is
+        # called, so the sweep and the rename can still follow it.
+        (tmp_path / "Old Title.jpg").write_bytes(b"cover")
+        (tmp_path / "Old Title.metadata.json").write_bytes(b"{}")
+        base = processing_logic._owned_sidecar_base(str(tmp_path), "New Title")
+        assert base == str(tmp_path / "Old Title")
+
+    def test_an_uppercase_app_written_sidecar_still_counts(self, tmp_path):
+        (tmp_path / "Old Title.Metadata.JSON").write_bytes(b"{}")
+        assert processing_logic._owned_sidecar_base(str(tmp_path), "New Title") == str(tmp_path / "Old Title")
+
+    def test_a_library_managers_cover_is_not_ours(self, tmp_path):
+        # The v0.24.0 defect: "cover.jpg" nominates the base "cover" and the bare
+        # "metadata.json" matches no suffix, so the folder looks unambiguous.
+        (tmp_path / "cover.jpg").write_bytes(b"cover")
+        (tmp_path / "metadata.json").write_bytes(b"{}")
+        (tmp_path / "Dracula - 01 - One.m4b").write_bytes(b"audio")
+        assert processing_logic._owned_sidecar_base(str(tmp_path), "Bram Stoker - Dracula") is None
+
+    def test_a_foreign_pdf_or_cover_at_any_other_name_is_not_ours(self, tmp_path):
+        # Neither of the two corroborating suffix-less signals: not our stem, and
+        # a PDF/cover pair is exactly what other tools also leave lying about.
+        (tmp_path / "Booklet.pdf").write_bytes(b"pdf")
+        (tmp_path / "Booklet.jpg").write_bytes(b"cover")
+        assert processing_logic._owned_sidecar_base(str(tmp_path), "Bram Stoker - Dracula") is None
+
+    def test_an_unknown_stem_leaves_the_files_alone(self, tmp_path):
+        # No expected stem to compare against (the naming metadata could not be
+        # read): the app-written files are then the only proof on offer.
+        (tmp_path / "Bram Stoker - Dracula.jpg").write_bytes(b"cover")
+        assert processing_logic._owned_sidecar_base(str(tmp_path), None) is None
+        (tmp_path / "Bram Stoker - Dracula.cue").write_bytes(b"cue")
+        assert processing_logic._owned_sidecar_base(str(tmp_path), None) == str(tmp_path / "Bram Stoker - Dracula")
+
+    def test_an_ambiguous_folder_is_still_ambiguous(self, tmp_path):
+        # The inherited guard: two candidate bases answer None before ownership
+        # is even asked, even when one of them is ours.
+        (tmp_path / "Bram Stoker - Dracula.metadata.json").write_bytes(b"{}")
+        (tmp_path / "Someone Else - Other.jpg").write_bytes(b"cover")
+        assert processing_logic._owned_sidecar_base(str(tmp_path), "Bram Stoker - Dracula") is None
+
+    def test_an_empty_folder_is_answered_not_raised(self, tmp_path):
+        assert processing_logic._owned_sidecar_base(str(tmp_path / "gone"), "Title") is None
+
+
+class TestSidecarBaseForTrackedBook:
+    """Where a finished book's sidecars live, asked of the database by whatever
+    meets the book later (the Download Annotations button). For a split book that
+    is a recovered answer — the stem is stored nowhere — so it is re-rendered
+    from the naming template, and the folder's own sidecars win over that only
+    when they are provably this book's."""
+
+    ROW = {
+        "filepath": None,  # set per test
+        "author": "Bram Stoker",
+        "title": "Dracula",
+        "narrator": "N",
+        "publisher": "P",
+        "custom_title": None,
+        "custom_author": None,
+        "series": "N/A",
+        "series_sequence": "N/A",
+        "release_date": "N/A",
+        "language": "N/A",
+    }
+
+    def _base(self, folder, parts, rendered="/data/Bram Stoker/Dracula/Bram Stoker - Dracula.m4b"):
+        row = dict(self.ROW, filepath=str(folder))
+        con = _FakeDb(book_row=row, part_rows=[str(p) for p in parts])
+        with (
+            mock.patch.object(processing_logic, "load_settings", return_value={}),
+            mock.patch.object(processing_logic, "get_db_connection", return_value=con),
+            mock.patch.object(processing_logic, "build_base_output_path", return_value=rendered),
+        ):
+            return processing_logic.sidecar_base_for_tracked_book("B0OURS")
+
+    def test_a_library_managers_cover_never_becomes_the_base(self, tmp_path):
+        # Writing the annotations dump at the inferred "cover" base would both
+        # misfile it and make that foreign base look like ours ever after — the
+        # re-rendered name is used instead.
+        folder = tmp_path / "Dracula"
+        folder.mkdir()
+        part = folder / "Dracula - 01 - One.m4b"
+        part.write_bytes(b"audio")
+        (folder / "cover.jpg").write_bytes(b"cover")
+        (folder / "metadata.json").write_bytes(b"{}")
+
+        assert self._base(folder, [part]) == str(folder / "Bram Stoker - Dracula")
+
+    def test_the_books_own_sidecars_still_win_over_the_rendered_name(self, tmp_path):
+        # The reason the folder is consulted at all: this book was downloaded
+        # under a naming template that has since changed, so its sidecars sit at
+        # a stem nothing would render today. The app-written metadata JSON is
+        # what proves they are its own.
+        folder = tmp_path / "Dracula"
+        folder.mkdir()
+        part = folder / "Dracula - 01 - One.m4b"
+        part.write_bytes(b"audio")
+        (folder / "Old Name.metadata.json").write_bytes(b"{}")
+
+        assert self._base(folder, [part]) == str(folder / "Old Name")
+
+    def test_a_single_file_book_is_answered_from_its_own_path(self, tmp_path):
+        book = tmp_path / "Dracula.m4b"
+        book.write_bytes(b"audio")
+        assert self._base(book, []) == str(tmp_path / "Dracula")
 
 
 class TestSplitFolderGuardLogging:

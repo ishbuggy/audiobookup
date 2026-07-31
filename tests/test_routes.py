@@ -951,9 +951,14 @@ class TestDownloadBookAnnotations:
 
         db_path = tmp_path / "library.db"
         con = sqlite3.connect(db_path)
+        # The naming columns are here because a SPLIT book's sidecar base is
+        # re-rendered from the naming template (its stem is recorded nowhere),
+        # and that render is also what proves the folder's existing sidecars are
+        # this book's rather than a library manager's.
         con.execute(
             "CREATE TABLE audiobooks (asin TEXT PRIMARY KEY, title TEXT, status TEXT, filepath TEXT, "
-            "release_date TEXT, purchase_date TEXT)"
+            "release_date TEXT, purchase_date TEXT, author TEXT, narrator TEXT, publisher TEXT, "
+            "custom_title TEXT, custom_author TEXT, series TEXT, series_sequence TEXT, language TEXT)"
         )
         # The dates carry the conversion.file_timestamp_source stamping (#26):
         # sync stores its "N/A" placeholder when Audible omits a field.
@@ -982,8 +987,8 @@ class TestDownloadBookAnnotations:
             part.write_bytes(b"audio")
         (split_dir / "Bram Stoker - Dracula.jpg").write_bytes(b"cover")
         con.execute(
-            "INSERT INTO audiobooks (asin, title, status, filepath) VALUES (?, ?, ?, ?)",
-            ("B004", "Dracula", "DOWNLOADED", str(split_dir)),
+            "INSERT INTO audiobooks (asin, author, title, status, filepath) VALUES (?, ?, ?, ?, ?)",
+            ("B004", "Bram Stoker", "Dracula", "DOWNLOADED", str(split_dir)),
         )
         con.executemany(
             "INSERT INTO book_files (asin, part_index, filepath) VALUES (?, ?, ?)",

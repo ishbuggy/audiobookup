@@ -98,6 +98,20 @@ _SIDECAR_SUFFIXES = (
     ".voucher",
 )
 
+# The subset of the above that ONLY this app writes at a book's own base name.
+# It is the corroborating evidence _owned_sidecar_base needs: a folder's sidecar
+# files are read backwards to guess a split book's stem, and an external library
+# manager sharing the folder writes files that look exactly like the guess —
+# Audiobookshelf drops a "cover.jpg" (plus a bare "metadata.json", which matches
+# no suffix at all) into every book folder, so a folder whose real sidecars are
+# gone reads back as the base "cover", and the stale sweep then deletes another
+# program's file. A cue sheet, a curated ".metadata.json" and an annotations dump
+# hanging off a NAMED base are ours; cover images, PDFs and raw masters are
+# exactly what other tools also leave lying around, so they corroborate nothing.
+# Deliberately narrow: a suffix missing from here only costs a skipped sweep (a
+# harmless file left behind), while a wrong one costs a user's data.
+_APP_WRITTEN_SIDECAR_SUFFIXES = (".cue", ".metadata.json", ".annotations.json")
+
 # Every audio extension a tracked book's file can carry. Two books at the same
 # base under DIFFERENT audio extensions share one set of sidecars, so any of
 # these occupying our base is a collision — not just the format we happen to be
@@ -184,6 +198,11 @@ def _unique_sidecar_base(folder):
 
     Only the exact suffixes in _SIDECAR_SUFFIXES count, so a chapter PART file is
     never read as a sidecar however closely its name resembles the base.
+
+    This is a GUESS and nothing more: it reads whatever is in the folder, which
+    on a real library includes files other programs put there. Nothing that
+    moves or deletes may call it directly — `_owned_sidecar_base` is the guarded
+    form those callers use.
     """
     try:
         entries = os.listdir(folder)
@@ -206,6 +225,54 @@ def _unique_sidecar_base(folder):
             f"SIDECARS: '{folder}' holds sidecar files under {len(bases)} different names; "
             f"not guessing which of them belongs to the book."
         )
+    return None
+
+
+def _owned_sidecar_base(folder, expected_stem=None):
+    """
+    The sidecar base inside `folder` that this book can be shown to OWN, or None
+    when the folder's one candidate cannot be corroborated.
+
+    `_unique_sidecar_base` infers a base from whatever sidecar-shaped files are
+    lying in the folder, which is the only way to recover a split book's
+    single-file-equivalent stem (it is stored nowhere — see that function). But
+    an inference is not ownership, and every caller here either moves or deletes
+    what it is handed: a book folder shared with an external library manager
+    yields a perfectly unambiguous base that belongs to somebody else, and the
+    stale sweep dutifully deleted that program's cover image.
+
+    So the guess has to be corroborated, by either:
+
+    1. **The name.** `expected_stem` is the single-file-equivalent stem this book
+       renders TODAY (the run's own sidecar stem, the rename's target stem, the
+       stem re-rendered from the naming template). A folder whose base is spelled
+       the same is this book's, and that covers every case where the naming of
+       the stem itself didn't change between runs — the overwhelming majority.
+    2. **The files.** A base carrying at least one _APP_WRITTEN_SIDECAR_SUFFIXES
+       file was written by this app whatever it is called, which is what keeps a
+       renamed book's old sidecars sweepable/movable.
+
+    Neither answered means we cannot prove the files are ours, so we do nothing
+    with them: an abandoned cover left behind in a folder is a mess, deleting a
+    file this app never wrote is data loss.
+    """
+    base = _unique_sidecar_base(folder)
+    if base is None:
+        return None
+
+    if expected_stem and os.path.basename(base) == expected_stem:
+        return base
+
+    # Matched case-insensitively for the same reason the sweeps are: the files
+    # on disk are not always spelled the way the suffix list is ('.Metadata.JSON'
+    # is a real thing a user's filesystem hands back).
+    if any(suffix.lower() in _APP_WRITTEN_SIDECAR_SUFFIXES for suffix in _existing_sidecar_suffixes(base)):
+        return base
+
+    log.info(
+        f"SIDECARS: '{folder}' holds sidecar files at '{os.path.basename(base)}', which is neither this "
+        f"book's name nor a file this app wrote; leaving them alone."
+    )
     return None
 
 
@@ -860,9 +927,17 @@ def sidecar_base_for_tracked_book(asin):
     reserved; anything that meets a book later (the on-demand annotations
     button) has only the DB row, where a split book's `filepath` is its FOLDER
     (D3) and the single-file-equivalent stem is not recorded anywhere. So for a
-    split book the stem is recovered in two steps: the sidecars already in the
-    folder decide it when they are unambiguous, and otherwise it is re-rendered
-    from the naming template exactly as the download would have rendered it.
+    split book the stem is re-rendered from the naming template exactly as the
+    download would have rendered it, and the sidecars already in the folder win
+    over that answer when they are both unambiguous and provably this book's
+    (`_owned_sidecar_base`) — which is what keeps the button writing next to a
+    book whose naming template changed after it was downloaded.
+
+    An unrecognized base is NOT adopted: writing an annotations dump onto a base
+    the folder's other occupant owns would both misfile the dump and make that
+    foreign base look like ours forever after. The rendered answer is used
+    instead, and only when even that can't be worked out does this return None —
+    which the annotations route reports rather than guessing a path (M6).
 
     A single-file book is answered from its own path alone — no naming columns
     are even read — so the common case stays one narrow query.
@@ -877,10 +952,9 @@ def sidecar_base_for_tracked_book(asin):
     if not parts:
         return os.path.splitext(filepath)[0]
 
-    existing_base = _unique_sidecar_base(filepath)
-    if existing_base:
-        return existing_base
-    return _rendered_split_sidecar_base(asin, filepath, parts)
+    rendered_base = _rendered_split_sidecar_base(asin, filepath, parts)
+    expected_stem = os.path.basename(rendered_base) if rendered_base else None
+    return _owned_sidecar_base(filepath, expected_stem) or rendered_base
 
 
 def _rendered_split_sidecar_base(asin, folder, part_paths):
@@ -1344,7 +1418,13 @@ def _rename_split_book(asin, row, settings, part_paths):
         _reserved_output_paths.update(claimed_reservations)
 
     try:
-        old_base = _unique_sidecar_base(current_folder)
+        # Only sidecars this book owns travel with it: `stem` is the name it
+        # renders today, so an unchanged stem corroborates the folder's base
+        # outright and a renamed one is corroborated by the app-written files
+        # hanging off it. An uncorroborated base answers None and simply stays
+        # where it is — the chapter files still move, and a foreign cover is left
+        # in the old folder rather than walked off with.
+        old_base = _owned_sidecar_base(current_folder, stem)
         new_base = os.path.join(new_folder, stem)
         folder_moved = os.path.abspath(new_folder) != os.path.abspath(current_folder)
         base_moved = old_base is not None and os.path.abspath(old_base) != os.path.abspath(new_base)
@@ -2869,12 +2949,18 @@ class BookProcessor:
             # The previous download was SPLIT (D3): its audio is the part set, and
             # `previous_path` names only the folder they sat in. The stem those
             # sidecars used is recorded nowhere, so it is read back off the folder
-            # — and an ambiguous folder answers None, which skips the sweep.
+            # — and a folder that is ambiguous, or whose one candidate can't be
+            # corroborated as this book's, answers None and skips the sweep. That
+            # last part is what keeps an external library manager's own files
+            # (Audiobookshelf writes a "cover.jpg" into every book folder) from
+            # being read as an abandoned base and deleted; the stem this run
+            # rendered for itself is the corroborating name.
             stale_audio = previous_parts
             stale_dirs = {os.path.dirname(path) for path in previous_parts}
             if previous_path:
                 stale_dirs.add(previous_path)
-            old_sidecar_base = _unique_sidecar_base(previous_path) if previous_path else None
+            expected_stem = os.path.basename(self._sidecar_base()) if self.final_output_path else None
+            old_sidecar_base = _owned_sidecar_base(previous_path, expected_stem) if previous_path else None
             old_base = os.path.realpath(old_sidecar_base) if old_sidecar_base else None
         elif previous_path:
             stale_audio = [previous_path]
