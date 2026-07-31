@@ -438,6 +438,21 @@ document.addEventListener("DOMContentLoaded", () => {
             return;
         }
 
+        // Same guard, for the server's minimum length. The field carries minlength="8",
+        // but saving is a button click rather than a form submit, so the browser never
+        // enforces it — a short password would otherwise travel all the way to the
+        // server and come back as a bare 400. Mirrors the mismatch guard above: the
+        // *entire* save is aborted, so nothing reports "Saved!" while the password
+        // was silently rejected.
+        const MIN_PASSWORD_LENGTH = 8; // must match the server's check in routes.py
+        if (newPassword !== "" && newPassword.length < MIN_PASSWORD_LENGTH) {
+            showCustomAlert(
+                `The new password must be at least ${MIN_PASSWORD_LENGTH} characters long. Nothing was saved — please choose a longer password.`,
+                '<i class="fas fa-times-circle" style="color: #dc3545;"></i> Password Too Short',
+            );
+            return;
+        }
+
         // Correctly get the initial username from the data attribute set in the HTML
         const initialUsername = usernameInput.dataset.initialUsername;
 
@@ -501,7 +516,15 @@ document.addEventListener("DOMContentLoaded", () => {
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(settingsToSave),
                 });
-                if (!response.ok) throw new Error("Server returned an error.");
+                if (!response.ok) {
+                    // The server explains *why* it refused in a JSON `error` field
+                    // (a too-short password, a bad value). Surfacing that beats the
+                    // generic message for every settings-save failure, not just this
+                    // one. A non-JSON body (proxy error page, connection reset)
+                    // degrades to {} so the fallback message is still shown.
+                    const errorData = await response.json().catch(() => ({}));
+                    throw new Error(errorData.error || "Server returned an error.");
+                }
 
                 // Handle redirect on credential change
                 if (credentialsHaveChanged) {
