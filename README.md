@@ -28,6 +28,8 @@ Every converted file keeps its chapters, cover art, and metadata intact, and lan
 
 - **Chapter & metadata cleanups** — optional nested-chapter flattening, opening/end-credits merging, title cleanup, custom chapter-title templates, and Audible intro/outro trimming.
 
+- **Split by chapter** — optionally save each chapter as its own fully-tagged file in a folder per book, instead of one single audiobook file, in any of the three output formats.
+
 - **Clips, notes, and bookmarks export** — save the annotations you made in the Audible app as a JSON file alongside the audiobook, automatically with every download or on demand for books you already have.
 
 - **Flexible naming templates** — organize your library with placeholders like `{author}`, `{title}`, `{series}`, `{narrator}`, `{year}`, and more, with separate folder and file templates for advanced control.

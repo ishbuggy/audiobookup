@@ -61,6 +61,8 @@ Three icons next to the controls switch how the library is laid out:
 
 Whichever view you pick is remembered the next time you open the dashboard.
 
+A book saved with [Split by Chapter](configuration.md#chapters--metadata) on carries an "N files" badge in every view, so you can tell a multi-file book apart from a normal one at a glance without opening it.
+
 ![The dashboard in table view, with several rows checked and the bulk action bar visible above the table](images/dashboard-table.png)
 
 ### Bulk selection
@@ -84,14 +86,14 @@ Click any book — anywhere but its Download button — to open its detail view.
 
 - Cover art, title, author, narrator, series, publisher, runtime, release date, date added, language, ASIN, and status.
 - A summary, truncated by default; click **Get Full Summary** to fetch the complete text if a longer one is available.
-- A **File Information** block — path, file type, size, and last modified — once the book is downloaded.
+- A **File Information** block — path, file type, size, and last modified — once the book is downloaded. For a book saved with [Split by Chapter](configuration.md#chapters--metadata) on, this instead shows the book's folder, "N chapter files," and the total size across all of them, with an expandable list of the individual chapter files. If one or more of those files has gone missing from disk, the count reads "N chapter files (M missing)" and the list opens automatically so you can see which ones.
 - An **Error Information** panel, shown only on books whose most recent download or conversion attempt failed, with the details of what went wrong.
 
 ### Actions you can take
 
 - **Change Cover** — upload your own cover image (up to 15 MB) to replace the one pulled from Audible.
 
-- **Download / Force Re-download** — queues the book. A book not yet downloaded gets a plain "Download Now"; an already-downloaded book gets "Force Re-download" behind a confirmation, since it re-converts using your *current* settings and may write a new file rather than overwriting the old one, if your output format or naming template has changed since the original download. That confirmation always asks whether to delete the old file and its companion files once the new one is ready — decline and they're left in place, no matter what — but nothing actually gets deleted unless the new file really did end up somewhere else; if it just overwrites the old one in place, there's nothing to clean up. The [Clean up Replaced Files](configuration.md#downloading) setting skips the question and cleans up automatically instead, including for re-downloads that happen on their own through scheduled processing, where there's no one to ask.
+- **Download / Force Re-download** — queues the book. A book not yet downloaded gets a plain "Download Now"; an already-downloaded book gets "Force Re-download" behind a confirmation, since it re-converts using your *current* settings and may write a new file rather than overwriting the old one, if your output format or naming template has changed since the original download. That confirmation always asks whether to delete the old file and its companion files once the new one is ready — decline and they're left in place, no matter what — but nothing actually gets deleted unless the new file really did end up somewhere else; if it just overwrites the old one in place, there's nothing to clean up. The [Clean up Replaced Files](configuration.md#downloading) setting skips the question and cleans up automatically instead, including for re-downloads that happen on their own through scheduled processing, where there's no one to ask. If [Split by Chapter](configuration.md#chapters--metadata) is toggled on or off since a book was last downloaded, a Force Re-download switches it between a single file and a folder of chapter files to match — the confirmation copy adjusts to describe a set of chapter files rather than one file whenever either side of the change is split.
 
 - **Download Annotations** — shown in the File Information block once a book is downloaded. Fetches your clips, notes, and bookmarks for that title from Audible on demand and saves them as an `.annotations.json` file next to the audiobook — the same file the [Save Annotations](configuration.md#sidecar-files) setting can produce automatically with every download instead. A book with no clips or bookmarks just reports that none were found; that's the normal case, not an error. If the book's audio file has since been moved or deleted outside the app, this instead fails with an error toast, since there's nowhere left to save the sidecar next to it.
 
@@ -124,6 +126,14 @@ Whatever triggers it, a download job downloads the book from Audible, decrypts i
 - How much processing power is used — [configuration.md#job-settings](configuration.md#job-settings)
 
 ![The Job Status panel with a job in progress, showing live per-book progress](images/job-panel-verify.png)
+
+### Split by Chapter output
+
+With [Split by Chapter](configuration.md#chapters--metadata) turned on, a downloaded book looks different on disk: instead of one audiobook file, you get a folder named for the book containing one file per chapter, numbered so they always sort in playback order. Each chapter file is fully tagged on its own — the book's cover art, its own chapter title, and track/track-total numbers — so it plays correctly even outside AudioBookup, in a player that reads folder or track order rather than embedded chapters.
+
+A split book is only ever considered **Downloaded** once every one of its chapter files is confirmed present; a book missing one or more files is flagged **Missing** or **Error** with a "N of M parts" count in its error details, rather than looking deceptively complete. If you move a split book's whole folder somewhere else in your library, the next Sync Library (Deep Sync) still finds it and re-links it, the same way it would for a single-file book moved on its own.
+
+Renaming a split book (via Edit Metadata, a naming-template change, or Bulk Rename) moves its folder to the new name right away, but the individual chapter filenames inside it are left as they were until the book is Force Re-downloaded — at which point they're rebuilt from scratch using your current Chapter File Name Template.
 
 ### Cancelling
 
