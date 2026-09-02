@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Imported books can no longer trigger a doomed request to Audible:** The "Get Full Summary" and "Download Annotations" actions are already hidden for books added by manual import or found by the library scan, since those books have no Audible identity. The app now also refuses those requests outright if one reaches it another way, instead of contacting Audible with a key it can never recognize.
+
 ## [0.24.0] - 2026-07-31
 
 One thing to know going in: chapter boundaries are only as accurate as Audible's own chapter data. On some titles, Audible's chapter markers are off by a few seconds — that's not new, but it's more noticeable with Split by Chapter on, since a small misalignment now falls right at the start or end of a file instead of being buried inside one long track, so you might occasionally hear a word clipped at the very start or end of a chapter file. This is a quirk in Audible's own chapter data, not something splitting introduces, and it isn't fixed in this release.

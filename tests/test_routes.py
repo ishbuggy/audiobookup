@@ -995,6 +995,15 @@ class TestDownloadBookAnnotations:
             "INSERT INTO book_files (asin, part_index, filepath) VALUES (?, ?, ?)",
             [("B004", index, str(part)) for index, part in enumerate(parts)],
         )
+        # Issue #45: a book adopted from disk by the importer. It is DOWNLOADED
+        # with a real file, so only its synthetic key stands between it and a
+        # doomed `audible download -a IMPORT-...` call.
+        imported_file = tmp_path / "library" / "Imported.m4b"
+        imported_file.write_bytes(b"audio")
+        con.execute(
+            "INSERT INTO audiobooks (asin, title, status, filepath) VALUES (?, ?, ?, ?)",
+            ("IMPORT-abc123def456", "Imported", "DOWNLOADED", str(imported_file)),
+        )
         con.commit()
         con.close()
         monkeypatch.setattr(db_module, "DB_FILE", str(db_path))
@@ -1106,6 +1115,17 @@ class TestDownloadBookAnnotations:
         _login_session(client)
         response = client.post("/api/book/NOPE/annotations")
         assert response.status_code == 404
+
+    def test_imported_book_key_is_rejected(self, client, completed_setup, annotated_db):
+        # Issue #45: the UI hides the button for imported books, but the route is
+        # reachable directly, so the synthetic key is refused server-side before
+        # audible-cli is ever invoked.
+        _login_session(client)
+        with mock.patch("audible_downloader.routes.subprocess.run") as run:
+            response = client.post("/api/book/IMPORT-abc123def456/annotations")
+        assert response.status_code == 400
+        assert "error" in response.get_json()
+        run.assert_not_called()
 
     def test_split_book_saves_inside_its_folder_at_the_sidecar_base(self, client, completed_setup, annotated_db):
         # v0.24.0 (D9): the row's filepath is the book's FOLDER, so splitting the
@@ -1456,3 +1476,19 @@ class TestGetBookDetailsSplit:
         assert data["file_mtime_hr"] == "N/A"
         # Nothing on disk means no format to assert either (review M2).
         assert data["file_type"] == "N/A"
+
+
+class TestFetchFullSummary:
+    """Issue #45: POST /api/fetch_full_summary/<asin> must refuse keys that are
+    not real Audible ASINs before it spawns audible-cli."""
+
+    def test_imported_book_key_is_rejected(self, client, completed_setup, book_db):
+        # The detail modal hides the Get Full Summary button for an imported
+        # book, but the route is reachable directly, so the synthetic key is
+        # refused here rather than handed to `audible api /1.0/catalog/...`.
+        _login_session(client)
+        with mock.patch("audible_downloader.routes.subprocess.run") as run:
+            response = client.post("/api/fetch_full_summary/IMPORT-abc123def456")
+        assert response.status_code == 400
+        assert "error" in response.get_json()
+        run.assert_not_called()

@@ -59,7 +59,7 @@ from audible_downloader.db import (
 from audible_downloader.health_check import get_audible_auth_status, perform_audible_auth_check
 
 # Import the manual-import (FR2) helpers
-from audible_downloader.import_logic import IMPORTABLE_EXTS, adopt_upload, import_staging_dir
+from audible_downloader.import_logic import IMPORTABLE_EXTS, adopt_upload, import_staging_dir, is_real_asin
 
 # Import from the job_manager module
 from audible_downloader.job_manager import cancel_active_job, start_new_job
@@ -921,6 +921,14 @@ def clear_log():
 @app.route("/api/fetch_full_summary/<string:asin>", methods=["POST"])
 @login_required
 def fetch_full_summary(asin):
+    # Books adopted from disk by the importer are keyed by a synthetic
+    # IMPORT-<hex> rather than an Audible ASIN, so this call could only ever
+    # fail. The UI hides the button for them, but the route is reachable
+    # directly, so the shape is checked here too before any subprocess is
+    # spawned (issue #45).
+    if not is_real_asin(asin):
+        return jsonify(error="This book has no Audible ASIN, so its summary cannot be fetched."), 400
+
     command = ["audible", "api", f"/1.0/catalog/products/{asin}?response_groups=product_desc,product_extended_attrs"]
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=True, encoding="utf-8")
@@ -997,6 +1005,13 @@ def download_book_annotations(asin):
 
     if row is None:
         return jsonify(error="Book not found."), 404
+
+    # Same gate as the full-summary fetch above: an imported book's synthetic
+    # IMPORT-<hex> key is not an ASIN, so audible-cli can never dump annotations
+    # for it. Checked after the row lookup so an unknown key still reads as 404,
+    # but before any subprocess is spawned (issue #45).
+    if not is_real_asin(asin):
+        return jsonify(error="This book has no Audible ASIN, so its annotations cannot be fetched."), 400
 
     # The sidecar is placed beside the audiobook, so an on-disk file is the real
     # requirement — a NEW/MISSING book has nowhere to put it. Checking the file

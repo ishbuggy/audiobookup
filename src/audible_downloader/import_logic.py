@@ -53,6 +53,25 @@ _ASIN_RE = re.compile(r"[A-Z0-9]{10}")
 # Keys we allow to touch the covers path: our own IMPORT-<hex> and real ASINs.
 _SAFE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
 
+# Prefix of the synthetic keys minted below for adopted books that carry no
+# usable Audible identity. Named here so the places that have to tell a real
+# ASIN from an adopted book's key share one definition.
+IMPORT_KEY_PREFIX = "IMPORT-"
+
+
+def is_real_asin(key):
+    """
+    True when `key` identifies a book Audible actually knows about, False for the
+    synthetic IMPORT-<hex> keys minted below, which no Audible API call can ever
+    resolve. The test is the prefix rather than the stricter `_ASIN_RE` shape:
+    that regex guards untrusted *file tags*, while this guards keys already in
+    the library, and only the importer's own keys are known not to be ASINs.
+    Mirrors `isRealAudibleAsin()` in modal-manager.js; callers about to hand a
+    book's key to audible-cli gate on this first (issue #45).
+    """
+    return isinstance(key, str) and key != "" and not key.startswith(IMPORT_KEY_PREFIX)
+
+
 # Root of the final library. A module constant (not a hard-coded literal spread
 # through the file) so tests can point it at a temp directory.
 DATA_DIR = "/data"
@@ -333,7 +352,7 @@ def adopt_file(filepath, *, allow_reconcile=True, key=None, job_id=None):
     # imported untagged file within /data orphans its old row and adopts the new
     # path under a new key (a duplicate row). Inherent to the no-content-hash
     # design; a tagged file (real ASIN) reconciles correctly across moves.
-    key = key or embedded_asin or f"IMPORT-{uuid.uuid4().hex[:12]}"
+    key = key or embedded_asin or f"{IMPORT_KEY_PREFIX}{uuid.uuid4().hex[:12]}"
     title = meta["title"] or os.path.splitext(os.path.basename(filepath))[0]
     author = meta["author"] or "Unknown Author"
     release_date = meta["release_date"] or "N/A"
@@ -458,7 +477,7 @@ def adopt_upload(staging_path, original_filename, settings):
     if not meta.get("probe_ok", False):
         log.info(f"IMPORT: rejecting unreadable upload '{original_filename}' (ffprobe found no media format).")
         return {"action": "skipped", "reason": "unreadable-media", "key": None, "filepath": None}
-    key = meta["embedded_asin"] or f"IMPORT-{uuid.uuid4().hex[:12]}"
+    key = meta["embedded_asin"] or f"{IMPORT_KEY_PREFIX}{uuid.uuid4().hex[:12]}"
     title = meta["title"] or os.path.splitext(os.path.basename(original_filename))[0] or "Unknown Title"
     author = meta["author"] or "Unknown Author"
 
