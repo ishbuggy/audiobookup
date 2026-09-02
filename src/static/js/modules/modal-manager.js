@@ -133,6 +133,20 @@ function isRealAudibleAsin(asin) {
     return typeof asin === "string" && asin !== "" && !asin.startsWith("IMPORT-");
 }
 
+// Audible returns publisher summaries as HTML ("<b>Samuel L. Jackson</b>…") and
+// we store them verbatim, so rendering one with textContent shows the tags
+// literally (issue #25). Strip them at display time rather than at storage time,
+// so rows that are already in the library are fixed immediately and no sync or
+// migration is needed. DOMParser gives us the tag stripping and the entity
+// decoding (&amp;, &#39;) in one pass, in a detached document that never runs
+// scripts or fetches anything — the server string is NEVER assigned to
+// innerHTML, here or at the call sites, which keep using textContent.
+function stripHtml(text) {
+    if (typeof text !== "string" || text === "") return text;
+    const parsed = new DOMParser().parseFromString(text, "text/html");
+    return (parsed.body.textContent || "").trim();
+}
+
 async function handleBookClick(event) {
     const card = event.target.closest(".book-card");
     if (!card) return; // Not a book card click
@@ -203,7 +217,7 @@ async function handleBookClick(event) {
         }
         document.getElementById("modal-book-date-added").textContent = formattedDateAdded;
         document.getElementById("modal-book-language").textContent = book.language || "N/A";
-        document.getElementById("modal-book-summary").textContent = book.summary || "No summary available.";
+        document.getElementById("modal-book-summary").textContent = stripHtml(book.summary) || "No summary available.";
 
         // File Info. Fresh modal opens start collapsed; re-renders (renames) preserve the user's expansion.
         document.getElementById("modal-file-parts").open = false;
@@ -398,7 +412,7 @@ async function handleFetchFullSummary(event) {
         if (!response.ok) throw new Error(`Server responded with status: ${response.status}`);
         const data = await response.json();
         if (data.success) {
-            document.getElementById("modal-book-summary").textContent = data.summary;
+            document.getElementById("modal-book-summary").textContent = stripHtml(data.summary);
             btn.style.display = "none";
         } else {
             throw new Error(data.error || "Unknown error from server.");
