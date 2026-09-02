@@ -231,13 +231,23 @@ def drop_zero_length_chapters(chapters):
 def strip_unabridged(text):
     """Remove every "(Unabridged)" occurrence (with leading whitespace) and
     collapse any doubled spaces the removal leaves behind. Non-string / falsy
-    input is returned unchanged."""
+    input is returned unchanged.
+
+    A title that is *nothing but* the marker ("(Unabridged)") would strip to the
+    empty string, and the writers downstream disagree about what to do with one:
+    the metadata JSON records the empty title verbatim while the cue sheet falls
+    back to "Unknown Title", so the two sidecars for one book contradict each
+    other (issue #14). The fallback lives here, in the single place every writer
+    goes through: an empty or whitespace-only result means the marker was the
+    whole title, and a title that says "(Unabridged)" beats no title at all.
+    """
     if not text:
         return text
     stripped = _UNABRIDGED_RE.sub("", text)
     # Collapse runs of two-or-more spaces down to one (a mid-string tag removal
     # can leave "Book  Two"); leaves single spaces and other whitespace alone.
-    return re.sub(r" {2,}", " ", stripped)
+    stripped = re.sub(r" {2,}", " ", stripped)
+    return text if not stripped.strip() else stripped
 
 
 def render_chapter_title(template, ch_num, ch_total, ch_title, book_title):

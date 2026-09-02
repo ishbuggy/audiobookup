@@ -2760,10 +2760,10 @@ class TestPlaceSidecarFiles:
             settings["conversion"]["chapters"] = chapters
         return settings
 
-    def _write_titled_sidecars(self, tmp_path, settings, custom_title=None):
+    def _write_titled_sidecars(self, tmp_path, settings, custom_title=None, title="Dracula (Unabridged)"):
         """Run the two title-bearing sidecars and return (json title, cue text)."""
         context = {
-            "book_info": {"title": "Dracula (Unabridged)", "authors": [{"name": "Bram Stoker"}]},
+            "book_info": {"title": title, "authors": [{"name": "Bram Stoker"}]},
             "chapters": [{"title": "One", "start_offset_ms": 0}],
         }
         processor = self._processor(tmp_path, context)
@@ -2792,6 +2792,19 @@ class TestPlaceSidecarFiles:
         json_title, cue = self._write_titled_sidecars(tmp_path, self._title_settings())
         assert json_title == "Dracula (Unabridged)"
         assert 'TITLE "Dracula (Unabridged)"' in cue
+
+    def test_all_marker_title_falls_back_to_the_raw_title(self, tmp_path):
+        # Issue #14: a title that is nothing but the marker strips to "", and the
+        # two writers then disagreed — the JSON recorded the empty string while
+        # the cue sheet substituted "Unknown Title". The strip now falls back to
+        # the raw title, so both sidecars say the same thing.
+        json_title, cue = self._write_titled_sidecars(
+            tmp_path,
+            self._title_settings({"strip_unabridged": True}),
+            title="(Unabridged)",
+        )
+        assert json_title == "(Unabridged)"
+        assert 'TITLE "(Unabridged)"' in cue
 
     def test_custom_title_is_never_stripped(self, tmp_path):
         # A user's explicit title wins outright and is never transformed, even
