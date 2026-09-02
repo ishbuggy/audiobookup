@@ -2,7 +2,7 @@
 
 ## Project Context
 
-**AudioBookup** is a self-hosted, Dockerized web application for managing, downloading, and converting a personal Audible audiobook library into DRM-free `.m4b` files. Python 3.11 (Flask) backend, vanilla JavaScript (ES modules) frontend, SQLite storage, all shipped as a single multi-arch Docker container (`ghcr.io/ishbuggy/audiobookup`). Latest shipped release: **v0.21.0**; **v0.22.0** is in flight (see `PLAN.md`).
+**AudioBookup** is a self-hosted, Dockerized web application for managing, downloading, and converting a personal Audible audiobook library into DRM-free `.m4b` files. Python 3.11 (Flask) backend, vanilla JavaScript (ES modules) frontend, SQLite storage, all shipped as a single multi-arch Docker container (`ghcr.io/ishbuggy/audiobookup`). Latest shipped release: **v0.24.0**; no release is in flight (the last plan is archived at `ref-docs/reports/v0.24.0/v0.24.0-plan.md`).
 
 The project was developed incrementally with chat-based LLM assistance before agentic tooling. It is **stable and in use by real users** — "if it ain't broke, don't fix it" is the house philosophy. Prefer minimal, surgical changes; don't refactor working code without a concrete reason.
 
@@ -62,7 +62,7 @@ Investigation/verification write-ups and per-phase implementation summaries live
 - Every issue carries exactly one org-level owner label (`owner/daniel`, `owner/agent`, `owner/both`) plus a category label. An issue with no milestone is unscheduled; assigning the `vX.Y.Z` milestone schedules it. Close issues when done, with a closing comment; never delete them, closed issues are the historical record.
 - When planning a release, sweep the open issues that carry no milestone for candidates before writing the plan; `ROADMAP.md` defines what each version is, the unscheduled issues hold the raw material.
 - `BACKLOG.md` and `BACKLOG_ARCHIVE.md` are deprecated (migrated to issues #1 to #51 on 2026-09-02, archived copies under `ref-docs/reports/forgejo-migration/`). Never recreate them; if one ever appears, move each item into an issue and delete the file. Older code comments and test docstrings that say "backlog #N" mean issue #N.
-- The `forgejo` remote (`homelab/audiobookup`, private) carries the issues and a copy of the code; `origin` (GitHub) remains the public repo and the release trigger. Pushing to either remote still happens only on explicit request.
+- The `forgejo` remote (`homelab/audiobookup`, private) carries the issues and a copy of the code; `origin` (GitHub) remains the public repo and the release trigger. The two are kept in sync: `origin` is configured with both push URLs, so `git push origin ...` lands on GitHub and Forgejo in one step, and `fixes #N` in a pushed commit auto-closes the Forgejo issue. Never push to one remote alone.
 
 ### Context hygiene
 - After a commit that closes out a coherent unit of work (a completed piece from PLAN.md, a full review-and-fix cycle, a standalone doc edit), explicitly suggest running /clear before starting unrelated work — don't just move on silently.
@@ -132,7 +132,7 @@ Investigation/verification write-ups and per-phase implementation summaries live
 ### Commit strategy
 - Commit at natural checkpoints — each coherent, working, reviewable unit — rather than one big commit per feature. Small commits keep rollback useful; the review fix pass gets its own commit so it can be reverted independently.
 - Stage the specific tracked files you changed, never the whole tree — no `git add -A`/`git add .`/`git commit -a`, which risk sweeping in ignored working files. A `PreToolUse` hook (`.claude/hooks/git-add-guard.sh`) blocks whole-tree adds, `git add -f`, and anything touching `ref-docs/`.
-- **Never push without being explicitly told to.** Commit locally freely; push only on request.
+- **Never push without being explicitly told to.** Commit locally freely; push only on request. When you do push, push `origin`, which delivers to GitHub and Forgejo together (see "Task tracker").
 - Commits are authored as **ishbuggy** (the repo's configured git user) only — no Claude co-author trailer, no AI attribution lines in commit messages.
 
 ### Release process (only when explicitly requested)
