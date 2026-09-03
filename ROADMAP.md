@@ -19,13 +19,15 @@ High-level direction for the project: what's planned, why, and roughly when. Thi
 | v0.22.0 | Libation-parity download & processing options + settings IA | Shipped (2026-07-29) |
 | v0.23.0 | Quality release: full backlog sweep + clips/notes/bookmarks export | Shipped (2026-07-30) |
 | v0.24.0 | Split books into per-chapter files | Shipped (2026-07-31) |
+| v0.24.1 | Patch: summary rendering, all-marker titles, import-key route guards | Shipped (2026-09-03) |
 | v0.25.0 | Full Libation `<tag>` naming engine + chapter-timestamp parity | Planned |
 | v0.26.0 | Multiple Audible accounts / profiles | Planned |
 | v0.27.0 | Faster / event-driven library sync | Planned |
 
 The v0.19 backend and v0.20 frontend tracks were developed backend-first and released together as **v0.20.0**; **v0.21.0** followed with container-image hardening. **v0.22.0** shipped 2026-07-29, driven by a settings-parity review of Libation (see `ref-docs/reports/v0.22.0/` and `ref-docs/libation/`). A **documentation pass** followed on 2026-07-30 (no version bump; it ships with the next release's notes): the README was split into a screenshot-illustrated `docs/` folder, and a docs sweep is now a standing part of every release plan. **v0.23.0** shipped 2026-07-30 (plan and reports archived in `ref-docs/reports/v0.23.0/`); the headline sequence through v0.27.0 was laid out the same day it was scoped — see "Planned headline features" below. **v0.24.0** shipped 2026-07-31 (per-chapter file
 splitting; plan, per-phase reports, and the double release review are archived in
-`ref-docs/reports/v0.24.0/`). **v0.25.0** (the Libation `<tag>` naming engine + chapter-timestamp
+`ref-docs/reports/v0.24.0/`). **v0.24.1** shipped 2026-09-03, a patch release of three fixes found after v0.24.0 (no plan;
+see the changelog). **v0.25.0** (the Libation `<tag>` naming engine + chapter-timestamp
 parity) is next up.
 
 ---

@@ -7,10 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-09-03
+
 ### Fixed
 - **Book summaries no longer show raw HTML tags:** Audible sends some publisher summaries with formatting markup in them, which the detail view displayed literally, so a summary could read `<b>Samuel L. Jackson</b> narrates...`. Summaries are now shown as plain text, including for books already in your library.
 - **A book titled only "(Unabridged)" keeps its title:** With the "(Unabridged)" cleanup turned on, a book whose whole title was just that marker ended up with no title at all — and its two companion files then disagreed, one leaving the title blank and the other calling it "Unknown Title". The cleanup now keeps the original title when removing the marker would leave nothing behind.
-- **Imported books can no longer trigger a doomed request to Audible:** The "Get Full Summary" and "Download Annotations" actions are already hidden for books added by manual import or found by the library scan, since those books have no Audible identity. The app now also refuses those requests outright if one reaches it another way, instead of contacting Audible with a key it can never recognize.
+- **"Get Full Summary" and "Download Annotations" refuse imported books:** Both actions are already hidden for books added by manual import or found by the library scan, since those books have no Audible identity. The app now also refuses those requests outright if one reaches it another way, instead of contacting Audible with a key it can never recognize.
 
 ## [0.24.0] - 2026-07-31
 
