@@ -436,6 +436,11 @@ class TestStripUnabridged:
             ("No tag here", "No tag here"),
             ("", ""),
             (None, None),
+            # Issue #14: a title that is nothing but the marker keeps its raw title
+            # (trimmed) rather than stripping to nothing.
+            ("(Unabridged)", "(Unabridged)"),
+            ("  (Unabridged)  ", "(Unabridged)"),
+            ("(Unabridged) (Unabridged)", "(Unabridged) (Unabridged)"),
         ],
     )
     def test_variants(self, text, expected):

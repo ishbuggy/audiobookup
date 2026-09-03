@@ -144,7 +144,13 @@ function isRealAudibleAsin(asin) {
 function stripHtml(text) {
     if (typeof text !== "string" || text === "") return text;
     const parsed = new DOMParser().parseFromString(text, "text/html");
-    return (parsed.body.textContent || "").trim();
+    // textContent joins text nodes with no separator, so "<p>a</p><p>b</p>" would
+    // read "ab". Turn line breaks and block boundaries into newlines first (the
+    // summary element renders with white-space: pre-wrap, so they show as real
+    // breaks), then collapse any run of blank lines the markup left behind.
+    parsed.body.querySelectorAll("br").forEach((el) => el.replaceWith("\n"));
+    parsed.body.querySelectorAll("p, div, li, h1, h2, h3, h4, h5, h6").forEach((el) => el.append("\n"));
+    return (parsed.body.textContent || "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 async function handleBookClick(event) {

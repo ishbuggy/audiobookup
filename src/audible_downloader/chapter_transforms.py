@@ -247,7 +247,7 @@ def strip_unabridged(text):
     # Collapse runs of two-or-more spaces down to one (a mid-string tag removal
     # can leave "Book  Two"); leaves single spaces and other whitespace alone.
     stripped = re.sub(r" {2,}", " ", stripped)
-    return text if not stripped.strip() else stripped
+    return text.strip() if not stripped.strip() else stripped
 
 
 def render_chapter_title(template, ch_num, ch_total, ch_title, book_title):
