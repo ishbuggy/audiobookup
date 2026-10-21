@@ -13,3 +13,6 @@ pexpect==4.9.0
 ptyprocess==0.7.0
 requests==2.33.0
 Werkzeug==3.1.6
+# certifi is transitive (requests, audible-cli -> httpx) and would float anyway; the floor
+# stops a rebuild regressing below the bundle that dropped the compromised eMudhra CA (2026-10-17).
+certifi>=2026.10.19

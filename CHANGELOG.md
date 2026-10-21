@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Refreshed list of trusted certificates:** The signing key of a certificate authority (eMudhra) was compromised in October 2026. An older image could have been fooled into trusting a forged certificate, which would let an attacker on your network path impersonate Audible to the app and see your sign-in and library traffic. This release ships certificate lists that no longer trust the compromised authority. Everyone should pull the new image.
+
 ## [0.24.1] - 2026-09-03
 
 ### Fixed
