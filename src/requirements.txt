@@ -13,6 +13,8 @@ pexpect==4.9.0
 ptyprocess==0.7.0
 requests==2.33.0
 Werkzeug==3.1.6
-# certifi is transitive (requests, audible-cli -> httpx) and would float anyway; the floor
-# stops a rebuild regressing below the bundle that dropped the compromised eMudhra CA (2026-10-17).
+# Deliberate exception to the exact-pin rule above: certifi is transitive (requests;
+# audible-cli -> audible -> httpx/httpcore) and floats anyway. The floor stops a rebuild
+# regressing below the bundle that dropped the root above the compromised eMudhra
+# intermediate (disclosed 2026-10-17). Keep it a floor; don't normalise it to ==.
 certifi>=2026.10.19

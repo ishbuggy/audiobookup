@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
-- **Refreshed list of trusted certificates:** The signing key of a certificate authority (eMudhra) was compromised in October 2026. An older image could have been fooled into trusting a forged certificate, which would let an attacker on your network path impersonate Audible to the app and see your sign-in and library traffic. This release ships certificate lists that no longer trust the compromised authority. Everyone should pull the new image.
+- **Refreshed list of trusted certificates:** In October 2026 it was disclosed that the signing key of an intermediate certificate authority (eMudhra) had been compromised. Images up to and including 0.24.1 still trust the root it was issued under, so an attacker on your network path could have used a forged certificate to impersonate Audible to the app, reading or altering its traffic, including your Audible sign-in tokens. This release removes that root from the image's trusted certificate lists. Update as usual (`docker compose pull`, then `docker compose up -d`); if you build the image yourself, rebuild with `--no-cache` so the refreshed lists are picked up.
 
 ## [0.24.1] - 2026-09-03
 
