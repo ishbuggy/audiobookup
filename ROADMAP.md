@@ -21,6 +21,7 @@ High-level direction for the project: what's planned, why, and roughly when. Thi
 | v0.24.0 | Split books into per-chapter files | Shipped (2026-07-31) |
 | v0.24.1 | Patch: summary rendering, all-marker titles, import-key route guards | Shipped (2026-09-03) |
 | v0.24.2 | Hotfix: refreshed CA trust stores (eMudhra CA compromise) | Shipped (2026-10-22) |
+| v0.24.3 | Hotfix: patched Brotli decoder (Broccoli2Shell, CVE-2026-111497) | In progress |
 | v0.25.0 | Full Libation `<tag>` naming engine + chapter-timestamp parity | Planned |
 | v0.26.0 | Multiple Audible accounts / profiles | Planned |
 | v0.27.0 | Faster / event-driven library sync | Planned |
@@ -30,7 +31,9 @@ splitting; plan, per-phase reports, and the double release review are archived i
 `ref-docs/reports/v0.24.0/`). **v0.24.1** shipped 2026-09-03, a patch release of three fixes found after v0.24.0 (no plan;
 see the changelog). **v0.24.2** shipped 2026-10-22, a security hotfix: an image rebuild that picks up
 the fixed CA bundles after the eMudhra intermediate-CA compromise, with a certifi floor so the fix can't
-regress (issue #60). **v0.25.0** (the Libation `<tag>` naming engine + chapter-timestamp
+regress (issue #60). **v0.24.3** is a security hotfix opened 2026-10-25: an image rebuild that picks up
+Debian's patched Brotli decoder (Broccoli2Shell, CVE-2026-111497), with a build-time floor check so the
+fix can't regress (issue #64). **v0.25.0** (the Libation `<tag>` naming engine + chapter-timestamp
 parity) is next up.
 
 ---
