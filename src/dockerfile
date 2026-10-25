@@ -58,18 +58,27 @@ RUN set -eux; \
   gosu nobody true
 
 # Layer 2c: libbrotli1 floor (Broccoli2Shell, CVE-2026-111497)
-# The Brotli decoder (pulled in by curl/freetype/ffmpeg) had an out-of-bounds
-# write, fixed in Debian's 1.1.0-2+deb13u1. Debian kept the upstream version, so
-# check the full package revision. A plain rebuild picks the fix up through the
-# apt-get upgrade in Layer 2. This fails the build instead of shipping the old
-# decoder, e.g. when a cached Layer 2 predates the fix (rebuild with --no-cache).
-# A floor, not an exact pin, so later Debian revisions still pass.
+# The system Brotli decoder (a dependency of libcurl, libfreetype and libjxl,
+# so ffmpeg loads it too) had an out-of-bounds write, fixed in Debian's
+# 1.1.0-2+deb13u1. Debian kept the upstream version, so check the full package
+# revision. The slim base doesn't carry libbrotli1; Layer 2's apt-get install
+# brings it in as a dependency, at the current (fixed) revision on a fresh
+# build. This fails the build instead of shipping the old decoder, e.g. when a
+# cached Layer 2 predates the fix (rebuild with --pull --no-cache). A floor, not
+# an exact pin, so later Debian revisions still pass. Every installed
+# architecture is checked, one version per line.
 RUN set -eu; \
-  brotliVersion="$(dpkg-query -W -f='${Version}' libbrotli1)"; \
-  if ! dpkg --compare-versions "$brotliVersion" ge 1.1.0-2+deb13u1; then \
-    echo "libbrotli1 $brotliVersion predates the CVE-2026-111497 fix (1.1.0-2+deb13u1); rebuild with --pull --no-cache" >&2; \
+  brotliVersions="$(dpkg-query -W -f='${Version}\n' libbrotli1 2>/dev/null || true)"; \
+  if [ -z "$brotliVersions" ]; then \
+    echo "libbrotli1 is not installed; if nothing needs it any more, drop this CVE-2026-111497 check" >&2; \
     exit 1; \
-  fi
+  fi; \
+  for brotliVersion in $brotliVersions; do \
+    if ! dpkg --compare-versions "$brotliVersion" ge 1.1.0-2+deb13u1; then \
+      echo "libbrotli1 $brotliVersion predates the CVE-2026-111497 fix (1.1.0-2+deb13u1); rebuild with --pull --no-cache" >&2; \
+      exit 1; \
+    fi; \
+  done
 
 # Layer 3: Create a non-root user
 RUN useradd --system --create-home appuser

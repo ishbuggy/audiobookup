@@ -8,7 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
-- **Fixed compression library (Broccoli2Shell):** In October 2026 a serious flaw was disclosed in Brotli, a widely used compression library that the image's download and audio tools rely on. A specially crafted compressed file or server response could crash a program using it, or let an attacker take it over. Images up to and including 0.24.2 carry the affected version; this release ships the fixed one, and the build now refuses to produce an image without it. Update as usual (`docker compose pull`, then `docker compose up -d`); if you build the image yourself, rebuild with `--pull --no-cache` so the fixed library is picked up.
+- **Fixed compression library (Broccoli2Shell):** In October 2026 a serious flaw was disclosed in Brotli, a widely used compression library. A specially crafted compressed file could crash a program decoding it, or let an attacker take it over. The image's system copy of Brotli is used by its font, image and network libraries; images up to and including 0.24.2 carry the affected version. The app's own Audible downloads never decode Brotli, so the practical risk was low, but this release ships the fixed version, and the build now refuses to produce an image without it. One more copy, bundled inside an image library the app depends on, is not fixed upstream yet; it is only used for loading fonts, which the app never does, and it will be updated once a fix is released. Update as usual (`docker compose pull`, then `docker compose up -d`); if you build the image yourself, rebuild with `--pull --no-cache` so the fixed library is picked up.
+
+### Changed
+- **Updated bundled components:** Rebuilding the image also brings newer versions of a few components bundled inside it, including the library the app uses to talk to Audible. Nothing changes in how the app behaves or in your settings.
 
 ## [0.24.2] - 2026-10-22
 
