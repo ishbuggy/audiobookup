@@ -7,11 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.3] - 2026-10-25
+
 ### Security
-- **Fixed compression library (Broccoli2Shell):** In October 2026 a serious flaw was disclosed in Brotli, a widely used compression library. A specially crafted compressed file could crash a program decoding it, or let an attacker take it over. The image's system copy of Brotli is used by its font, image and network libraries; images up to and including 0.24.2 carry the affected version. The app's own Audible downloads never decode Brotli, so the practical risk was low, but this release ships the fixed version, and the build now refuses to produce an image without it. One more copy, bundled inside an image library the app depends on, is not fixed upstream yet; it is only used for loading fonts, which the app never does, and it will be updated once a fix is released. Update as usual (`docker compose pull`, then `docker compose up -d`); if you build the image yourself, rebuild with `--pull --no-cache` so the fixed library is picked up.
+- **Fixed compression library (Broccoli2Shell):** In October 2026 a serious flaw (CVE-2026-111497) was disclosed in Brotli, a widely used compression library. A specially crafted compressed file could crash a program decoding it, or let an attacker take it over. The image's system copy of Brotli is used by its font, image and network libraries; images up to and including 0.24.2 carry the affected version. The app's own Audible downloads never decode Brotli, so the practical risk was low, but this release ships the fixed version, and the build now refuses to produce an image without it. One more copy, bundled inside an image library the app depends on, is not fixed upstream yet; it is only used for loading fonts, which the app never does, and it will be updated once a fix is released. Update as usual (`docker compose pull`, then `docker compose up -d`); if you build the image yourself, rebuild with `--pull --no-cache` so the fixed library is picked up.
 
 ### Changed
-- **Updated bundled components:** Rebuilding the image also brings newer versions of a few components bundled inside it, including the library the app uses to talk to Audible. Nothing changes in how the app behaves or in your settings.
+- **Updated bundled components:** Rebuilding the image also brings newer versions of a few components bundled inside it, including the library the app uses to talk to Audible. Existing setups keep working exactly as before. A new setup now registers with Audible as a current version of the Audible iPhone app, which avoids a problem where some newly registered devices were refused their first download. Nothing changes in your settings.
 
 ## [0.24.2] - 2026-10-22
 
